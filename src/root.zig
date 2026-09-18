@@ -64,8 +64,6 @@ pub const transform = @import("transform.zig");
 pub const shapes = @import("shapes.zig");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
-/// Entity references inside an attribute value.
-pub const entities = @import("entities.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
 pub const path = @import("path.zig");
 /// SVG's elliptical arc command, as cubic Béziers.
@@ -114,7 +112,6 @@ test {
     _ = transform;
     _ = shapes;
     _ = length;
-    _ = entities;
     _ = path;
     _ = arc;
     _ = raster;

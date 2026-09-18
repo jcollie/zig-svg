@@ -8,10 +8,13 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const z2d_dep = b.dependency("z2d", .{ .target = target, .optimize = optimize });
-    const zxml_dep = b.dependency("zxml", .{ .target = target, .optimize = optimize });
+    const ztree_dep = b.dependency("ztree", .{ .target = target, .optimize = optimize });
 
     const z2d = z2d_dep.module("z2d");
-    const zxml = zxml_dep.module("zxml");
+    // ztree rather than zxml directly: the reader needs random access to
+    // resolve a `#id` reference, which a pull parser cannot give it. See
+    // src/document.zig.
+    const ztree = ztree_dep.module("ztree");
 
     // One module. The reader, the path grammar, the rasterizer and the sandbox
     // live together because Zig only analyses what is referenced: a program
@@ -23,7 +26,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "z2d", .module = z2d },
-            .{ .name = "zxml", .module = zxml },
+            .{ .name = "ztree", .module = ztree },
         },
     });
 

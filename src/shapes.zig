@@ -38,11 +38,10 @@ const testing = std.testing;
 const z2d = @import("z2d");
 
 const arc = @import("arc.zig");
-const entities = @import("entities.zig");
 const path = @import("path.zig");
 
-pub const Error = path.Error || entities.Error;
-pub const BuildError = path.BuildError || entities.Error;
+pub const Error = path.Error;
+pub const BuildError = path.BuildError;
 
 /// An axis-aligned rectangle, with optionally rounded corners.
 pub const Rect = struct {
@@ -101,25 +100,13 @@ pub fn build(
     opts: path.Options,
 ) BuildError!void {
     switch (geometry) {
-        // A `d` and a `points` are borrowed from the source with their entity
-        // references still in them, because they are the two attribute values
-        // whose length nothing bounds. This is where there is an allocator to
-        // resolve one with, and where the overwhelmingly common case -- no
-        // reference at all -- costs nothing: `decodeLong` answers null and the
-        // original slice is parsed in place.
-        .path => |d| {
-            const decoded = try entities.decodeLong(alloc, d);
-            defer if (decoded) |owned| alloc.free(owned);
-            return path.build(p, alloc, decoded orelse d, opts);
-        },
+        // A `d` arrives with its entity references already resolved: ztree
+        // decodes every attribute value into the tree's arena as it parses.
+        .path => |d| return path.build(p, alloc, d, opts),
         .rect => |r| return buildRect(p, alloc, r),
         .ellipse => |e| return buildEllipse(p, alloc, e),
         .line => |l| return buildLine(p, alloc, l, opts),
-        .poly => |poly| {
-            const decoded = try entities.decodeLong(alloc, poly.points);
-            defer if (decoded) |owned| alloc.free(owned);
-            return buildPoly(p, alloc, decoded orelse poly.points, poly.closed, opts);
-        },
+        .poly => |poly| return buildPoly(p, alloc, poly.points, poly.closed, opts),
     }
 }
 

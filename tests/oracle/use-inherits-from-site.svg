@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><defs><rect id="sq" width="8" height="8"/></defs><g fill="seagreen"><use href="#sq" x="2" y="2"/></g><g fill="goldenrod"><use href="#sq" x="14" y="2"/></g><use href="#sq" x="2" y="14" fill="indigo"/></svg>

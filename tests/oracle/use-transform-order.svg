@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><defs><rect id="r" width="8" height="4" fill="crimson"/></defs><use href="#r" x="4" y="4" transform="rotate(20)"/><use href="#r" x="4" y="20" transform="scale(2,1)"/></svg>

@@ -12,6 +12,10 @@
             .url = "git+https://git.jcollie.dev/jeff/zxml.git#cfbda2e23d78d55ce0e4b61e8ce8f1aee64a57f4",
             .hash = "zxml-0.0.0-JUQ_3ZzFAwBbkY9YvELURU5yFM7cLH59_W9TJaQy7Tvn",
         },
+        .ztree = .{
+            .url = "git+https://git.jcollie.dev/jeff/ztree.git#21a82ffda399367767663b0432bb716d2b620f25",
+            .hash = "ztree-0.0.0-Rb9y2UksAwAIl9qdJcWF_hQJ4OByzMagmRh0rxr14Oel",
+        },
     },
     .paths = .{
         "build.zig",

@@ -33,14 +33,22 @@ A zero or negative width, height or radius draws nothing and is not an error —
 `<rect/>` and `<circle r="-2"/>` are both simply empty, which is what resvg
 does. A `stroke-width` of zero or less disables the stroke the same way.
 
-An entity reference in an attribute value is resolved, so `d="M0 0L1 1&#90;"`
-closes its subpath rather than reaching the path parser as five literal
-characters. Only `&` triggers a decode: XML's attribute normalization would
-also turn a literal tab or newline into a space, and every grammar here already
-treats those as whitespace — so the multi-line `d` that most real documents
-carry is still parsed in place, with nothing copied. A reference the document
-never declared is `error.UnknownEntity` rather than text that survives into a
-parser which will call it something less helpful.
+`<use>` draws what it names, from anywhere in the document — including from
+*after* the `<use>` itself, and through a chain of other `<use>` elements. It
+takes its paint from where it stands rather than from where its target was
+written, as §5.6 says, and folds its `x` and `y` into the transform. A
+reference that names a file rather than a fragment is refused: fetching one is
+exactly what being sans-I/O rules out, and it is the reason the renderer can be
+put in a process that cannot open anything.
+
+A `<use>` that draws something containing itself is `error.RecursiveUse`,
+caught by noticing the target is already open rather than by waiting for a
+depth limit — so it is reported the moment the loop closes, and the same target
+used twice by two siblings is not mistaken for one.
+
+An element in a **foreign namespace** is passed over rather than refused. An
+Inkscape file's `<sodipodi:namedview>` is not SVG content and nothing is meant
+to draw it; refusing it would refuse the file.
 
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
@@ -115,6 +123,8 @@ short of the specification.
 | `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>` | yes |
 | `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
+| `<use>`, `<defs>` | yes — `href` and `xlink:href`, forward references, chains |
+| A foreign namespace | passed over, not refused — an Inkscape file reads |
 | `transform` | all six functions, on `<svg>`, `<g>` and any shape |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
@@ -124,10 +134,10 @@ short of the specification.
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
 | `viewBox`, `width`, `height` | yes — the document's own size is what it is drawn at |
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
-| Entity references in attribute values | yes — `&#90;`, `&#x5A;`, and the five predefined names |
+| Entity references in attribute values | yes, resolved as the document is parsed |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
-| Nesting depth | `<g>` up to `document.max_container_depth` (64), then refused |
+| Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
 | `style`, gradients, text, `<use>`, CSS | **no** |
 | `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
@@ -221,6 +231,27 @@ whole document rather than for each shape — per shape it would bound nothing,
 since ten thousand `<path>` elements each just under the limit is the same
 denial of service written out longhand. `max_shapes` covers what the node
 budget cannot: an empty `d` produces no nodes and still costs a fill.
+
+## A tree, not a stream
+
+The document is read into a tree with
+[ztree](https://git.jcollie.dev/jeff/ztree) rather than walked with a pull
+parser. `<use href="#a">` is why: `#a` may be defined anywhere, including after
+the `<use>` that names it, and `url(#gradient)` will want the same thing again.
+A stream cannot answer that without either re-scanning the document per lookup
+or carrying a stack of suspended parsers.
+
+Three things come with it beyond the reference itself. Entity references are
+resolved as the document is parsed, so nothing downstream thinks about `&#90;`.
+Names are expanded, which is what lets a foreign-namespace element be *ignored*
+rather than refused. And the walk's stack is small — a frame is a node id, an
+index and the inherited state, so suspending one subtree to draw another costs
+a couple of hundred bytes rather than a whole parser.
+
+What it costs is that reading allocates and the `Document` owns what it read:
+`read` takes an allocator and the result must be `deinit`ed. The source may be
+freed the moment `read` returns, because every string in the tree is a copy —
+which is a simpler lifetime than the borrowed slices it replaced.
 
 ## Sandboxing
 
@@ -351,15 +382,12 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
-a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
-the classic denial of service.
+**1. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+`gradientUnits`, `spreadMethod`. z2d has gradients, and `fill="url(#g)"` is an
+id reference like `<use>`'s, which the tree already resolves — so the work is
+the coordinate systems and `<stop>`.
 
-**2. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
-`gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
-systems.
-
-**3. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**2. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -368,7 +396,7 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**4. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
+**3. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in
 hand, the `em` and `ex` that are refused today. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
@@ -399,7 +427,7 @@ which no project holding a fuzz test can build a test executable at all;
 | | |
 | --- | --- |
 | [z2d](https://github.com/vancluever/z2d) | the rasterizer, and the surfaces this draws onto |
-| [zxml](https://git.jcollie.dev/jeff/zxml) | the XML pull parser, which allocates nothing for a document with no DTD |
+| [ztree](https://git.jcollie.dev/jeff/ztree) | the XML document tree, built on [zxml](https://git.jcollie.dev/jeff/zxml) |
 
 Both are fetched by the Zig package manager. Nix builds fetch them through
 `build.zig.zon.nix`, generated by [zon2nix](https://git.jcollie.dev/jeff/zon2nix):
@@ -429,8 +457,12 @@ Kept in the Zotero collection **zig-svg**.
   the surfaces this draws onto. Its transformation is applied when a point is
   added rather than when the path is filled, which is why the viewBox scale
   goes on `Path.transformation` before the first `moveTo`.
-- Ollie, J. C. *zxml*. <https://git.jcollie.dev/jeff/zxml> — the XML pull
-  parser, which allocates nothing for a document with no DTD.
+- Ollie, J. C. *ztree*. <https://git.jcollie.dev/jeff/ztree> — the XML document
+  tree this reads a document into. A pull parser is the right shape for reading
+  a document once and the wrong shape for `<use href="#a">`, where `#a` may be
+  defined anywhere including after the reference that names it.
+- Ollie, J. C. *zxml*. <https://git.jcollie.dev/jeff/zxml> — the pull parser
+  ztree is built on.
 - Pictogrammers. *Material Design Icons*. <https://pictogrammers.com/library/mdi/>
   — the 7,447-icon set that decided what this reader had to implement: every
   path command, and no other element.

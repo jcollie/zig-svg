@@ -87,11 +87,12 @@ pub fn main(init: std.process.Init) !void {
         //
         // Scaled up so the longer side is `long_edge`, because a 16-unit
         // document compared at 16 pixels is comparing antialiasing.
-        const doc = svg.read(src) catch |err| {
+        var doc = svg.read(gpa, src) catch |err| {
             try log.print("{s}: {t}\n", .{ entry.name, err });
             refused += 1;
             continue;
         };
+        defer doc.deinit();
         const scale = @as(f64, @floatFromInt(long_edge)) / @max(doc.width, doc.height);
         const width = atLeastOne(doc.width * scale);
         const height = atLeastOne(doc.height * scale);

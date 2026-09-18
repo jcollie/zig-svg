@@ -23,7 +23,6 @@ const z2d = @import("z2d");
 
 const color = @import("color.zig");
 const document = @import("document.zig");
-const entities = @import("entities.zig");
 const path = @import("path.zig");
 const transform = @import("transform.zig");
 
@@ -183,7 +182,8 @@ pub const Box = struct {
 ///
 /// The caller owns the surface and releases it with `z2d.Surface.deinit`.
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface {
-    const doc = try document.read(src);
+    var doc = try document.read(gpa, src);
+    defer doc.deinit();
 
     // The document's own size, which is what `width` and `height` say when it
     // has them and the `viewBox`'s extent when it does not.
@@ -197,7 +197,7 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface 
         try z2d.Surface.init(opts.surface_type, gpa, @intCast(width), @intCast(height));
     errdefer surface.deinit(gpa);
 
-    try drawDocument(gpa, &surface, doc, .{
+    try drawDocument(gpa, &surface, &doc, .{
         .width = @floatFromInt(width),
         .height = @floatFromInt(height),
     }, opts);
@@ -217,7 +217,9 @@ pub fn draw(
     box: Box,
     opts: Options,
 ) Error!void {
-    return drawDocument(gpa, surface, try document.read(src), box, opts);
+    var doc = try document.read(gpa, src);
+    defer doc.deinit();
+    return drawDocument(gpa, surface, &doc, box, opts);
 }
 
 /// The half of `draw` that has the document already, so that `render` does not
@@ -234,7 +236,7 @@ pub fn draw(
 fn drawDocument(
     gpa: Allocator,
     surface: *z2d.Surface,
-    doc: document.Document,
+    doc: *const document.Document,
     box: Box,
     opts: Options,
 ) Error!void {
@@ -500,13 +502,7 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
 /// An odd count is repeated, so `4` dashes four on and four off. That is the
 /// specification rather than a convenience, and z2d does not do it for us.
 fn readDashes(raw: []const u8, out: *[max_dashes]f64) Error!usize {
-    // The third of the three values the reader borrows rather than parses, so
-    // this is where its entity references are resolved. A dash list is short
-    // by its nature -- `max_dashes` lengths at most -- so a buffer on the
-    // stack is enough and no allocator is needed. See `entities.zig`.
-    var scratch: [entities.max_short_value]u8 = undefined;
-    const decoded = try entities.decodeShort(raw, &scratch);
-    const trimmed = std.mem.trim(u8, decoded, " \t\r\n");
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "none")) return 0;
 
     var s: path.Scanner = .{ .src = trimmed };
@@ -1121,8 +1117,9 @@ test "a shape with no stroke named is not stroked" {
     // lines in a picture the document does not have.
     var surface = try render(gpa, square(""), .{ .width = 20, .height = 20 });
     defer surface.deinit(gpa);
-    const shape = try document.read(square(""));
-    var it = shape.paths();
+    var doc = try document.read(gpa, square(""));
+    defer doc.deinit();
+    var it = doc.paths();
     const only = (try it.next()).?;
     try testing.expectEqual(@as(?color.Paint, null), only.stroke);
     try testing.expectEqual(@as(?Stroke, null), try resolveStroke(only, .{}));

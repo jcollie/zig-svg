@@ -1,37 +1,50 @@
 // SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
 // SPDX-License-Identifier: MIT
 
-//! Reading an `<svg>` element far enough to draw what is in it.
+//! Reading an SVG document far enough to draw what is in it.
 //!
-//! What this understands is one `<svg>` carrying a `viewBox` and any number of
-//! `<path>` elements carrying a `d`, each with its own colour:
+//! One `<svg>`, any number of shapes inside it, grouped by `<g>`, referenced
+//! by `<use>`, each with its own paint and transform.
 //!
-//! ```
-//! <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3,9H7L12,4V20L7,15H3V9Z" fill="#c00" /></svg>
-//! ```
+//! ## A tree, not a stream
 //!
-//! Which is every one of the 7,447 Material Design Icons, a great many other
-//! icon sets, and a long way short of SVG. There is no `<g>`, no `transform`,
-//! no `style`, no gradient and no stroke.
+//! This used to walk the document with [zxml](https://git.jcollie.dev/jeff/zxml),
+//! a pull parser, which is the right shape for reading a document once and the
+//! wrong shape for anything that has to look somewhere else in it.
+//! `<use href="#a">` is exactly that: `#a` may be defined anywhere, including
+//! *after* the `<use>` that names it, and `url(#gradient)` will want the same
+//! thing again.
 //!
-//! ## Groups
+//! So the document is read into a tree with
+//! [ztree](https://git.jcollie.dev/jeff/ztree) and walked from there. Three
+//! things fall out of that beyond the reference itself:
 //!
-//! `<g>` nests: it carries the same presentation attributes a shape does and
-//! passes them down, and it carries a `transform` that every descendant is
-//! drawn under. The root `<svg>` is a container in exactly the same way, so
-//! there is one code path rather than a special case for the root -- the only
-//! thing that makes the root special is that it is where the `viewBox` is.
+//! * **Entity references are already resolved.** ztree decodes every attribute
+//!   value into its arena as it parses, with the same `.attribute`
+//!   normalization XML asks for, so nothing downstream has to think about
+//!   `&#90;`.
+//! * **Names are expanded**, so an element can be told apart by its namespace
+//!   rather than only by its local name. That is what lets a foreign-namespace
+//!   element be *ignored* rather than refused -- an Inkscape file's
+//!   `<sodipodi:namedview>` is not SVG content and is not meant to be drawn,
+//!   where an unknown element in the SVG namespace still is a refusal.
+//! * **The walk's stack is small.** A frame is a node id, an index and the
+//!   inherited state; suspending one to walk a `<use>`'s target costs a couple
+//!   of hundred bytes rather than a whole suspended parser.
 //!
-//! Nesting is bounded by `max_container_depth`. A document nesting groups more
-//! deeply than that is refused rather than overflowing a stack, which is the
-//! failure that is not catchable.
+//! What it costs is that reading now allocates and the `Document` owns what it
+//! read. `read` takes an allocator and the result must be `deinit`ed; the
+//! source may be freed the moment `read` returns, because every string in the
+//! tree is a copy.
 //!
 //! ## The presentation attributes it reads
 //!
-//! `fill`, `fill-opacity`, `fill-rule` and `color` on the root `<svg>` are
-//! inherited by every shape, as CSS inheritance says; the same four on a
-//! `<path>` override them for that shape. `opacity` is read on a `<path>` and
-//! is not inherited, because it is not an inherited property.
+//! `fill`, `fill-opacity`, `fill-rule`, `color` and the eight `stroke-*`
+//! properties are inherited: named on the root `<svg>` or on a `<g>` they
+//! apply to everything inside, and named on a shape they apply to it.
+//! `opacity` is read on a shape and is not inherited, because it is not an
+//! inherited property. A `transform` on any element composes with its
+//! ancestors'.
 //!
 //! A shape that names no `fill` is painted in the colour the *caller* chose,
 //! not in SVG's initial black. That is a deliberate difference, and it is the
@@ -40,66 +53,59 @@
 //! the set could only ever be black. `fill="currentColor"`, which many other
 //! icon sets use instead, lands on the same caller's colour by the honest
 //! route -- it is the initial value of the `color` property, and the caller
-//! chooses that too.
+//! chooses that too. A `stroke` works the other way round: naming none means
+//! *no stroke*, because SVG's initial `stroke` is `none` and a shape stroked
+//! without asking would put lines in a picture the document does not have.
 //!
-//! Anything else is ignored rather than refused: `xmlns`, `id`, `class`,
-//! `width`, `height`, `style`. Elements are refused, attributes are ignored --
-//! an element carries geometry that would go missing, and an attribute is
-//! usually decoration. The exception is `opacity` on a container, which would
-//! go quietly wrong; see `Error.GroupOpacityUnsupported`.
-//!
-//! An element this does not implement is **refused** rather than skipped.
-//! Skipping it would draw a picture quietly missing a piece, which is the
-//! failure nobody notices; `error.UnsupportedElement` is the failure somebody
-//! does. The set of elements that carry no geometry -- `<title>`, `<desc>`,
-//! `<metadata>`, `<defs>` -- is passed over, because passing those over is
-//! correct rather than approximate.
-//!
-//! ## Two passes, and why
-//!
-//! `read` walks the whole document and keeps only the `viewBox`; `Document.paths`
-//! walks it again to hand out each `d` in turn. Re-walking is deliberate. A
-//! `Document` that held its shapes would have to allocate for them or cap how
-//! many it could hold, and this way it does neither: `read` allocates nothing
-//! at all, and a `Document` is four floats and a slice.
-//!
-//! It also decides *when* a document is refused. `read` validates everything
-//! before the caller has drawn anything, so a `<g>` at the end of a document
-//! is an error rather than four shapes painted and then an error -- a partial
-//! picture and a failure at once being the worst of both.
+//! Anything else is ignored rather than refused: `id`, `class`, `style`,
+//! `font-size`. Elements are refused, attributes are ignored -- an element
+//! carries geometry that would go missing, and an attribute is usually
+//! decoration. The exception is `opacity` on a container, which would go
+//! quietly wrong; see `Error.GroupOpacityUnsupported`.
 
 const std = @import("std");
-const xml = @import("zxml");
+const ztree = @import("ztree");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
-const entities = @import("entities.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
 
+/// The namespace SVG content is in. An element in no namespace is taken as
+/// SVG too, because a document written without `xmlns` is still a document
+/// somebody means to draw.
+pub const svg_ns = "http://www.w3.org/2000/svg";
+
+/// Where `xlink:href` lives, which is how SVG 1.1 spells a reference and how
+/// most documents in the world still do.
+pub const xlink_ns = "http://www.w3.org/1999/xlink";
+
 pub const Error = error{
     /// The document has no `<svg>` element.
     NotAnSvg,
-    /// `<svg>` has no `viewBox`, or one that is not four numbers.
+    /// `<svg>` has a `viewBox` that is not four numbers.
     BadViewBox,
-    /// There is no `<path>` at all, or one of them has no `d`.
+    /// There is no shape at all, or a `<path>` has no `d`.
     NoPath,
-    /// An element this reader does not implement -- a `<g>`, a `<circle>`, a
-    /// `<use>`. Refused rather than skipped: skipping it would draw a picture
-    /// that is quietly missing a piece.
+    /// An element in the SVG namespace that this reader does not implement --
+    /// a `<text>`, an `<image>`. Refused rather than skipped: skipping it
+    /// would draw a picture that is quietly missing a piece.
+    ///
+    /// An element in *another* namespace is not this: it is not SVG content,
+    /// nothing is meant to draw it, and it is passed over.
     UnsupportedElement,
     /// `opacity` on a container -- the root `<svg>` or a `<g>` -- which is a
     /// *group* opacity: the container is drawn into a layer of its own and
     /// that layer is composited once at the given alpha.
     ///
     /// Multiplying it into each shape's alpha instead -- which is what
-    /// `opacity` on a single `<path>` amounts to, and is exactly right there
-    /// -- is wrong the moment two shapes overlap, because each would then show
-    /// through the other where the group would have shown only the upper one.
-    /// Refused rather than approximated, and it comes back with the composited
-    /// layers that clipping and masking need.
+    /// `opacity` on a shape amounts to, and is exactly right there -- is wrong
+    /// the moment two shapes overlap, because each would then show through the
+    /// other where the group would have shown only the upper one. Refused
+    /// rather than approximated, and it comes back with the composited layers
+    /// that clipping and masking need.
     GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
@@ -115,11 +121,6 @@ pub const Error = error{
     /// values rather than CSS keywords, so they are matched with regard to
     /// case: `stroke-linecap="ROUND"` is not `round`.
     BadStrokeStyle,
-    /// A length -- a coordinate, a radius, a width -- that is not a number,
-    /// or that carries a unit this reader does not implement. Only a bare
-    /// number and the `px` that means the same thing are read today; `pt`,
-    /// `em` and `%` are on the feature list.
-    BadLength,
     /// Containers nested more deeply than `max_container_depth`.
     TooDeeplyNested,
     /// A `transform` whose composed matrix has an infinity or a NaN in it.
@@ -128,7 +129,22 @@ pub const Error = error{
     /// the transforms and the viewBox mapping were applied. See
     /// `max_coordinate`.
     CoordinateOutOfRange,
-} || transform.Error || color.Error || length.Error || entities.Error || xml.Error;
+    /// A `<use>` with no `href`, or one naming something other than a fragment
+    /// of this document. An external reference is a file this library will not
+    /// fetch -- being sans-I/O is the whole reason the renderer can be
+    /// sandboxed -- so it is refused rather than silently drawing nothing.
+    BadReference,
+    /// A `<use>` whose `href` names an id the document does not have.
+    UnknownReference,
+    /// A `<use>` that draws something containing itself, directly or through
+    /// others. Caught by the frame stack rather than by a depth limit, so it
+    /// is reported the moment it closes rather than after a budget runs out.
+    RecursiveUse,
+    /// A chain of `<use>` elements each naming the next, longer than
+    /// `max_use_hops`. Not a cycle -- those are caught exactly -- but a chain
+    /// nothing sensible produces.
+    TooManyUseHops,
+} || transform.Error || color.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
 ///
@@ -160,7 +176,7 @@ pub const Error = error{
 /// document putting geometry further away than that is not a picture.
 pub const max_coordinate: f64 = 1 << 28;
 
-/// How deeply `<g>` may nest.
+/// How deeply containers and `<use>` targets may nest.
 ///
 /// Sized so that the walk's stack is a few kilobytes rather than tens, and so
 /// far above any drawing that a document reaching it is doing something other
@@ -168,89 +184,11 @@ pub const max_coordinate: f64 = 1 << 28;
 /// is the one failure a caller cannot catch.
 pub const max_container_depth = 64;
 
-/// The presentation attributes that an element passes down to its children.
+/// How many `<use>` elements may name one another in a row.
 ///
-/// Null in each field means nothing has named it, so the caller's choice
-/// stands. That is what lets `Options.fill` be the default for a document that
-/// names no colour anywhere, which is every icon set worth drawing.
-pub const Inherited = struct {
-    fill: ?color.Paint = null,
-    fill_opacity: ?f64 = null,
-    fill_rule: ?z2d.options.FillRule = null,
-    /// The `color` property, which is what `fill="currentColor"` resolves to.
-    current_color: ?color.Color = null,
-
-    stroke: ?color.Paint = null,
-    stroke_width: ?f64 = null,
-    stroke_opacity: ?f64 = null,
-    stroke_linecap: ?z2d.options.CapMode = null,
-    stroke_linejoin: ?z2d.options.JoinMode = null,
-    stroke_miterlimit: ?f64 = null,
-    /// `stroke-dasharray` as the document wrote it, borrowed from the source
-    /// and read when the shape is drawn. Kept as text because a dash list is
-    /// a list: parsing it here would mean either allocating for it or giving
-    /// every level of the container stack room for one.
-    ///
-    /// Undecoded, like `d` and `points` and for the same reason -- it is one
-    /// of the three values this reader borrows rather than parses.
-    stroke_dasharray: ?[]const u8 = null,
-    stroke_dashoffset: ?f64 = null,
-
-    /// `self` with everything `child` names overridden.
-    pub fn with(self: Inherited, child: Inherited) Inherited {
-        return .{
-            .fill = child.fill orelse self.fill,
-            .fill_opacity = child.fill_opacity orelse self.fill_opacity,
-            .fill_rule = child.fill_rule orelse self.fill_rule,
-            .current_color = child.current_color orelse self.current_color,
-            .stroke = child.stroke orelse self.stroke,
-            .stroke_width = child.stroke_width orelse self.stroke_width,
-            .stroke_opacity = child.stroke_opacity orelse self.stroke_opacity,
-            .stroke_linecap = child.stroke_linecap orelse self.stroke_linecap,
-            .stroke_linejoin = child.stroke_linejoin orelse self.stroke_linejoin,
-            .stroke_miterlimit = child.stroke_miterlimit orelse self.stroke_miterlimit,
-            .stroke_dasharray = child.stroke_dasharray orelse self.stroke_dasharray,
-            .stroke_dashoffset = child.stroke_dashoffset orelse self.stroke_dashoffset,
-        };
-    }
-};
-
-/// One `<path>`, with the paint that applies to it.
-pub const Shape = struct {
-    /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
-    geometry: shapes.Geometry,
-    /// What to paint it with, after inheritance. Null means nothing named a
-    /// `fill`, so the caller's colour stands.
-    fill: ?color.Paint,
-    /// `fill-opacity`, or null for the caller's default of fully opaque.
-    fill_opacity: ?f64,
-    /// `fill-rule`, or null for the caller's choice.
-    fill_rule: ?z2d.options.FillRule,
-    /// The `color` in force, for a `fill` or `stroke` of `currentColor`. Null
-    /// means the caller's colour.
-    current_color: ?color.Color,
-    /// The stroke properties in force, after inheritance. A null `stroke`
-    /// means nothing named one, which -- unlike `fill` -- is *no stroke at
-    /// all* rather than the caller's colour: SVG's initial `stroke` is `none`,
-    /// and a shape that is stroked without asking to be is a picture with
-    /// lines in it that the document does not have.
-    stroke: ?color.Paint,
-    stroke_width: ?f64,
-    stroke_opacity: ?f64,
-    stroke_linecap: ?z2d.options.CapMode,
-    stroke_linejoin: ?z2d.options.JoinMode,
-    stroke_miterlimit: ?f64,
-    stroke_dasharray: ?[]const u8,
-    stroke_dashoffset: ?f64,
-    /// This element's own `opacity`, which is not inherited. One when the
-    /// element does not name it.
-    opacity: f64,
-    /// Every `transform` from the root down to and including this element,
-    /// composed. In user units: the viewBox-to-pixels mapping is *not* in
-    /// here, because it belongs to the box being drawn into rather than to
-    /// the document, and `Document.transformFor` supplies it.
-    transform: z2d.Transformation,
-};
+/// A cycle is caught exactly, by noticing that a target is already open, so
+/// this is only for a chain that is finite and still absurd.
+pub const max_use_hops = 16;
 
 pub const ViewBox = struct {
     min_x: f64,
@@ -329,10 +267,98 @@ pub const PreserveAspectRatio = struct {
     }
 };
 
+/// The presentation attributes that an element passes down to its children.
+///
+/// Null in each field means nothing has named it, so the caller's choice
+/// stands. That is what lets `Options.fill` be the default for a document that
+/// names no colour anywhere, which is every icon set worth drawing.
+pub const Inherited = struct {
+    fill: ?color.Paint = null,
+    fill_opacity: ?f64 = null,
+    fill_rule: ?z2d.options.FillRule = null,
+    /// The `color` property, which is what a `fill` or `stroke` of
+    /// `currentColor` resolves to.
+    current_color: ?color.Color = null,
+
+    stroke: ?color.Paint = null,
+    stroke_width: ?f64 = null,
+    stroke_opacity: ?f64 = null,
+    stroke_linecap: ?z2d.options.CapMode = null,
+    stroke_linejoin: ?z2d.options.JoinMode = null,
+    stroke_miterlimit: ?f64 = null,
+    /// `stroke-dasharray` as the document wrote it. Kept as text because a
+    /// dash list is a list: parsing it here would mean either allocating for
+    /// it or giving every level of the walk's stack room for one. It borrows
+    /// from the tree's arena, so it lives as long as the `Document`.
+    stroke_dasharray: ?[]const u8 = null,
+    stroke_dashoffset: ?f64 = null,
+
+    /// `self` with everything `child` names overridden.
+    pub fn with(self: Inherited, child: Inherited) Inherited {
+        return .{
+            .fill = child.fill orelse self.fill,
+            .fill_opacity = child.fill_opacity orelse self.fill_opacity,
+            .fill_rule = child.fill_rule orelse self.fill_rule,
+            .current_color = child.current_color orelse self.current_color,
+            .stroke = child.stroke orelse self.stroke,
+            .stroke_width = child.stroke_width orelse self.stroke_width,
+            .stroke_opacity = child.stroke_opacity orelse self.stroke_opacity,
+            .stroke_linecap = child.stroke_linecap orelse self.stroke_linecap,
+            .stroke_linejoin = child.stroke_linejoin orelse self.stroke_linejoin,
+            .stroke_miterlimit = child.stroke_miterlimit orelse self.stroke_miterlimit,
+            .stroke_dasharray = child.stroke_dasharray orelse self.stroke_dasharray,
+            .stroke_dashoffset = child.stroke_dashoffset orelse self.stroke_dashoffset,
+        };
+    }
+};
+
+/// One drawable element, with the paint and the transform that apply to it.
+pub const Shape = struct {
+    /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
+    /// Anything it borrows comes from the tree's arena.
+    geometry: shapes.Geometry,
+    /// What to paint it with, after inheritance. Null means nothing named a
+    /// `fill`, so the caller's colour stands.
+    fill: ?color.Paint,
+    fill_opacity: ?f64,
+    fill_rule: ?z2d.options.FillRule,
+    current_color: ?color.Color,
+    stroke: ?color.Paint,
+    stroke_width: ?f64,
+    stroke_opacity: ?f64,
+    stroke_linecap: ?z2d.options.CapMode,
+    stroke_linejoin: ?z2d.options.JoinMode,
+    stroke_miterlimit: ?f64,
+    stroke_dasharray: ?[]const u8,
+    stroke_dashoffset: ?f64,
+    /// This element's own `opacity`, which is not inherited. One when the
+    /// element does not name it.
+    opacity: f64,
+    /// Every `transform` from the root down to and including this element,
+    /// composed, with each `<use>`'s `x` and `y` folded in. In user units: the
+    /// viewBox-to-pixels mapping is *not* in here, because it belongs to the
+    /// box being drawn into rather than to the document, and
+    /// `Document.transformFor` supplies it.
+    transform: z2d.Transformation,
+};
+
 /// A document that has been read and found drawable.
 ///
-/// Borrows `src`, which must outlive it, and allocates nothing.
+/// Owns the tree it was read from, so `deinit` it when done. The source it was
+/// read from may be freed as soon as `read` returns: every string here is a
+/// copy in the tree's arena.
 pub const Document = struct {
+    /// The parsed tree. Public because a caller that wants to ask the document
+    /// something this library does not -- what its title is, what ids it has
+    /// -- should not have to parse it a second time.
+    tree: *ztree.Document,
+    /// The root `<svg>`.
+    root_node: ztree.NodeId,
+    /// Every element carrying an `id`, so that a reference resolves in one
+    /// lookup rather than a scan. Allocated from the tree's arena, so
+    /// `tree.destroy` frees it.
+    ids: std.StringHashMapUnmanaged(ztree.NodeId),
+
     /// The coordinate system the shapes are written in, as the document wrote
     /// it, or null when it has no `viewBox`.
     ///
@@ -343,23 +369,21 @@ pub const Document = struct {
     view_box: ?ViewBox,
     /// How large the document says it is, in pixels. From `width` and `height`
     /// when it names them, and from the `viewBox`'s extent when it does not.
-    ///
-    /// This is what `render` draws at when the caller names no size. It is not
-    /// what a percentage is measured against -- see `viewport`.
     width: f64,
     height: f64,
     /// How the `viewBox` is fitted into the box it is drawn in.
     preserve_aspect_ratio: PreserveAspectRatio,
-    /// The source this was read from. `paths` walks it again.
-    src: []const u8,
-    /// How many shapes `read` found, so that a caller can bound the work
+    /// How many shapes the walk produces, so that a caller can bound the work
     /// before starting it.
     shape_count: usize,
     /// What the root `<svg>` named, which every shape inherits unless a `<g>`
-    /// or the shape itself overrides it. Informational: `paths` walks the
-    /// document again and works this out for itself, rather than being seeded
-    /// with it, so that the root and a `<g>` go through one code path.
+    /// or the shape itself overrides it.
     root: Inherited,
+
+    pub fn deinit(self: *Document) void {
+        self.tree.destroy();
+        self.* = undefined;
+    }
 
     /// What a percentage inside this document is measured against.
     ///
@@ -372,12 +396,9 @@ pub const Document = struct {
         return .{ .width = self.width, .height = self.height };
     }
 
-    /// Each shape, in document order.
-    ///
-    /// Order is the painting order: SVG paints shapes in the order they are
-    /// written, each over the last.
-    pub fn paths(self: Document) PathIterator {
-        return .{ .reader = .init(self.src), .viewport = self.viewport() };
+    /// Each shape, in painting order.
+    pub fn paths(self: *const Document) PathIterator {
+        return .{ .doc = self, .viewport = self.viewport() };
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -393,10 +414,7 @@ pub const Document = struct {
         // A document with no `viewBox` behaves as though it had one covering
         // its own size: its user units *are* pixels at the size it says it is,
         // so drawing it larger scales it, exactly as drawing a document with a
-        // `viewBox` larger scales that. Leaving the mapping at the identity
-        // instead would draw such a document at 1:1 in the corner of whatever
-        // box it was given, which is what it used to do and what one oracle
-        // fixture noticed.
+        // `viewBox` larger scales that.
         const vb = self.view_box orelse ViewBox{
             .min_x = 0,
             .min_y = 0,
@@ -427,123 +445,315 @@ pub const Document = struct {
     }
 };
 
-/// Walks a document handing out one `d` attribute at a time.
+/// Walks a document's drawable elements in painting order.
 ///
-/// Every error it could return was already returned by `read`, which is what
-/// lets a caller drawing shape after shape treat `next` as infallible in
-/// practice -- it is still `try`ed, because a parser that answered differently
-/// on a second pass would be a bug worth hearing about rather than one to
-/// paper over.
+/// A depth-first walk with an explicit stack, so that suspending one subtree to
+/// draw another -- which is the whole of what `<use>` does -- costs a frame
+/// rather than a second parser.
 pub const PathIterator = struct {
-    reader: xml.Reader,
+    doc: *const Document,
     /// What a percentage in this document is measured against.
     viewport: length.Viewport,
-    /// Where an attribute value carrying an entity reference is decoded. One
-    /// buffer for the whole walk, which is enough because every value that
-    /// comes through it is parsed into a number, a colour or a matrix before
-    /// the next is read. See `entities.zig`.
-    scratch: [entities.max_short_value]u8 = undefined,
-    /// What each open container contributes, innermost last. Level zero is
-    /// what applies before any container has been entered, which is what a
-    /// shape outside the root would see -- there is no such shape in a
-    /// well-formed document, and starting the stack non-empty means `next`
-    /// never has to ask whether there is one.
-    stack: [max_container_depth + 1]Level = undefined,
+    stack: [max_container_depth + 1]Frame = undefined,
     depth: usize = 0,
-    /// How deep inside a subtree that is not painted. Kept because `read` and
-    /// this have to agree exactly on what counts as a shape: a `<path>` inside
-    /// `<defs>` is not one, and an iterator that yielded it anyway would paint
-    /// something the document said to keep back, having passed every check.
-    depth_ignored: usize = 0,
     started: bool = false,
 
-    /// One open container's contribution, already combined with its ancestors'
-    /// so that a shape reads the innermost entry and nothing else.
-    pub const Level = struct {
+    /// One open container, and where the walk has got to inside it.
+    pub const Frame = struct {
+        node: ztree.NodeId,
+        /// The next child to look at. Counting rather than holding a slice
+        /// keeps a frame small and keeps it valid across anything that might
+        /// reallocate the tree's node list.
+        next_child: usize,
+        /// Everything the container contributes to what is inside it, already
+        /// combined with its ancestors'.
         inherited: Inherited,
         transform: z2d.Transformation,
     };
 
     pub fn next(self: *PathIterator) Error!?Shape {
+        const tree = self.doc.tree;
+
         if (!self.started) {
             self.started = true;
-            self.stack[0] = .{ .inherited = .{}, .transform = .identity };
+            const root = self.doc.root_node;
+            // Not `opacity`: on the root it is a group opacity, and there is
+            // no layer to composite one into. Checked here rather than in
+            // `visit`, because the root is the one element the walk never
+            // visits as somebody's child.
+            if (self.attr(root, "opacity") != null) return error.GroupOpacityUnsupported;
+            self.stack[0] = .{
+                .node = root,
+                .next_child = 0,
+                .inherited = try self.readInherited(root),
+                .transform = try self.readTransform(root),
+            };
         }
-        while (true) switch (try self.reader.next()) {
-            .start_element => |e| {
-                // First, and unconditionally: a `<defs>` inside a `<defs>` has
-                // to be counted so that its end tag takes the counter back
-                // down again. Every start tag has a matching end, the
-                // synthetic one a self-closing tag reports included, so what
-                // goes up here must come down there.
-                if (isIgnorable(e.name)) {
-                    self.depth_ignored += 1;
-                    continue;
-                }
-                if (self.depth_ignored > 0) continue;
-                const top = self.stack[self.depth];
 
-                if (try readGeometry(e, self.viewport, &self.scratch)) |geometry| {
-                    const effective = top.inherited.with(try readInherited(e, self.viewport, &self.scratch));
-                    const ctm = top.transform.mul(try readTransform(e, &self.scratch));
-                    if (!transform.isFinite(ctm)) return error.NonFiniteTransform;
-                    return .{
-                        .geometry = geometry,
-                        .fill = effective.fill,
-                        .fill_opacity = effective.fill_opacity,
-                        .fill_rule = effective.fill_rule,
-                        .current_color = effective.current_color,
-                        .stroke = effective.stroke,
-                        .stroke_width = effective.stroke_width,
-                        .stroke_opacity = effective.stroke_opacity,
-                        .stroke_linecap = effective.stroke_linecap,
-                        .stroke_linejoin = effective.stroke_linejoin,
-                        .stroke_miterlimit = effective.stroke_miterlimit,
-                        .stroke_dasharray = effective.stroke_dasharray,
-                        .stroke_dashoffset = effective.stroke_dashoffset,
-                        .opacity = if (try attr(e, "opacity", &self.scratch)) |v|
-                            try color.parseOpacity(v)
-                        else
-                            1.0,
-                        .transform = ctm,
-                    };
-                }
+        while (true) {
+            const top = &self.stack[self.depth];
+            const children = tree.node(top.node).children.items;
+            if (top.next_child >= children.len) {
+                if (self.depth == 0) return null;
+                self.depth -= 1;
+                continue;
+            }
+            const child = children[top.next_child];
+            top.next_child += 1;
 
-                if (isContainer(e.name)) {
-                    // Not `opacity`: on a container it is a group opacity, and
-                    // there is no layer to composite one into.
-                    if (e.attr("opacity") != null) return error.GroupOpacityUnsupported;
-                    // Pushed even when self-closing. zxml reports a synthetic
-                    // end tag for `<g/>`, so a container that did not push
-                    // would have that end pop its *parent* -- which is how a
-                    // `<g/>` next to a group used to leak the group's
-                    // transform onto its siblings.
-                    if (self.depth == max_container_depth) return error.TooDeeplyNested;
-                    self.depth += 1;
-                    self.stack[self.depth] = .{
-                        .inherited = top.inherited.with(try readInherited(e, self.viewport, &self.scratch)),
-                        .transform = top.transform.mul(try readTransform(e, &self.scratch)),
-                    };
-                    continue;
-                }
+            if (try self.visit(child, top.*)) |shape| return shape;
+        }
+    }
 
-                // Refused rather than skipped: skipping it would draw a
-                // picture quietly missing a piece.
-                return error.UnsupportedElement;
-            },
-            .end_element => |name| {
-                // Matched on the name rather than by counting, so that a
-                // `<path/>` inside a `<defs>` does not take the ignore counter
-                // down with it.
-                if (isIgnorable(name)) {
-                    if (self.depth_ignored > 0) self.depth_ignored -= 1;
-                } else if (self.depth_ignored == 0 and isContainer(name) and self.depth > 0) {
-                    self.depth -= 1;
-                }
-            },
-            .eof => return null,
-            else => {},
+    /// Look at one element, following any `<use>` to what it draws.
+    ///
+    /// Returns a shape when the element is one, and otherwise has either
+    /// pushed a frame to descend into it or decided there is nothing to do.
+    fn visit(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Shape {
+        const tree = self.doc.tree;
+        if (tree.node(child).kind != .element) return null;
+
+        // Follow a chain of `<use>`, gathering what each contributes on the
+        // way. A cycle is caught by `push` noticing the target is already
+        // open, so the hop count is only for a chain that is finite and still
+        // absurd.
+        var node = child;
+        var inherited = parent.inherited;
+        var ctm = parent.transform;
+        var hops: usize = 0;
+        while (true) {
+            if (!self.isSvgContent(node)) return null;
+            if (!localIs(tree, node, "use")) break;
+
+            hops += 1;
+            if (hops > max_use_hops) return error.TooManyUseHops;
+
+            // The `<use>` contributes its own paint and transform, and then
+            // §5.6's `x` and `y` as a translation *inside* that.
+            inherited = inherited.with(try self.readInherited(node));
+            ctm = ctm.mul(try self.readTransform(node));
+            const dx = try self.lengthOf(node, "x", .x, 0);
+            const dy = try self.lengthOf(node, "y", .y, 0);
+            if (dx != 0 or dy != 0) {
+                ctm = ctm.mul(.{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = dx, .ty = dy });
+            }
+            node = try self.resolve(node);
+        }
+
+        const name = tree.node(node).name.local;
+        if (isIgnorable(name)) return null;
+
+        // The element's own attributes, on top of everything above it.
+        const effective = inherited.with(try self.readInherited(node));
+        const own_ctm = ctm.mul(try self.readTransform(node));
+        if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
+
+        if (try self.readGeometry(node)) |geometry| {
+            return .{
+                .geometry = geometry,
+                .fill = effective.fill,
+                .fill_opacity = effective.fill_opacity,
+                .fill_rule = effective.fill_rule,
+                .current_color = effective.current_color,
+                .stroke = effective.stroke,
+                .stroke_width = effective.stroke_width,
+                .stroke_opacity = effective.stroke_opacity,
+                .stroke_linecap = effective.stroke_linecap,
+                .stroke_linejoin = effective.stroke_linejoin,
+                .stroke_miterlimit = effective.stroke_miterlimit,
+                .stroke_dasharray = effective.stroke_dasharray,
+                .stroke_dashoffset = effective.stroke_dashoffset,
+                .opacity = if (self.attr(node, "opacity")) |v|
+                    try color.parseOpacity(v)
+                else
+                    1.0,
+                .transform = own_ctm,
+            };
+        }
+
+        if (isContainer(name)) {
+            // Not `opacity`: on a container it is a group opacity, and there
+            // is no layer to composite one into.
+            if (self.attr(node, "opacity") != null) return error.GroupOpacityUnsupported;
+            try self.push(node, effective, own_ctm);
+            return null;
+        }
+
+        // Refused rather than skipped: skipping it would draw a picture
+        // quietly missing a piece.
+        return error.UnsupportedElement;
+    }
+
+    /// Open a container, having satisfied itself that it is not already open.
+    ///
+    /// The stack *is* the cycle check: a node that is its own ancestor in the
+    /// walk is a `<use>` that draws something containing itself, and saying so
+    /// the moment the loop closes is better than letting a depth limit
+    /// discover it several thousand frames later.
+    fn push(
+        self: *PathIterator,
+        node: ztree.NodeId,
+        inherited: Inherited,
+        ctm: z2d.Transformation,
+    ) Error!void {
+        for (self.stack[0 .. self.depth + 1]) |frame| {
+            if (frame.node == node) return error.RecursiveUse;
+        }
+        if (self.depth == max_container_depth) return error.TooDeeplyNested;
+        self.depth += 1;
+        self.stack[self.depth] = .{
+            .node = node,
+            .next_child = 0,
+            .inherited = inherited,
+            .transform = ctm,
         };
+    }
+
+    /// What a `<use>` names, as a node of this document.
+    fn resolve(self: *PathIterator, use: ztree.NodeId) Error!ztree.NodeId {
+        const tree = self.doc.tree;
+        // SVG 2 spells it `href`; SVG 1.1 spells it `xlink:href`, which is
+        // what most documents in the world still carry. Both, with the plain
+        // one winning as SVG 2 says.
+        const raw = tree.attributeValue(use, "", "href") orelse
+            tree.attributeValue(use, xlink_ns, "href") orelse
+            return error.BadReference;
+        const target = std.mem.trim(u8, raw, " \t\r\n");
+        // Only a fragment of this document. Anything else names a file, and
+        // fetching one is exactly what being sans-I/O rules out -- it is the
+        // reason the renderer can be put in a process that cannot open
+        // anything.
+        if (target.len < 2 or target[0] != '#') return error.BadReference;
+        return self.doc.ids.get(target[1..]) orelse error.UnknownReference;
+    }
+
+    /// Whether this element is SVG content at all.
+    ///
+    /// An element in another namespace is not, and is passed over rather than
+    /// refused: an Inkscape file's `<sodipodi:namedview>` is metadata that
+    /// nothing is meant to draw, and refusing it would refuse the file. An
+    /// element in no namespace is taken as SVG, because a document written
+    /// without `xmlns` is still one somebody means to draw.
+    fn isSvgContent(self: *const PathIterator, node: ztree.NodeId) bool {
+        const uri = self.doc.tree.node(node).name.uri;
+        return uri.len == 0 or std.mem.eql(u8, uri, svg_ns);
+    }
+
+    // -- attributes ----------------------------------------------------------
+
+    fn attr(self: *const PathIterator, node: ztree.NodeId, name: []const u8) ?[]const u8 {
+        return self.doc.tree.attributeValue(node, "", name);
+    }
+
+    fn lengthOf(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+        axis: length.Axis,
+        default: f64,
+    ) Error!f64 {
+        return (try self.optionalLengthOf(node, name, axis)) orelse default;
+    }
+
+    /// A length, or null when the attribute is absent.
+    ///
+    /// `axis` is which measure of the viewport a percentage is of, and is a
+    /// property of the attribute rather than of its value: `width` and `cx`
+    /// are horizontal, `height` and `cy` vertical, and `r` and `stroke-width`
+    /// are neither, so they take §7.10's normalized diagonal. Getting one
+    /// wrong is a shape the right size in one direction and the wrong size in
+    /// the other, on documents that use percentages and nowhere else.
+    fn optionalLengthOf(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+        axis: length.Axis,
+    ) Error!?f64 {
+        const raw = self.attr(node, name) orelse return null;
+        return try length.parse(raw, axis, self.viewport);
+    }
+
+    fn readInherited(self: *const PathIterator, node: ztree.NodeId) Error!Inherited {
+        return .{
+            .fill = if (self.attr(node, "fill")) |v| try color.parsePaint(v) else null,
+            .fill_opacity = if (self.attr(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
+            .fill_rule = if (self.attr(node, "fill-rule")) |v| try parseFillRule(v) else null,
+            .current_color = if (self.attr(node, "color")) |v| try color.parseColor(v) else null,
+            .stroke = if (self.attr(node, "stroke")) |v| try color.parsePaint(v) else null,
+            .stroke_width = try self.optionalLengthOf(node, "stroke-width", .other),
+            .stroke_opacity = if (self.attr(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,
+            .stroke_linecap = if (self.attr(node, "stroke-linecap")) |v| try parseLineCap(v) else null,
+            .stroke_linejoin = if (self.attr(node, "stroke-linejoin")) |v| try parseLineJoin(v) else null,
+            .stroke_miterlimit = if (self.attr(node, "stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
+            .stroke_dasharray = self.attr(node, "stroke-dasharray"),
+            .stroke_dashoffset = try self.optionalLengthOf(node, "stroke-dashoffset", .other),
+        };
+    }
+
+    fn readTransform(self: *const PathIterator, node: ztree.NodeId) Error!z2d.Transformation {
+        const raw = self.attr(node, "transform") orelse return .identity;
+        return transform.parse(raw);
+    }
+
+    /// What an element draws, or null when it is not a drawable one.
+    ///
+    /// The basic shapes are read here rather than being turned into `d`
+    /// strings for the path parser: their geometry is four or five numbers
+    /// this already has, and spelling them out as text to read back would
+    /// allocate and would put a number formatter and a second number parser in
+    /// the way of the picture. See `shapes.zig`.
+    fn readGeometry(self: *const PathIterator, node: ztree.NodeId) Error!?shapes.Geometry {
+        const name = self.doc.tree.node(node).name.local;
+        if (std.mem.eql(u8, name, "path")) {
+            return .{ .path = self.attr(node, "d") orelse return error.NoPath };
+        }
+        if (std.mem.eql(u8, name, "rect")) {
+            return .{
+                .rect = .{
+                    .x = try self.lengthOf(node, "x", .x, 0),
+                    .y = try self.lengthOf(node, "y", .y, 0),
+                    .width = try self.lengthOf(node, "width", .x, 0),
+                    .height = try self.lengthOf(node, "height", .y, 0),
+                    // Null rather than zero: §9.2 makes one specified radius
+                    // supply the other, which "not specified" has to be
+                    // distinguishable from zero to express.
+                    .rx = try self.optionalLengthOf(node, "rx", .x),
+                    .ry = try self.optionalLengthOf(node, "ry", .y),
+                },
+            };
+        }
+        if (std.mem.eql(u8, name, "circle")) {
+            const r = try self.lengthOf(node, "r", .other, 0);
+            return .{ .ellipse = .{
+                .cx = try self.lengthOf(node, "cx", .x, 0),
+                .cy = try self.lengthOf(node, "cy", .y, 0),
+                .rx = r,
+                .ry = r,
+            } };
+        }
+        if (std.mem.eql(u8, name, "ellipse")) {
+            return .{ .ellipse = .{
+                .cx = try self.lengthOf(node, "cx", .x, 0),
+                .cy = try self.lengthOf(node, "cy", .y, 0),
+                .rx = try self.lengthOf(node, "rx", .x, 0),
+                .ry = try self.lengthOf(node, "ry", .y, 0),
+            } };
+        }
+        if (std.mem.eql(u8, name, "line")) {
+            return .{ .line = .{
+                .x1 = try self.lengthOf(node, "x1", .x, 0),
+                .y1 = try self.lengthOf(node, "y1", .y, 0),
+                .x2 = try self.lengthOf(node, "x2", .x, 0),
+                .y2 = try self.lengthOf(node, "y2", .y, 0),
+            } };
+        }
+        if (std.mem.eql(u8, name, "polyline")) {
+            return .{ .poly = .{ .points = self.attr(node, "points") orelse "", .closed = false } };
+        }
+        if (std.mem.eql(u8, name, "polygon")) {
+            return .{ .poly = .{ .points = self.attr(node, "points") orelse "", .closed = true } };
+        }
+        return null;
     }
 };
 
@@ -553,159 +763,37 @@ pub const PathIterator = struct {
 /// path rather than the root being a special case that drifts from the general
 /// one.
 fn isContainer(name: []const u8) bool {
-    return xml.nameIs(name, "svg") or xml.nameIs(name, "g");
+    return std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "g");
 }
 
-/// What an element draws, or null when it is not a drawable element.
+/// The elements that carry no geometry and so may be passed over.
 ///
-/// The basic shapes are read here rather than being turned into `d` strings
-/// for the path parser: their geometry is four or five numbers this already
-/// has, and spelling them out as text to read back would allocate and would
-/// put a number formatter and a second number parser in the way of the
-/// picture. See `shapes.zig`.
-fn readGeometry(
-    e: xml.Element,
-    viewport: length.Viewport,
-    scratch: *[entities.max_short_value]u8,
-) Error!?shapes.Geometry {
-    if (xml.nameIs(e.name, "path")) {
-        // Raw: a `d` is unbounded in length, so it is decoded where there is
-        // an allocator rather than into a buffer. See `entities.zig`.
-        return .{ .path = e.attr("d") orelse return error.NoPath };
-    }
-    if (xml.nameIs(e.name, "rect")) {
-        return .{
-            .rect = .{
-                .x = try lengthOf(e, "x", .x, viewport, 0, scratch),
-                .y = try lengthOf(e, "y", .y, viewport, 0, scratch),
-                .width = try lengthOf(e, "width", .x, viewport, 0, scratch),
-                .height = try lengthOf(e, "height", .y, viewport, 0, scratch),
-                // Null rather than zero: §9.2 makes one specified radius supply
-                // the other, which "not specified" has to be distinguishable from
-                // zero to express.
-                .rx = try optionalLengthOf(e, "rx", .x, viewport, scratch),
-                .ry = try optionalLengthOf(e, "ry", .y, viewport, scratch),
-            },
-        };
-    }
-    if (xml.nameIs(e.name, "circle")) {
-        const r = try lengthOf(e, "r", .other, viewport, 0, scratch);
-        return .{ .ellipse = .{
-            .cx = try lengthOf(e, "cx", .x, viewport, 0, scratch),
-            .cy = try lengthOf(e, "cy", .y, viewport, 0, scratch),
-            .rx = r,
-            .ry = r,
-        } };
-    }
-    if (xml.nameIs(e.name, "ellipse")) {
-        return .{ .ellipse = .{
-            .cx = try lengthOf(e, "cx", .x, viewport, 0, scratch),
-            .cy = try lengthOf(e, "cy", .y, viewport, 0, scratch),
-            .rx = try lengthOf(e, "rx", .x, viewport, 0, scratch),
-            .ry = try lengthOf(e, "ry", .y, viewport, 0, scratch),
-        } };
-    }
-    if (xml.nameIs(e.name, "line")) {
-        return .{ .line = .{
-            .x1 = try lengthOf(e, "x1", .x, viewport, 0, scratch),
-            .y1 = try lengthOf(e, "y1", .y, viewport, 0, scratch),
-            .x2 = try lengthOf(e, "x2", .x, viewport, 0, scratch),
-            .y2 = try lengthOf(e, "y2", .y, viewport, 0, scratch),
-        } };
-    }
-    if (xml.nameIs(e.name, "polyline")) {
-        return .{ .poly = .{ .points = e.attr("points") orelse "", .closed = false } };
-    }
-    if (xml.nameIs(e.name, "polygon")) {
-        return .{ .poly = .{ .points = e.attr("points") orelse "", .closed = true } };
-    }
-    return null;
+/// What is inside `<defs>` is not drawn where it stands -- that is what
+/// `<defs>` is for -- but it is still in the tree and still indexed, so a
+/// `<use>` can name it.
+fn isIgnorable(name: []const u8) bool {
+    return std.mem.eql(u8, name, "title") or
+        std.mem.eql(u8, name, "desc") or
+        std.mem.eql(u8, name, "metadata") or
+        std.mem.eql(u8, name, "defs");
 }
 
-/// One decoded attribute value, or null when the element does not carry it.
+fn localIs(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) bool {
+    return std.mem.eql(u8, tree.node(node).name.local, name);
+}
+
+/// `nonzero` or `evenodd`, and nothing else.
 ///
-/// The result borrows from the source when nothing needed resolving, which is
-/// every attribute of every document anybody has, and from `scratch` when
-/// something did. It therefore lives only until the next call sharing that
-/// buffer -- which is safe because every caller here parses the value into a
-/// number, a colour or a matrix before asking for another. The three values
-/// that are *borrowed* rather than parsed do not come through here; see
-/// `entities.zig`.
-fn attr(
-    e: xml.Element,
-    name: []const u8,
-    scratch: *[entities.max_short_value]u8,
-) Error!?[]const u8 {
-    const raw = e.attr(name) orelse return null;
-    return try entities.decodeShort(raw, scratch);
-}
-
-/// One length-valued attribute, or `default` when the element does not carry
-/// it.
-fn lengthOf(
-    e: xml.Element,
-    name: []const u8,
-    axis: length.Axis,
-    viewport: length.Viewport,
-    default: f64,
-    scratch: *[entities.max_short_value]u8,
-) Error!f64 {
-    return (try optionalLengthOf(e, name, axis, viewport, scratch)) orelse default;
-}
-
-/// A length, or null when the attribute is absent.
-///
-/// `axis` is which measure of the viewport a percentage is of, and is a
-/// property of the attribute rather than of its value: `width` and `cx` are
-/// horizontal, `height` and `cy` vertical, and `r` and `stroke-width` are
-/// neither, so they take §7.10's normalized diagonal. Getting one wrong is a
-/// shape the right size in one direction and the wrong size in the other, on
-/// documents that use percentages and nowhere else.
-fn optionalLengthOf(
-    e: xml.Element,
-    name: []const u8,
-    axis: length.Axis,
-    viewport: length.Viewport,
-    scratch: *[entities.max_short_value]u8,
-) Error!?f64 {
-    const text = (try attr(e, name, scratch)) orelse return null;
-    return try length.parse(text, axis, viewport);
-}
-
-/// An element's own `transform`, or the identity when it has none.
-fn readTransform(
-    e: xml.Element,
-    scratch: *[entities.max_short_value]u8,
-) Error!z2d.Transformation {
-    const text = (try attr(e, "transform", scratch)) orelse return .identity;
-    return transform.parse(text);
-}
-
-/// The four inherited presentation attributes, where an element names them.
-///
-/// Every one of them is refused rather than defaulted when it cannot be read.
-/// resvg, and every browser, falls back to the initial value and paints on;
-/// see `color.zig` for why this does not.
-fn readInherited(
-    e: xml.Element,
-    viewport: length.Viewport,
-    scratch: *[entities.max_short_value]u8,
-) Error!Inherited {
-    return .{
-        .fill = if (try attr(e, "fill", scratch)) |v| try color.parsePaint(v) else null,
-        .fill_opacity = if (try attr(e, "fill-opacity", scratch)) |v| try color.parseOpacity(v) else null,
-        .fill_rule = if (try attr(e, "fill-rule", scratch)) |v| try parseFillRule(v) else null,
-        .current_color = if (try attr(e, "color", scratch)) |v| try color.parseColor(v) else null,
-        .stroke = if (try attr(e, "stroke", scratch)) |v| try color.parsePaint(v) else null,
-        .stroke_width = try optionalLengthOf(e, "stroke-width", .other, viewport, scratch),
-        .stroke_opacity = if (try attr(e, "stroke-opacity", scratch)) |v| try color.parseOpacity(v) else null,
-        .stroke_linecap = if (try attr(e, "stroke-linecap", scratch)) |v| try parseLineCap(v) else null,
-        .stroke_linejoin = if (try attr(e, "stroke-linejoin", scratch)) |v| try parseLineJoin(v) else null,
-        .stroke_miterlimit = if (try attr(e, "stroke-miterlimit", scratch)) |v| try parseMiterLimit(v) else null,
-        // Borrowed rather than parsed: see `Inherited.stroke_dasharray`.
-        .stroke_dasharray = e.attr("stroke-dasharray"),
-        .stroke_dashoffset = try optionalLengthOf(e, "stroke-dashoffset", .other, viewport, scratch),
-    };
+/// Matched with regard to case, unlike a colour name. The difference is real
+/// and it is not an inconsistency: a colour keyword is CSS, where keywords are
+/// ASCII case-insensitive, while this is an XML attribute value, where they
+/// are not. resvg draws `fill-rule="EVENODD"` with the nonzero rule, which is
+/// the same reading.
+fn parseFillRule(text: []const u8) Error!z2d.options.FillRule {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.eql(u8, t, "nonzero")) return .non_zero;
+    if (std.mem.eql(u8, t, "evenodd")) return .even_odd;
+    return error.BadFillRule;
 }
 
 /// `butt`, `round` or `square`, matched with regard to case.
@@ -738,66 +826,50 @@ fn parseMiterLimit(text: []const u8) Error!f64 {
     return @max(1.0, value);
 }
 
-/// `nonzero` or `evenodd`, and nothing else.
+/// Read a document and satisfy yourself it can be drawn.
 ///
-/// Matched with regard to case, unlike a colour name. The difference is real
-/// and it is not an inconsistency: a colour keyword is CSS, where keywords are
-/// ASCII case-insensitive, while this is an XML attribute value, where they
-/// are not. resvg draws `fill-rule="EVENODD"` with the nonzero rule, which is
-/// the same reading.
-fn parseFillRule(text: []const u8) Error!z2d.options.FillRule {
-    const t = std.mem.trim(u8, text, " \t\r\n");
-    if (std.mem.eql(u8, t, "nonzero")) return .non_zero;
-    if (std.mem.eql(u8, t, "evenodd")) return .even_odd;
-    return error.BadFillRule;
-}
-
-/// The elements that carry no geometry and so may be passed over.
-fn isIgnorable(name: []const u8) bool {
-    return xml.nameIs(name, "title") or
-        xml.nameIs(name, "desc") or
-        xml.nameIs(name, "metadata") or
-        xml.nameIs(name, "defs");
-}
-
-/// Read one document out of `src` and satisfy yourself it can be drawn.
-///
-/// Allocates nothing: the returned `Document` borrows `src`, which must
-/// outlive it.
+/// The returned `Document` owns the tree it was read from; `deinit` it. `src`
+/// may be freed as soon as this returns, because every string in the tree is a
+/// copy in the tree's own arena.
 ///
 /// ## Why this drains the iterator
 ///
 /// Everything a document can be refused for is refused here, before the caller
-/// has drawn anything: a `<g>` at the end of a document is an error rather
+/// has drawn anything: a `<text>` at the end of a document is an error rather
 /// than four shapes painted and then an error.
 ///
 /// The obvious way to do that is a validating walk beside the drawing one --
-/// and it was, and the two drifted. The reader knew a `<path>` inside `<defs>`
-/// was not a shape and the iterator did not; the reader parsed each transform
-/// and only the iterator composed them, so a pair that multiplied to an
-/// infinity passed validation and failed while drawing. Each was a walk that
-/// had to be kept in step with another walk by hand.
-///
-/// So there is one walk. `read` finds the root and then runs the *same*
-/// iterator the renderer will, to the end, throwing the shapes away. Whatever
-/// it refuses, `read` refuses, and `shape_count` is the number it produced
-/// rather than a number counted alongside it. Agreement is not tested for
-/// here, it is the only thing that can happen.
-pub fn read(src: []const u8) Error!Document {
-    var reader: xml.Reader = .init(src);
+/// and it was, and the two drifted twice. So there is one walk: `read` finds
+/// the root and then runs the *same* iterator the renderer will, to the end,
+/// throwing the shapes away. Whatever it refuses, `read` refuses, and
+/// `shape_count` is the number it produced rather than a number counted
+/// alongside it. Agreement is not tested for here, it is the only thing that
+/// can happen.
+pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
+    // `.strict` on entities, so a name the document never declared is an error
+    // rather than text that survives into a parser which will call it
+    // something less helpful. Nothing external is fetched under any setting.
+    const tree = try ztree.parse(gpa, src, .{ .entities = .strict });
+    errdefer tree.destroy();
 
-    // The root, for the three things the iterator has no use for: how large
-    // the document says it is, what coordinate system its shapes are in, and
-    // how the one is fitted into the other. The first element of an SVG
-    // document is its `<svg>`; anything else is not one.
-    var doc: Document = while (true) switch (try reader.next()) {
-        .start_element => |e| {
-            if (!xml.nameIs(e.name, "svg")) return error.NotAnSvg;
-            break try readRoot(e, src);
-        },
-        .eof => return error.NotAnSvg,
-        else => {},
+    var doc: Document = .{
+        .tree = tree,
+        .root_node = undefined,
+        .ids = .empty,
+        .view_box = null,
+        .width = 0,
+        .height = 0,
+        .preserve_aspect_ratio = .meet_centred,
+        .shape_count = 0,
+        .root = .{},
     };
+
+    const root = tree.documentElement() orelse return error.NotAnSvg;
+    if (!std.mem.eql(u8, tree.node(root).name.local, "svg")) return error.NotAnSvg;
+    doc.root_node = root;
+
+    try indexIds(&doc);
+    try readRoot(&doc, root);
 
     var it = doc.paths();
     var count: usize = 0;
@@ -805,6 +877,26 @@ pub fn read(src: []const u8) Error!Document {
     if (count == 0) return error.NoPath;
     doc.shape_count = count;
     return doc;
+}
+
+/// Every element carrying an `id`, so that a reference resolves in one lookup.
+///
+/// Built once over the whole tree rather than scanned per reference, because
+/// every feature still to come -- a gradient, a clip path, a mask -- names one
+/// the same way, and a scan apiece would be quadratic in a document made of
+/// references.
+///
+/// The first of a duplicated id wins, which is what a document scanned in
+/// order would find, and what browsers do.
+fn indexIds(doc: *Document) Error!void {
+    const arena = doc.tree.alloc();
+    for (doc.tree.nodes.items, 0..) |node, id| {
+        if (node.kind != .element) continue;
+        const value = doc.tree.attributeValue(@intCast(id), "", "id") orelse continue;
+        if (value.len == 0) continue;
+        const slot = try doc.ids.getOrPut(arena, value);
+        if (!slot.found_existing) slot.value_ptr.* = @intCast(id);
+    }
 }
 
 /// The root `<svg>`'s own attributes.
@@ -815,20 +907,18 @@ pub fn read(src: []const u8) Error!Document {
 /// resolves to zero and the `viewBox` supplies the size instead, which is what
 /// resvg does with the `width="100%" height="100%"` that drawing programs like
 /// to write.
-fn readRoot(e: xml.Element, src: []const u8) Error!Document {
-    var scratch: [entities.max_short_value]u8 = undefined;
+fn readRoot(doc: *Document, root: ztree.NodeId) Error!void {
+    const tree = doc.tree;
+    if (tree.attributeValue(root, "", "viewBox")) |raw| {
+        doc.view_box = try parseViewBox(raw);
+    }
 
-    const view_box: ?ViewBox = if (try attr(e, "viewBox", &scratch)) |text|
-        try parseViewBox(text)
+    const named_width = if (tree.attributeValue(root, "", "width")) |raw|
+        try length.parse(raw, .x, .unknown)
     else
         null;
-
-    const named_width = if (try attr(e, "width", &scratch)) |text|
-        try length.parse(text, .x, .unknown)
-    else
-        null;
-    const named_height = if (try attr(e, "height", &scratch)) |text|
-        try length.parse(text, .y, .unknown)
+    const named_height = if (tree.attributeValue(root, "", "height")) |raw|
+        try length.parse(raw, .y, .unknown)
     else
         null;
 
@@ -836,23 +926,17 @@ fn readRoot(e: xml.Element, src: []const u8) Error!Document {
     // percentage of an unknown viewport does, and what `width="0"` means as
     // well. The viewBox is the fallback, and with neither there is nothing to
     // say how big the picture is.
-    const width = pick(named_width, if (view_box) |vb| vb.width else null) orelse
+    doc.width = pick(named_width, if (doc.view_box) |vb| vb.width else null) orelse
         return error.NoSize;
-    const height = pick(named_height, if (view_box) |vb| vb.height else null) orelse
+    doc.height = pick(named_height, if (doc.view_box) |vb| vb.height else null) orelse
         return error.NoSize;
 
-    return .{
-        .view_box = view_box,
-        .width = width,
-        .height = height,
-        .preserve_aspect_ratio = if (try attr(e, "preserveAspectRatio", &scratch)) |text|
-            try PreserveAspectRatio.parse(text)
-        else
-            .meet_centred,
-        .src = src,
-        .shape_count = 0,
-        .root = try readInherited(e, .unknown, &scratch),
-    };
+    if (tree.attributeValue(root, "", "preserveAspectRatio")) |raw| {
+        doc.preserve_aspect_ratio = try PreserveAspectRatio.parse(raw);
+    }
+
+    var it = doc.paths();
+    doc.root = try it.readInherited(root);
 }
 
 /// The first of the two that is a usable extent.
@@ -877,6 +961,10 @@ fn parseViewBox(raw: []const u8) Error!ViewBox {
 }
 
 pub const BuildError = Error || shapes.BuildError;
+
+/// z2d does not re-export its path node type, so it is named through the
+/// field that holds them rather than spelled out.
+const PathNode = std.meta.Elem(@FieldType(z2d.Path, "nodes").Slice);
 
 /// Build one shape's geometry into `p`, under `ctm`.
 ///
@@ -909,10 +997,6 @@ pub fn buildShape(
 /// refuses a matrix that is not -- but a perfectly finite matrix applied to a
 /// perfectly finite point produces `scale(1e300)` times four, and z2d reduces
 /// a polygon's extent to an `i32`. See `max_coordinate`.
-/// z2d does not re-export its path node type, so it is named through the
-/// field that holds them rather than spelled out.
-const PathNode = std.meta.Elem(@FieldType(z2d.Path, "nodes").Slice);
-
 fn checkInRange(nodes: []const PathNode) Error!void {
     for (nodes) |node| switch (node) {
         .move_to => |n| try checkPoint(n.point),
@@ -934,7 +1018,6 @@ fn checkPoint(point: anytype) Error!void {
         return error.CoordinateOutOfRange;
     }
 }
-
 // -- tests -------------------------------------------------------------------
 
 const testing = std.testing;
@@ -943,18 +1026,39 @@ const icon =
     \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3,9H7L12,4V20L7,15H3V9Z" /></svg>
 ;
 
-/// Every `d` in a document, for a test to look at.
-fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]const u8 {
-    const doc = try read(src);
-    var out: std.ArrayList([]const u8) = .empty;
-    errdefer out.deinit(gpa);
+/// Every `d` in a document, copied, for a test to look at.
+///
+/// Copied because the tree they borrow from is freed on the way out -- which
+/// is the whole point of the tree owning what it read.
+fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]u8 {
+    var doc = try read(gpa, src);
+    defer doc.deinit();
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |d| gpa.free(d);
+        out.deinit(gpa);
+    }
     var it = doc.paths();
-    while (try it.next()) |shape| try out.append(gpa, shape.geometry.path);
+    while (try it.next()) |shape| try out.append(gpa, try gpa.dupe(u8, shape.geometry.path));
     return out.toOwnedSlice(gpa);
 }
 
+fn freeCollected(gpa: std.mem.Allocator, found: [][]u8) void {
+    for (found) |d| gpa.free(d);
+    gpa.free(found);
+}
+
+/// A document read and immediately measured, for a test that wants one matrix
+/// out of it rather than the document itself.
+fn transformOf(src: []const u8, width: f64, height: f64) !z2d.Transformation {
+    var doc = try read(testing.allocator, src);
+    defer doc.deinit();
+    return doc.transformFor(0, 0, width, height);
+}
+
 test "a well formed icon reads" {
-    const doc = try read(icon);
+    var doc = try read(testing.allocator, icon);
+    defer doc.deinit();
     try testing.expectEqual(@as(f64, 0), doc.view_box.?.min_x);
     try testing.expectEqual(@as(f64, 24), doc.view_box.?.width);
     // With no `width` or `height`, the viewBox's extent is the size.
@@ -976,11 +1080,12 @@ test "every path is handed out, in document order" {
         \\  <path d="M4 4L5 5Z"/>
         \\</svg>
     ;
-    const doc = try read(src);
+    var doc = try read(testing.allocator, src);
+    defer doc.deinit();
     try testing.expectEqual(@as(usize, 3), doc.shape_count);
 
     const found = try collect(gpa, src);
-    defer gpa.free(found);
+    defer freeCollected(gpa, found);
     try testing.expectEqual(@as(usize, 3), found.len);
     try testing.expectEqualStrings("M0 0L1 1Z", found[0]);
     try testing.expectEqualStrings("M2 2L3 3Z", found[1]);
@@ -994,11 +1099,12 @@ test "a path inside an ignored element is not a shape" {
     const src =
         \\<svg viewBox="0 0 24 24"><defs><path d="M9 9Z"/></defs><path d="M0 0L2 2Z"/></svg>
     ;
-    const doc = try read(src);
+    var doc = try read(testing.allocator, src);
+    defer doc.deinit();
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 
     const found = try collect(gpa, src);
-    defer gpa.free(found);
+    defer freeCollected(gpa, found);
     try testing.expectEqual(@as(usize, 1), found.len);
     try testing.expectEqualStrings("M0 0L2 2Z", found[0]);
 }
@@ -1022,9 +1128,10 @@ test "the reader and the iterator agree on what a shape is" {
         "<svg viewBox=\"0 0 24 24\"><g><defs><path d=\"M9 9Z\"/></defs><path d=\"M0 0Z\"/></g></svg>",
     };
     for (documents) |src| {
-        const doc = try read(src);
+        var doc = try read(testing.allocator, src);
+        defer doc.deinit();
         const found = try collect(gpa, src);
-        defer gpa.free(found);
+        defer freeCollected(gpa, found);
         try testing.expectEqual(doc.shape_count, found.len);
     }
 }
@@ -1037,7 +1144,7 @@ test "a self-closing container does not disturb its siblings" {
     const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\"><g/><g></g>" ++
         "<g transform=\"translate(4,4)\"><g/><path d=\"M0 0H2V2H0Z\"/></g>" ++
         "<path d=\"M0 0H2V2H0Z\"/></svg>");
-    defer gpa.free(found);
+    defer freeCollected(gpa, found);
     try testing.expectEqual(@as(usize, 2), found.len);
 }
 
@@ -1048,10 +1155,11 @@ test "a self-closing ignorable does not end the subtree it is in" {
     const gpa = testing.allocator;
     const src = "<svg viewBox=\"0 0 8 8\"><defs><title/><path d=\"M9 9Z\"/></defs>" ++
         "<path d=\"M0 0Z\"/></svg>";
-    const doc = try read(src);
+    var doc = try read(testing.allocator, src);
+    defer doc.deinit();
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
     const found = try collect(gpa, src);
-    defer gpa.free(found);
+    defer freeCollected(gpa, found);
     try testing.expectEqual(@as(usize, 1), found.len);
     try testing.expectEqualStrings("M0 0Z", found[0]);
 }
@@ -1059,15 +1167,15 @@ test "a self-closing ignorable does not end the subtree it is in" {
 test "an element with geometry this reader cannot draw is refused" {
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>"),
+        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><foreignObject/></svg>"),
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>"),
+        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>"),
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>"),
+        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>"),
     );
 }
 
@@ -1076,38 +1184,43 @@ test "a document is refused before any of it is drawn" {
     // rather than hand out those two and fail on the third, which would be a
     // half-drawn picture and an error at once.
     try testing.expectError(error.UnsupportedElement, read(
-        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><use href=\"#a\"/></svg>",
+        testing.allocator,
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><text>x</text></svg>",
     ));
     try testing.expectError(error.NoPath, read(
+        testing.allocator,
         "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path/></svg>",
     ));
 }
 
 test "elements that carry no geometry are passed over" {
-    const doc = try read(
+    var doc = try read(
+        testing.allocator,
         "<svg viewBox=\"0 0 24 24\"><title>x</title><desc>y</desc><path d=\"M0 0L2 2Z\"/></svg>",
     );
+    defer doc.deinit();
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 }
 
 test "a viewBox that is not four positive numbers is refused" {
-    try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0\"><path d=\"M0 0Z\"/></svg>"));
-    try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0 0 0\"><path d=\"M0 0Z\"/></svg>"));
-    try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0 1 1 1\"><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.BadViewBox, read(testing.allocator, "<svg viewBox=\"0 0\"><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.BadViewBox, read(testing.allocator, "<svg viewBox=\"0 0 0 0\"><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.BadViewBox, read(testing.allocator, "<svg viewBox=\"0 0 1 1 1\"><path d=\"M0 0Z\"/></svg>"));
     // A document with no `viewBox` at all is not a bad viewBox -- it is a
     // document whose user units are pixels, and which has to say how large it
     // is some other way.
-    try testing.expectError(error.NoSize, read("<svg><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.NoSize, read(testing.allocator, "<svg><path d=\"M0 0Z\"/></svg>"));
 }
 
 test "a document with no path is refused" {
-    try testing.expectError(error.NoPath, read("<svg viewBox=\"0 0 24 24\"></svg>"));
-    try testing.expectError(error.NoPath, read("<svg viewBox=\"0 0 24 24\"><path/></svg>"));
+    try testing.expectError(error.NoPath, read(testing.allocator, "<svg viewBox=\"0 0 24 24\"></svg>"));
+    try testing.expectError(error.NoPath, read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><path/></svg>"));
 }
 
 test "the viewBox is scaled into the box asked for" {
     const gpa = testing.allocator;
-    const doc = try read(icon);
+    var doc = try read(testing.allocator, icon);
+    defer doc.deinit();
     var p: z2d.Path = .empty;
     defer p.deinit(gpa);
     // A 24-unit viewBox into a 48-pixel box doubles everything.
@@ -1118,7 +1231,8 @@ test "the viewBox is scaled into the box asked for" {
 }
 
 test "a box of a different shape letterboxes rather than distorting" {
-    const doc = try read(icon);
+    var doc = try read(testing.allocator, icon);
+    defer doc.deinit();
     // 48 wide by 24 tall: the scale is 1, and the drawing is centred.
     const t = doc.transformFor(0, 0, 48, 24);
     try testing.expectApproxEqAbs(@as(f64, 1), t.ax, 1e-12);
@@ -1168,32 +1282,38 @@ test "a preserveAspectRatio that is not one is refused" {
 
 test "a document says how large it is" {
     // `width` and `height` win.
-    const sized = try read("<svg width=\"64\" height=\"32\" viewBox=\"0 0 16 16\"><path d=\"M0 0Z\"/></svg>");
+    var sized = try read(testing.allocator, "<svg width=\"64\" height=\"32\" viewBox=\"0 0 16 16\"><path d=\"M0 0Z\"/></svg>");
+    defer sized.deinit();
     try testing.expectEqual(@as(f64, 64), sized.width);
     try testing.expectEqual(@as(f64, 32), sized.height);
     // The viewBox's extent is the fallback.
-    const boxed = try read("<svg viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    var boxed = try read(testing.allocator, "<svg viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    defer boxed.deinit();
     try testing.expectEqual(@as(f64, 16), boxed.width);
     try testing.expectEqual(@as(f64, 8), boxed.height);
     // A percentage of a viewport that does not exist is not a size, so the
     // viewBox supplies it -- which is what drawing programs' `100%` needs.
-    const percent = try read("<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    var percent = try read(testing.allocator, "<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    defer percent.deinit();
     try testing.expectEqual(@as(f64, 16), percent.width);
     // Units are resolved: 96pt is 128 pixels.
-    const units = try read("<svg width=\"96pt\" height=\"48pt\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    var units = try read(testing.allocator, "<svg width=\"96pt\" height=\"48pt\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    defer units.deinit();
     try testing.expectApproxEqAbs(@as(f64, 128), units.width, 1e-9);
     // And with neither there is nothing to go on.
-    try testing.expectError(error.NoSize, read("<svg><path d=\"M0 0Z\"/></svg>"));
-    try testing.expectError(error.NoSize, read("<svg width=\"0\" height=\"0\"><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.NoSize, read(testing.allocator, "<svg><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.NoSize, read(testing.allocator, "<svg width=\"0\" height=\"0\"><path d=\"M0 0Z\"/></svg>"));
 }
 
 test "a percentage is measured against the viewBox, not the drawn size" {
     // 50% of a viewBox height of 200 is 100 user units, whatever the document
     // says it is in pixels.
-    const doc = try read(
+    var doc = try read(
+        testing.allocator,
         "<svg width=\"100\" height=\"50\" viewBox=\"0 0 100 200\">" ++
             "<rect width=\"10\" height=\"50%\"/></svg>",
     );
+    defer doc.deinit();
     try testing.expectEqual(@as(f64, 100), doc.viewport().width);
     try testing.expectEqual(@as(f64, 200), doc.viewport().height);
     var it = doc.paths();
@@ -1206,27 +1326,27 @@ test "the fitting algorithm places the viewBox in the box" {
     const src = "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"";
     const tail = "\"><path d=\"M0 0Z\"/></svg>";
 
-    const mid = (try read(src ++ "xMidYMid meet" ++ tail)).transformFor(0, 0, 80, 40);
+    const mid = try transformOf(src ++ "xMidYMid meet" ++ tail, 80, 40);
     try testing.expectApproxEqAbs(@as(f64, 4), mid.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 4), mid.dy, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 20), mid.tx, 1e-12); // (80 - 40) / 2
     try testing.expectApproxEqAbs(@as(f64, 0), mid.ty, 1e-12);
 
-    const min = (try read(src ++ "xMinYMin meet" ++ tail)).transformFor(0, 0, 80, 40);
+    const min = try transformOf(src ++ "xMinYMin meet" ++ tail, 80, 40);
     try testing.expectApproxEqAbs(@as(f64, 0), min.tx, 1e-12);
 
-    const max = (try read(src ++ "xMaxYMax meet" ++ tail)).transformFor(0, 0, 80, 40);
+    const max = try transformOf(src ++ "xMaxYMax meet" ++ tail, 80, 40);
     try testing.expectApproxEqAbs(@as(f64, 40), max.tx, 1e-12);
 
     // Slice takes the larger ratio, so the viewBox overflows and the leftover
     // is negative -- the same arithmetic saying which part is kept.
-    const slice = (try read(src ++ "xMidYMid slice" ++ tail)).transformFor(0, 0, 80, 40);
+    const slice = try transformOf(src ++ "xMidYMid slice" ++ tail, 80, 40);
     try testing.expectApproxEqAbs(@as(f64, 8), slice.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0), slice.tx, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, -20), slice.ty, 1e-12); // (40 - 80) / 2
 
     // And `none` scales each axis on its own.
-    const stretch = (try read(src ++ "none" ++ tail)).transformFor(0, 0, 80, 40);
+    const stretch = try transformOf(src ++ "none" ++ tail, 80, 40);
     try testing.expectApproxEqAbs(@as(f64, 8), stretch.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 4), stretch.dy, 1e-12);
 }
@@ -1234,7 +1354,8 @@ test "the fitting algorithm places the viewBox in the box" {
 test "a document with no viewBox is scaled from its own size" {
     // Its user units are pixels at the size it claims, so drawing it larger
     // scales it rather than leaving it 1:1 in the corner.
-    const doc = try read("<svg width=\"48\" height=\"24\"><path d=\"M0 0Z\"/></svg>");
+    var doc = try read(testing.allocator, "<svg width=\"48\" height=\"24\"><path d=\"M0 0Z\"/></svg>");
+    defer doc.deinit();
     try testing.expectEqual(@as(?ViewBox, null), doc.view_box);
     const t = doc.transformFor(0, 0, 96, 48);
     try testing.expectApproxEqAbs(@as(f64, 2), t.ax, 1e-12);
@@ -1242,8 +1363,131 @@ test "a document with no viewBox is scaled from its own size" {
     try testing.expectApproxEqAbs(@as(f64, 0), t.tx, 1e-12);
 }
 
+test "a use draws what it names, wherever that is" {
+    const gpa = testing.allocator;
+    // Forward reference: `#later` is defined after the `<use>` that names it,
+    // which a single forward walk could not have resolved at all.
+    const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<use href=\"#later\"/><defs><path id=\"later\" d=\"M0 0H4V4H0Z\"/></defs></svg>");
+    defer freeCollected(gpa, found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqualStrings("M0 0H4V4H0Z", found[0]);
+}
+
+test "a use of a group draws everything in it" {
+    const gpa = testing.allocator;
+    const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<defs><g id=\"pair\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/></g></defs>" ++
+        "<use href=\"#pair\"/><use href=\"#pair\" x=\"4\"/></svg>");
+    defer freeCollected(gpa, found);
+    try testing.expectEqual(@as(usize, 4), found.len);
+}
+
+test "a use inherits from where it is, not from where its target is" {
+    // §5.6 deep-clones the target into the `<use>`, so it takes its paint from
+    // the `<use>`'s ancestors. A `<defs>` that names a fill does not reach it.
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<defs fill=\"red\"><path id=\"p\" d=\"M0 0Z\"/></defs>" ++
+        "<g fill=\"blue\"><use href=\"#p\"/></g></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const shape = (try it.next()).?;
+    try testing.expectEqual(@as(u8, 255), shape.fill.?.color.b);
+    try testing.expectEqual(@as(u8, 0), shape.fill.?.color.r);
+}
+
+test "a use folds its x and y into the transform" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<defs><path id=\"p\" d=\"M0 0Z\"/></defs><use href=\"#p\" x=\"3\" y=\"5\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const shape = (try it.next()).?;
+    try testing.expectApproxEqAbs(@as(f64, 3), shape.transform.tx, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 5), shape.transform.ty, 1e-12);
+}
+
+test "a reference that goes nowhere is refused" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.UnknownReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><use href=\"#nothing\"/></svg>",
+    ));
+    try testing.expectError(error.BadReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><use/></svg>",
+    ));
+    // An external reference names a file, and fetching one is exactly what
+    // being sans-I/O rules out -- it is why the renderer can be put in a
+    // process that cannot open anything.
+    try testing.expectError(error.BadReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><use href=\"other.svg#a\"/></svg>",
+    ));
+    try testing.expectError(error.BadReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><use href=\"#\"/></svg>",
+    ));
+}
+
+test "a use that draws itself is refused" {
+    const gpa = testing.allocator;
+    // Directly: a group containing a `<use>` of that group.
+    try testing.expectError(error.RecursiveUse, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g id=\"loop\"><use href=\"#loop\"/></g></svg>",
+    ));
+    // And round a longer way.
+    try testing.expectError(error.RecursiveUse, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g id=\"a\"><g id=\"b\"><use href=\"#a\"/></g></g></svg>",
+    ));
+    // A `<use>` naming itself is a chain rather than a subtree, so the hop
+    // count is what stops it.
+    try testing.expectError(error.TooManyUseHops, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><use id=\"self\" href=\"#self\"/></svg>",
+    ));
+}
+
+test "the same target used twice is not a cycle" {
+    // The stack is the cycle check, so a target that has been *closed* again
+    // must not look like one -- two siblings naming the same group are
+    // perfectly ordinary.
+    const gpa = testing.allocator;
+    const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<defs><g id=\"g\"><path d=\"M0 0Z\"/></g></defs>" ++
+        "<use href=\"#g\"/><use href=\"#g\"/><use href=\"#g\"/></svg>");
+    defer freeCollected(gpa, found);
+    try testing.expectEqual(@as(usize, 3), found.len);
+}
+
+test "an element in a foreign namespace is passed over, not refused" {
+    // An Inkscape file's `<sodipodi:namedview>` is not SVG content and nothing
+    // is meant to draw it. Refusing it would refuse the file.
+    const gpa = testing.allocator;
+    const found = try collect(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" " ++
+        "xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" " ++
+        "viewBox=\"0 0 8 8\"><sodipodi:namedview id=\"nv\"/>" ++
+        "<path d=\"M0 0Z\"/></svg>");
+    defer freeCollected(gpa, found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+}
+
+test "the first of a duplicated id wins" {
+    const gpa = testing.allocator;
+    const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<defs><path id=\"dup\" d=\"M0 0Z\"/><path id=\"dup\" d=\"M9 9Z\"/></defs>" ++
+        "<use href=\"#dup\"/></svg>");
+    defer freeCollected(gpa, found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqualStrings("M0 0Z", found[0]);
+}
+
 test "a viewBox with an offset is translated away" {
-    const doc = try read("<svg viewBox=\"-12 -12 24 24\"><path d=\"M0 0Z\"/></svg>");
+    var doc = try read(testing.allocator, "<svg viewBox=\"-12 -12 24 24\"><path d=\"M0 0Z\"/></svg>");
+    defer doc.deinit();
     const t = doc.transformFor(0, 0, 24, 24);
     try testing.expectApproxEqAbs(@as(f64, 1), t.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 12), t.tx, 1e-12);

@@ -113,7 +113,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "rectcirclepsoygnlinwdthxy12points" ++
     "strokewidthcapjonmielmtdasharyofst" ++
     "preserveAspctRioMdnlx%emptcin" ++
-    "&#;xampltqsogu09AZ";
+    "&#;xampltqsogu09AZ" ++
+    "usehrfid#defxlink:";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -204,7 +205,11 @@ fn documentTarget(input: []const u8) anyerror!void {
     const src = buf[0..smith.slice(&buf)];
     if (src.len == 0) return;
 
-    const doc = svg.read(src) catch return;
+    var doc = svg.read(backing, src) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return,
+    };
+    defer doc.deinit();
     // A viewBox that got past the reader is four finite numbers with a
     // positive extent, which is what every scale computed from it assumes.
     if (doc.view_box) |vb| {
@@ -234,12 +239,15 @@ fn documentTarget(input: []const u8) anyerror!void {
             .poly => |poly| poly.points,
             else => null,
         };
-        // An empty slice borrows nothing -- a `<polyline>` with no `points`
-        // gets `""`, which is a static empty string rather than a window into
-        // the source -- so there is nothing to check for one.
+        // Whatever a shape borrows comes from the tree's arena, never from
+        // the source: `read` copies every string as it parses, which is what
+        // lets a caller free the source the moment it returns. A slice
+        // pointing back into `src` would be a lifetime bug that only showed
+        // up once somebody took that documented permission.
         if (borrowed) |b| if (b.len != 0) {
-            try testing.expect(@intFromPtr(b.ptr) >= @intFromPtr(src.ptr));
-            try testing.expect(@intFromPtr(b.ptr) + b.len <= @intFromPtr(src.ptr) + src.len);
+            const inside = @intFromPtr(b.ptr) >= @intFromPtr(src.ptr) and
+                @intFromPtr(b.ptr) < @intFromPtr(src.ptr) + src.len;
+            try testing.expect(!inside);
         };
         if (shape.stroke_width) |w| try expectUsable(w);
         if (shape.stroke_opacity) |o| try testing.expect(o >= 0.0 and o <= 1.0);
@@ -250,8 +258,9 @@ fn documentTarget(input: []const u8) anyerror!void {
         }
         if (shape.stroke_dashoffset) |o| try expectUsable(o);
         if (shape.stroke_dasharray) |raw| if (raw.len != 0) {
-            try testing.expect(@intFromPtr(raw.ptr) >= @intFromPtr(src.ptr));
-            try testing.expect(@intFromPtr(raw.ptr) + raw.len <= @intFromPtr(src.ptr) + src.len);
+            const inside = @intFromPtr(raw.ptr) >= @intFromPtr(src.ptr) and
+                @intFromPtr(raw.ptr) < @intFromPtr(src.ptr) + src.len;
+            try testing.expect(!inside);
         };
 
         // And every number a shape carries is one the rasterizer can use.
@@ -598,7 +607,28 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&nosuch;\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&#\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0&amp;&lt;&gt;&apos;&quot;\"/></svg>",
+    // `<use>`, which is the first thing here that can name something
+    // elsewhere in the document -- and so the first that can name itself.
+    "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs><use href=\"#r\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><use href=\"#r\" x=\"2\" y=\"2\"/><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><g id=\"g\"><rect width=\"2\" height=\"2\"/><circle r=\"1\"/></g></defs><use href=\"#g\"/><use href=\"#g\" x=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"a\" width=\"2\" height=\"2\"/><use id=\"b\" href=\"#a\" x=\"1\"/></defs><use href=\"#b\" x=\"2\"/></svg>",
+    "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs><use xlink:href=\"#r\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect id=\"h\" width=\"4\" height=\"4\"/><use href=\"#h\" x=\"4\"/></svg>",
+    // References that have to be refused, and the loops that have to be
+    // noticed rather than followed.
+    "<svg viewBox=\"0 0 8 8\"><use href=\"#nothing\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><use/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><use href=\"other.svg#a\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><use href=\"#\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g id=\"loop\"><use href=\"#loop\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g id=\"a\"><g id=\"b\"><use href=\"#a\"/></g></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><use id=\"self\" href=\"#self\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><path id=\"dup\" d=\"M0 0Z\"/><path id=\"dup\" d=\"M9 9Z\"/></defs><use href=\"#dup\"/></svg>",
+    // A foreign namespace, which is passed over rather than refused.
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" viewBox=\"0 0 8 8\"><sodipodi:namedview id=\"nv\"/><path d=\"M0 0Z\"/></svg>",
     // Elements that are still refused.
+    // `<use>` naming an id the document does not have.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",
 };

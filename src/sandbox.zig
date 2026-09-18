@@ -122,6 +122,7 @@ const testing = std.testing;
 const Allocator = mem.Allocator;
 
 const z2d = @import("z2d");
+const ztree = @import("ztree");
 
 const raster = @import("raster.zig");
 
@@ -482,7 +483,10 @@ const WireError = enum(u16) {
     too_many_dashes = 25,
     bad_preserve_aspect_ratio = 26,
     no_size = 27,
-    attribute_too_long = 28,
+    bad_reference = 29,
+    unknown_reference = 30,
+    recursive_use = 31,
+    too_many_use_hops = 32,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -519,7 +523,10 @@ fn wireFromError(err: anyerror) WireError {
         error.TooManyDashes => .too_many_dashes,
         error.BadPreserveAspectRatio => .bad_preserve_aspect_ratio,
         error.NoSize => .no_size,
-        error.AttributeTooLong => .attribute_too_long,
+        error.BadReference => .bad_reference,
+        error.UnknownReference => .unknown_reference,
+        error.RecursiveUse => .recursive_use,
+        error.TooManyUseHops => .too_many_use_hops,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -533,8 +540,8 @@ fn wireFromError(err: anyerror) WireError {
 /// rather than by listing its members here — a list that would go stale
 /// silently the next time zxml grew a way to refuse a document.
 fn isXmlError(err: anyerror) bool {
-    const xml = @import("zxml");
-    inline for (@typeInfo(xml.Error).error_set.?) |e| {
+    @setEvalBranchQuota(20000);
+    inline for (@typeInfo(ztree.ParseError).error_set.?) |e| {
         if (err == @field(anyerror, e.name)) return true;
     }
     return false;
@@ -568,7 +575,10 @@ fn wireToError(status: u16) Error {
         .too_many_dashes => error.TooManyDashes,
         .bad_preserve_aspect_ratio => error.BadPreserveAspectRatio,
         .no_size => error.NoSize,
-        .attribute_too_long => error.AttributeTooLong,
+        .bad_reference => error.BadReference,
+        .unknown_reference => error.UnknownReference,
+        .recursive_use => error.RecursiveUse,
+        .too_many_use_hops => error.TooManyUseHops,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -780,7 +790,7 @@ test "a document the reader refuses comes back as that refusal" {
 
     try testing.expectError(error.UnsupportedElement, render(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
     try testing.expectError(error.NoSize, render(
@@ -835,7 +845,8 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.TooManyDashes, .too_many_dashes },
         .{ error.BadPreserveAspectRatio, .bad_preserve_aspect_ratio },
         .{ error.NoSize, .no_size },
-        .{ error.AttributeTooLong, .attribute_too_long },
+        .{ error.BadReference, .bad_reference },
+        .{ error.RecursiveUse, .recursive_use },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },
@@ -870,7 +881,7 @@ test "every error this library defines has a wire spelling of its own" {
         const exempt = comptime err == error.RasterFailed or
             inSet(z2d.painter.FillError, err) or
             inSet(z2d.Path.Error, err) or
-            inSet(@import("zxml").Error, err);
+            inSet(ztree.ParseError, err);
         if (!exempt and wireFromError(err) == .raster_failed) {
             std.debug.print("no wire spelling for error.{s}\n", .{e.name});
             return error.ErrorMissingFromWire;

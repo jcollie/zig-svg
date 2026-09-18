@@ -50,6 +50,19 @@ An element in a **foreign namespace** is passed over rather than refused. An
 Inkscape file's `<sodipodi:namedview>` is not SVG content and nothing is meant
 to draw it; refusing it would refuse the file.
 
+`fill="url(#g)"` and `stroke="url(#g)"` name a gradient the same way a `<use>`
+names its target, so the tree resolves both. A gradient's numbers live in a
+space of their own, and three things stack up to say where that space is — the
+shape's transform, then the units mapping, then `gradientTransform` inside
+that. `objectBoundingBox`, the default, makes them fractions of the shape's own
+bounding box, which is why a gradient on a wide shape comes out stretched: the
+space itself is stretched.
+
+`spreadMethod="reflect"` and `"repeat"` are **refused**. z2d has no extend mode
+— there is a `TODO` where one would go — so they cannot be drawn rather than
+merely being unimplemented here, and they are visibly different pictures.
+Drawing `pad` instead would be a wrong picture that looks deliberate.
+
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
 something else. `preserveAspectRatio` then decides how the one is fitted into
@@ -124,6 +137,9 @@ short of the specification.
 | `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
 | `<use>`, `<defs>` | yes — `href` and `xlink:href`, forward references, chains |
+| `<linearGradient>`, `<radialGradient>` | yes, on `fill` and `stroke`, with `<stop>` and `href` inheritance |
+| `gradientUnits`, `gradientTransform` | yes — both unit systems |
+| `spreadMethod` | `pad` only; `reflect` and `repeat` are refused |
 | A foreign namespace | passed over, not refused — an Inkscape file reads |
 | `transform` | all six functions, on `<svg>`, `<g>` and any shape |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
@@ -139,7 +155,7 @@ short of the specification.
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
-| `style`, gradients, text, `<use>`, CSS | **no** |
+| `<pattern>`, `style`, text, CSS | **no** |
 | `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
@@ -382,12 +398,7 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
-`gradientUnits`, `spreadMethod`. z2d has gradients, and `fill="url(#g)"` is an
-id reference like `<use>`'s, which the tree already resolves — so the work is
-the coordinate systems and `<stop>`.
-
-**2. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**1. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -396,13 +407,18 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**3. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
+**2. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in
 hand, the `em` and `ex` that are refused today. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
 a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and
 handed in.
+
+**3. Patterns and the rest of `spreadMethod`.** `<pattern>` needs a tile
+rendered to its own surface and then repeated, and `reflect`/`repeat` need an
+extend mode z2d does not have — so both are upstream work before they are work
+here.
 
 Deliberately not on the list: scripting, `<foreignObject>`, animation, and
 external document references. Those are the parts of SVG that make it a

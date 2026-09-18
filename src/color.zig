@@ -84,6 +84,10 @@ pub const Paint = union(enum) {
     current,
     /// A colour the document named.
     color: Color,
+    /// `fill="url(#g)"`: a paint server elsewhere in the document, named by
+    /// the id this holds -- without the `#`, and borrowed from wherever the
+    /// attribute value lives.
+    reference: []const u8,
 };
 
 /// Read a `fill`.
@@ -91,7 +95,23 @@ pub fn parsePaint(text: []const u8) Error!Paint {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (ascii.eqlIgnoreCase(t, "none")) return .none;
     if (ascii.eqlIgnoreCase(t, "currentcolor")) return .current;
+    if (parseReference(t)) |id| return .{ .reference = id };
     return .{ .color = try parseColor(t) };
+}
+
+/// The id inside a `url(#id)`, or null when this is not one.
+///
+/// Only a fragment of this document. `url(other.svg#g)` names a file, and
+/// fetching one is what being sans-I/O rules out -- so it is not a reference
+/// this can resolve, and falls through to being refused as a colour, which is
+/// what it is not.
+fn parseReference(t: []const u8) ?[]const u8 {
+    if (t.len < 7) return null; // `url(#x)` is the shortest there is
+    if (!ascii.eqlIgnoreCase(t[0..4], "url(")) return null;
+    if (t[t.len - 1] != ')') return null;
+    const inner = std.mem.trim(u8, t[4 .. t.len - 1], " \t\r\n'\"");
+    if (inner.len < 2 or inner[0] != '#') return null;
+    return inner[1..];
 }
 
 /// Read a colour, which `none` and `currentColor` are not.
@@ -472,6 +492,17 @@ test "every name in the table round trips, and nothing else is a name" {
     for ([_][]const u8{ "notacolour", "", "reddish", "lightgoldenrodyellowish" }) |t| {
         try testing.expectError(error.BadColor, parseColor(t));
     }
+}
+
+test "a url reference is read as one" {
+    try testing.expectEqualStrings("g", (try parsePaint("url(#g)")).reference);
+    try testing.expectEqualStrings("a-b", (try parsePaint("url( #a-b )")).reference);
+    try testing.expectEqualStrings("q", (try parsePaint("URL(#q)")).reference);
+    try testing.expectEqualStrings("q", (try parsePaint("url('#q')")).reference);
+    // A reference to a file is not one this can resolve, so it is not a
+    // reference at all -- and it is not a colour either.
+    try testing.expectError(error.BadColor, parsePaint("url(other.svg#g)"));
+    try testing.expectError(error.BadColor, parsePaint("url(#)"));
 }
 
 test "none and currentColor are not colours" {

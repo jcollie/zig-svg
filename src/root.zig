@@ -62,6 +62,8 @@ pub const color = @import("color.zig");
 pub const transform = @import("transform.zig");
 /// SVG's basic shapes, as path operations.
 pub const shapes = @import("shapes.zig");
+/// `<linearGradient>` and `<radialGradient>`.
+pub const gradient = @import("gradient.zig");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
@@ -111,6 +113,7 @@ test {
     _ = color;
     _ = transform;
     _ = shapes;
+    _ = gradient;
     _ = length;
     _ = path;
     _ = arc;

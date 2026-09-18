@@ -114,7 +114,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "strokewidthcapjonmielmtdasharyofst" ++
     "preserveAspctRioMdnlx%emptcin" ++
     "&#;xampltqsogu09AZ" ++
-    "usehrfid#defxlink:";
+    "usehrfid#defxlink:" ++
+    "linearGradstopfetURuns%BoxpM";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -627,6 +628,25 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><defs><path id=\"dup\" d=\"M0 0Z\"/><path id=\"dup\" d=\"M9 9Z\"/></defs><use href=\"#dup\"/></svg>",
     // A foreign namespace, which is passed over rather than refused.
     "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:sodipodi=\"http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd\" viewBox=\"0 0 8 8\"><sodipodi:namedview id=\"nv\"/><path d=\"M0 0Z\"/></svg>",
+    // Gradients, which are named the way a `<use>` names its target.
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><radialGradient id=\"g\" fx=\"0.2\" fy=\"0.3\"><stop offset=\"0\"/><stop offset=\"1\" stop-color=\"teal\"/></radialGradient></defs><circle cx=\"4\" cy=\"4\" r=\"4\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" x2=\"8\"><stop offset=\"0\"/><stop offset=\"1\" stop-color=\"red\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\" gradientTransform=\"rotate(45)\"><stop offset=\"0\"/><stop offset=\"1\" stop-color=\"red\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"b\"><stop offset=\"0\"/><stop offset=\"1\" stop-color=\"red\"/></linearGradient><linearGradient id=\"g\" href=\"#b\" y2=\"1\"/></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient></defs><rect width=\"8\" height=\"8\" stroke=\"url(#g)\" stroke-width=\"2\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"0.8\"/><stop offset=\"0.2\" stop-color=\"red\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    // Gradients with nothing in them, and references that go wrong.
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"/></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"url(#missing)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><pattern id=\"p\"/></defs><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\" spreadMethod=\"reflect\"><stop offset=\"0\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\" gradientUnits=\"bogus\"><stop offset=\"0\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"a\" href=\"#b\"><stop offset=\"0\"/></linearGradient><linearGradient id=\"b\" href=\"#a\"/></defs><rect width=\"8\" height=\"8\" fill=\"url(#a)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"bogus\"/></linearGradient></defs><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    // A gradient on a shape with no extent, which has no box to be fractions
+    // of.
+    "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient></defs><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" fill=\"url(#g)\"/></svg>",
     // Elements that are still refused.
     // `<use>` naming an id the document does not have.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",

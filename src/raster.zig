@@ -23,6 +23,7 @@ const z2d = @import("z2d");
 
 const color = @import("color.zig");
 const document = @import("document.zig");
+const gradient = @import("gradient.zig");
 const path = @import("path.zig");
 const transform = @import("transform.zig");
 
@@ -168,7 +169,11 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     TooManyShapes,
     /// A `stroke-dasharray` naming more than `max_dashes` lengths.
     TooManyDashes,
-};
+    /// A `fill` or `stroke` naming something that is not a paint server this
+    /// library implements -- a `<pattern>`, or an element that is not a paint
+    /// server at all.
+    UnsupportedPaintServer,
+} || gradient.Error;
 
 /// Where in a surface to draw, in pixels.
 pub const Box = struct {
@@ -270,16 +275,19 @@ fn drawDocument(
             // A shape with no geometry draws nothing, which is not an error;
             // `painter.fill` would take it too, but this says so on purpose.
             if (p.nodes.items.len != 0) {
-                const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = paint } };
-                try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-                    .fill_rule = shape.fill_rule orelse opts.fill_rule,
-                    .anti_aliasing_mode = opts.anti_aliasing_mode,
-                    .tolerance = opts.tolerance,
-                });
+                var built: Source = try makeSource(gpa, doc, shape, paint, ctm, opts);
+                defer built.deinit(gpa);
+                if (built.pattern()) |source| {
+                    try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
+                        .fill_rule = shape.fill_rule orelse opts.fill_rule,
+                        .anti_aliasing_mode = opts.anti_aliasing_mode,
+                        .tolerance = opts.tolerance,
+                    });
+                }
             }
         }
 
-        if (stroke) |*s| {
+        if (stroke) |*s| stroking: {
             // Built a second time, because the subpaths have to be left as
             // the document wrote them: a stroked open subpath is capped at its
             // ends rather than joined back to its start.
@@ -312,7 +320,9 @@ fn drawDocument(
                     pen_ctm = .identity;
                 }
 
-                const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = pen.paint } };
+                var built: Source = try makeSource(gpa, doc, shape, pen.paint, ctm, opts);
+                defer built.deinit(gpa);
+                const source = built.pattern() orelse break :stroking;
                 z2d.painter.stroke(gpa, surface, &source, p.nodes.items, .{
                     .line_width = pen.width,
                     .line_cap_mode = pen.cap,
@@ -335,15 +345,24 @@ fn drawDocument(
     }
 }
 
-/// The pixel one shape is painted with, or null when it is not painted at all.
+/// What a shape is painted with: one colour, or a gradient to be built.
+const Paint = union(enum) {
+    pixel: z2d.Pixel,
+    /// The id of a paint server, and the alpha to fade it by. The gradient
+    /// itself is built at the point of painting, because it needs the shape's
+    /// bounding box and that is not known until the path is.
+    reference: struct { id: []const u8, alpha: f64 },
+};
+
+/// What one shape's `fill` comes to, or null when it is not painted at all.
 ///
 /// Three alphas multiply together: the colour's own, from `#rrggbbaa` or
 /// `rgba()`; `fill-opacity`; and `opacity`. For a shape that has a fill and
 /// nothing else, multiplying `opacity` in like this is exactly what
 /// compositing the shape as its own layer would produce -- which is why
-/// `opacity` on a `<path>` is implemented and `opacity` on the root `<svg>`,
-/// where shapes could overlap, is refused by the reader instead.
-fn resolveFill(shape: document.Shape, opts: Options) ?z2d.Pixel {
+/// `opacity` on a shape is implemented and `opacity` on a container, where
+/// shapes could overlap, is refused by the reader instead.
+fn resolveFill(shape: document.Shape, opts: Options) ?Paint {
     const alpha = (shape.fill_opacity orelse 1.0) * shape.opacity;
     if (alpha <= 0) return null;
 
@@ -355,10 +374,12 @@ fn resolveFill(shape: document.Shape, opts: Options) ?z2d.Pixel {
         .none => return null,
         .color => |c| c,
         .current => shape.current_color,
+        .reference => |id| return .{ .reference = .{ .id = id, .alpha = alpha } },
     };
 
-    if (named) |c| return fadeColor(c, alpha);
-    return fadePixel(opts.fill, alpha);
+    const pixel = (if (named) |c| fadeColor(c, alpha) else fadePixel(opts.fill, alpha)) orelse
+        return null;
+    return .{ .pixel = pixel };
 }
 
 /// A parsed colour as a premultiplied pixel, faded by `alpha`.
@@ -371,6 +392,217 @@ fn fadeColor(c: color.Color, alpha: f64) ?z2d.Pixel {
         @as(f64, @floatFromInt(c.b)) / 255.0,
         a,
     ) };
+}
+
+/// The line style a stroke is drawn with, which is the same whether it is
+/// painted in a colour or with a gradient.
+fn strokeStyle(shape: document.Shape, width: f64, paint: Paint) Error!Stroke {
+    return .{
+        .paint = paint,
+        .width = width,
+        .cap = shape.stroke_linecap orelse .butt,
+        .join = shape.stroke_linejoin orelse .miter,
+        // SVG's initial `stroke-miterlimit` is **4**. z2d's is 10, which would
+        // miter every corner sharper than about 11 degrees that should have
+        // been bevelled -- a difference that shows on any spike and on nothing
+        // else, so it is exactly the kind of wrong nobody notices. resvg was
+        // asked, and it is 4.
+        .miter_limit = shape.stroke_miterlimit orelse 4.0,
+        .dash_offset = shape.stroke_dashoffset orelse 0,
+    };
+}
+
+/// A z2d paint source, and whatever it had to build to exist.
+///
+/// A gradient owns its stops, so it cannot simply be returned by value and
+/// pointed at -- `z2d.Pattern` holds a `*Gradient`. This keeps the gradient
+/// beside the pattern so both live exactly as long as the draw that uses them.
+const Source = union(enum) {
+    pixel: z2d.Pixel,
+    gradient: z2d.Gradient,
+    /// A reference that resolves to nothing paintable -- a gradient with no
+    /// stops. resvg draws nothing for one, and so does this.
+    nothing,
+
+    fn deinit(self: *Source, gpa: Allocator) void {
+        switch (self.*) {
+            // The stops are in a buffer the caller owns, so there is nothing
+            // of z2d's to release.
+            .gradient => |*g| g.deinit(gpa),
+            else => {},
+        }
+    }
+
+    fn pattern(self: *Source) ?z2d.Pattern {
+        return switch (self.*) {
+            .pixel => |p| .{ .opaque_pattern = .{ .pixel = p } },
+            .gradient => |*g| g.asPattern(),
+            .nothing => null,
+        };
+    }
+};
+
+/// Turn a resolved paint into something z2d can draw with.
+///
+/// A colour is a pattern on its own. A reference has to be found, read, and
+/// placed: a gradient's numbers are in a space of their own, and the matrix
+/// that says where that space is depends on the shape being painted.
+fn makeSource(
+    gpa: Allocator,
+    doc: *const document.Document,
+    shape: document.Shape,
+    paint: Paint,
+    ctm: z2d.Transformation,
+    opts: Options,
+) Error!Source {
+    const ref = switch (paint) {
+        .pixel => |p| return .{ .pixel = p },
+        .reference => |r| r,
+    };
+
+    const node = doc.ids.get(ref.id) orelse return error.UnknownReference;
+    const spec = (try gradient.read(
+        doc.tree,
+        &doc.ids,
+        node,
+        doc.viewport(),
+        shape.current_color orelse callerColor(opts),
+    )) orelse return error.UnsupportedPaintServer;
+
+    // A gradient with no stops paints nothing, which is what resvg draws and
+    // is not an error: the gradient exists, it just has no colours in it.
+    if (spec.stop_count == 0) return .nothing;
+
+    // Where the gradient's own space sits: the shape's transform, then the
+    // units mapping, then `gradientTransform` inside that.
+    var placement = ctm;
+    if (spec.units == .object_bounding_box) {
+        const box = try boundingBox(gpa, shape, opts);
+        // A shape with no extent in one direction has no box to be fractions
+        // of, and §7.11 says such a gradient is not rendered.
+        if (!(box.width > 0) or !(box.height > 0)) return .nothing;
+        placement = placement.mul(.{
+            .ax = box.width,
+            .by = 0,
+            .cx = 0,
+            .dy = box.height,
+            .tx = box.x,
+            .ty = box.y,
+        });
+    }
+    placement = placement.mul(spec.transform);
+    if (!transform.isFinite(placement)) return error.NonFiniteTransform;
+
+    var g: z2d.Gradient = .init(.{
+        .type = switch (spec.kind) {
+            .linear => |l| .{ .linear = .{ .x0 = l.x1, .y0 = l.y1, .x1 = l.x2, .y1 = l.y2 } },
+            // SVG's focal point is z2d's inner circle, with a radius of zero:
+            // the two-circle form is exactly what §13.2.3 describes, so the
+            // focus needs no special case.
+            .radial => |r| .{ .radial = .{
+                .inner_x = r.fx orelse r.cx,
+                .inner_y = r.fy orelse r.cy,
+                .inner_radius = 0,
+                .outer_x = r.cx,
+                .outer_y = r.cy,
+                .outer_radius = r.r,
+            } },
+        },
+        // `.linear_rgb` is the one that gives SVG's sRGB interpolation, and
+        // the name is the opposite of what it sounds like.
+        //
+        // z2d's `LinearRGB` is the space an 8-bit pixel's bytes are already
+        // in, so interpolating in it blends the encoded values -- which is
+        // what SVG's `color-interpolation: sRGB` asks for. Its `SRGB` applies
+        // a gamma transform on top, so `.srgb` blends *decoded* values and
+        // comes out dark. Measured: the midpoint of red to blue is 126,0,129
+        // under `.linear_rgb` and 54,0,57 under `.srgb`, and resvg draws
+        // 127,0,128.
+        //
+        // The same inversion decides the stops below, which is why they go in
+        // as `.rgba` rather than `.srgba`.
+        .method = .linear_rgb,
+    });
+    errdefer g.deinit(gpa);
+
+    for (spec.slice()) |stop| {
+        const a = stop.value.alpha * ref.alpha;
+        // `.rgba`, for the reason above: it is the space the bytes are
+        // already in, so this hands z2d the colour the document wrote.
+        // `.srgba` would decode them and paint mediumseagreen as 11,117,43.
+        try g.addStop(gpa, @floatCast(stop.offset), .{ .rgba = .{
+            @as(f32, @floatFromInt(stop.value.r)) / 255.0,
+            @as(f32, @floatFromInt(stop.value.g)) / 255.0,
+            @as(f32, @floatFromInt(stop.value.b)) / 255.0,
+            @floatCast(a),
+        } });
+    }
+    g.setTransformation(placement) catch |err| switch (err) {
+        // A placement that collapses the plane has nothing to sample through.
+        error.InvalidMatrix => return .nothing,
+        else => |e| return e,
+    };
+    return .{ .gradient = g };
+}
+
+/// The caller's own fill as a colour, for a `stop-color="currentColor"` in a
+/// document that names no `color` of its own.
+fn callerColor(opts: Options) color.Color {
+    const straight = z2d.pixel.RGBA.fromPixel(opts.fill).demultiply();
+    return .{
+        .r = straight.r,
+        .g = straight.g,
+        .b = straight.b,
+        .alpha = @as(f64, @floatFromInt(straight.a)) / 255.0,
+    };
+}
+
+/// A shape's bounding box in its **own** user space -- before its transform,
+/// which is what §7.11 means by the object bounding box.
+///
+/// It costs a third build of the same geometry, and there is no way round
+/// that: the fill's path is already in device space and the stroke's is too,
+/// and the bounding box of a rotated shape is not the rotation of its bounding
+/// box. Only a gradient in `objectBoundingBox` units asks for one.
+fn boundingBox(gpa: Allocator, shape: document.Shape, opts: Options) Error!Box {
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    try document.buildShape(&p, gpa, shape.geometry, .identity, .{
+        .max_nodes = opts.limits.max_path_nodes,
+    });
+
+    var min_x: f64 = std.math.inf(f64);
+    var min_y: f64 = std.math.inf(f64);
+    var max_x: f64 = -std.math.inf(f64);
+    var max_y: f64 = -std.math.inf(f64);
+    const see = struct {
+        fn f(pt: anytype, lo_x: *f64, lo_y: *f64, hi_x: *f64, hi_y: *f64) void {
+            lo_x.* = @min(lo_x.*, pt.x);
+            lo_y.* = @min(lo_y.*, pt.y);
+            hi_x.* = @max(hi_x.*, pt.x);
+            hi_y.* = @max(hi_y.*, pt.y);
+        }
+    }.f;
+    for (p.nodes.items) |node| switch (node) {
+        .move_to => |n| see(n.point, &min_x, &min_y, &max_x, &max_y),
+        .line_to => |n| see(n.point, &min_x, &min_y, &max_x, &max_y),
+        // The control points, not the curve. A hull is larger than the curve
+        // it bounds, so a gradient over a curved shape can start a little
+        // outside it -- the specification wants the tight box, and getting it
+        // means solving each cubic for its extrema. Worth doing when a fixture
+        // shows the difference; the hull is what most renderers used for
+        // years.
+        .curve_to => |n| {
+            see(n.p1, &min_x, &min_y, &max_x, &max_y);
+            see(n.p2, &min_x, &min_y, &max_x, &max_y);
+            see(n.p3, &min_x, &min_y, &max_x, &max_y);
+        },
+        .close_path => {},
+    };
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y)) {
+        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    }
+    return .{ .x = min_x, .y = min_y, .width = max_x - min_x, .height = max_y - min_y };
 }
 
 /// The most dashes a `stroke-dasharray` may name.
@@ -390,7 +622,7 @@ pub const max_dashes = 64;
 /// every copy's slice would point at the dead frame of the function that built
 /// it. It would read the right numbers for a while, too.
 const Stroke = struct {
-    paint: z2d.Pixel,
+    paint: Paint,
     width: f64,
     cap: z2d.options.CapMode,
     join: z2d.options.JoinMode,
@@ -467,23 +699,20 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
         .none => return null,
         .color => |c| c,
         .current => shape.current_color,
+        .reference => |id| {
+            var ref: Stroke = try strokeStyle(shape, width, .{
+                .reference = .{ .id = id, .alpha = alpha },
+            });
+            if (shape.stroke_dasharray) |raw| {
+                ref.dash_count = try readDashes(raw, &ref.dash_storage);
+            }
+            return ref;
+        },
     };
     const pixel = (if (named) |c| fadeColor(c, alpha) else fadePixel(opts.fill, alpha)) orelse
         return null;
 
-    var result: Stroke = .{
-        .paint = pixel,
-        .width = width,
-        .cap = shape.stroke_linecap orelse .butt,
-        .join = shape.stroke_linejoin orelse .miter,
-        // SVG's initial `stroke-miterlimit` is **4**. z2d's is 10, which would
-        // miter every corner sharper than about 11 degrees that should have
-        // been bevelled -- a difference that shows on any spike and on nothing
-        // else, so it is exactly the kind of wrong nobody notices. resvg was
-        // asked, and it is 4.
-        .miter_limit = shape.stroke_miterlimit orelse 4.0,
-        .dash_offset = shape.stroke_dashoffset orelse 0,
-    };
+    var result: Stroke = try strokeStyle(shape, width, .{ .pixel = pixel });
     if (shape.stroke_dasharray) |raw| {
         result.dash_count = try readDashes(raw, &result.dash_storage);
     }

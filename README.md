@@ -29,6 +29,14 @@ try svg.draw(gpa, &surface, source, .{ .x = 0, .y = 0, .width = 72, .height = 56
 });
 ```
 
+A zero or negative width, height or radius draws nothing and is not an error —
+`<rect/>` and `<circle r="-2"/>` are both simply empty, which is what resvg
+does. **`<line>` never draws anything**, because a line encloses no area and
+this library fills without stroking; it is implemented rather than refused
+because that is the honest answer, and because stroking is the next feature.
+The same caveat applies to a `<path stroke="…" fill="none">`: the `stroke` is
+ignored today, so such a document renders blank. See item 2 below.
+
 Groups nest, and carry both presentation attributes and a transform:
 
 ```xml
@@ -62,24 +70,31 @@ seeds it. Any of the three is the whole project.
 
 ## What it draws
 
-One `<svg>` carrying a `viewBox`, and any number of `<path>` elements carrying
-a `d`, each with its own colour, painted in document order. That is every one
-of the 7,447 [Material Design Icons](https://pictogrammers.com/library/mdi/),
-most other icon sets, and a long way short of SVG.
+One `<svg>` carrying a `viewBox`, and any number of shapes inside it — `<path>`
+and the five basic shapes — each with its own colour and transform, painted in
+document order. That is every one of the 7,447
+[Material Design Icons](https://pictogrammers.com/library/mdi/), most other
+icon sets, a good deal of hand-written and exported SVG, and still a long way
+short of the specification.
 
 | | |
 | --- | --- |
 | Path data — SVG 1.1 §8.3 | complete, every command in both spellings |
 | Elliptical arcs — appendix F.6 | complete, including the degenerate cases |
-| Several `<path>` elements | yes, painted in document order |
+| Several shapes | yes, painted in document order |
+| `<rect>` | yes, including `rx`/`ry` rounded corners |
+| `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>` | yes |
+| `<line>` | read, and draws nothing — a line has no area to fill |
 | `<g>` | yes, nested, with inherited attributes |
-| `transform` | all six functions, on `<svg>`, `<g>` and `<path>` |
+| `transform` | all six functions, on `<svg>`, `<g>` and any shape |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
-| `opacity` | yes, on a `<path>` |
+| `opacity` | yes, on a shape |
 | `viewBox` and `preserveAspectRatio` | the viewBox; aspect ratio always `xMidYMid meet` |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
+| Lengths | a bare number, or `px`, which is the same thing |
 | Nesting depth | `<g>` up to `document.max_container_depth` (64), then refused |
+| `pt`, `mm`, `em`, `%` lengths | **no** — refused, not guessed at |
 | `style`, gradients, strokes, text, `<use>`, CSS | **no** |
 | `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
 
@@ -254,37 +269,36 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. The basic shapes.** `<rect>` (with `rx`/`ry`), `<circle>`, `<ellipse>`,
-`<line>`, `<polyline>`, `<polygon>` — each a short conversion to path data, and
-together most of what hand-written SVG contains. This is now the largest gap:
-with `<g>` and `transform` in, a document exported from a drawing program is
-mostly readable except for the shapes that are not `<path>`.
+**1. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
+`stroke-miterlimit`, `stroke-dasharray`. Now the largest gap by some way: a
+stroke-only document renders blank today, and `<line>` and `<polyline>` exist
+mostly to be stroked. z2d has `painter.stroke` with all of it, so much of this
+is plumbing — but a stroked open subpath must *not* be closed, which is the
+opposite of what filling needs, so the "close every subpath" rule has to become
+a decision rather than an invariant, and `Poly.closed` is already carried for
+exactly that.
 
-**2. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
-`stroke-miterlimit`, `stroke-dasharray`. z2d has `painter.stroke` with all of
-it, so this is mostly plumbing — but a stroked open subpath must *not* be
-closed, which is the opposite of what filling needs, so the "close every
-subpath" rule has to become a decision rather than an invariant.
+**2. Lengths with units, and `width`/`height`/`preserveAspectRatio` on `<svg>`.**
+`document.optionalLength` reads a bare number and `px` and refuses everything
+else; `pt` and `mm` are a fixed ratio away, but `em` needs a font size and `%`
+needs a viewport to be a percentage of — which is the same thing the document's
+own `width` and `height` supply. So the two arrive together, and with them
+`preserveAspectRatio` instead of a hardcoded `xMidYMid meet`.
 
-**3. `width`, `height` and `preserveAspectRatio` on `<svg>`.** The document's
-own idea of how large it is and how to fit it, instead of the viewBox and a
-hardcoded `xMidYMid meet`. Needs a length parser — `px`, `pt`, `mm`, `%` and a
-bare number are all legal.
-
-**4. Entity references in attribute values.** The XML reader hands back raw
+**3. Entity references in attribute values.** The XML reader hands back raw
 attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
 entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
 is a parse error rather than a `Z`.
 
-**5. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+**4. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
 a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
 the classic denial of service.
 
-**6. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+**5. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
 `gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
 systems.
 
-**7. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**6. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -293,7 +307,7 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**8. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
+**7. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
 a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and

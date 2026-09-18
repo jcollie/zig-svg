@@ -246,7 +246,7 @@ fn drawDocument(
         try document.buildShape(
             &p,
             gpa,
-            shape.d,
+            shape.geometry,
             view_box.mul(shape.transform),
             .{ .max_nodes = nodes_left },
         );

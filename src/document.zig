@@ -74,6 +74,7 @@ const z2d = @import("z2d");
 
 const color = @import("color.zig");
 const path = @import("path.zig");
+const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
 
 pub const Error = error{
@@ -100,6 +101,11 @@ pub const Error = error{
     GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
+    /// A length -- a coordinate, a radius, a width -- that is not a number,
+    /// or that carries a unit this reader does not implement. Only a bare
+    /// number and the `px` that means the same thing are read today; `pt`,
+    /// `em` and `%` are on the feature list.
+    BadLength,
     /// Containers nested more deeply than `max_container_depth`.
     TooDeeplyNested,
     /// A `transform` whose composed matrix has an infinity or a NaN in it.
@@ -173,8 +179,8 @@ pub const Inherited = struct {
 
 /// One `<path>`, with the paint that applies to it.
 pub const Shape = struct {
-    /// The `d` attribute, borrowed from the source.
-    d: []const u8,
+    /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
+    geometry: shapes.Geometry,
     /// What to paint it with, after inheritance. Null means nothing named a
     /// `fill`, so the caller's colour stands.
     fill: ?color.Paint,
@@ -295,12 +301,12 @@ pub const PathIterator = struct {
                 if (self.depth_ignored > 0) continue;
                 const top = self.stack[self.depth];
 
-                if (xml.nameIs(e.name, "path")) {
+                if (try readGeometry(e)) |geometry| {
                     const effective = top.inherited.with(try readInherited(e));
                     const ctm = top.transform.mul(try readTransform(e));
                     if (!transform.isFinite(ctm)) return error.NonFiniteTransform;
                     return .{
-                        .d = e.attr("d") orelse return error.NoPath,
+                        .geometry = geometry,
                         .fill = effective.fill,
                         .fill_opacity = effective.fill_opacity,
                         .fill_rule = effective.fill_rule,
@@ -358,6 +364,89 @@ pub const PathIterator = struct {
 /// one.
 fn isContainer(name: []const u8) bool {
     return xml.nameIs(name, "svg") or xml.nameIs(name, "g");
+}
+
+/// What an element draws, or null when it is not a drawable element.
+///
+/// The basic shapes are read here rather than being turned into `d` strings
+/// for the path parser: their geometry is four or five numbers this already
+/// has, and spelling them out as text to read back would allocate and would
+/// put a number formatter and a second number parser in the way of the
+/// picture. See `shapes.zig`.
+fn readGeometry(e: xml.Element) Error!?shapes.Geometry {
+    if (xml.nameIs(e.name, "path")) {
+        return .{ .path = e.attr("d") orelse return error.NoPath };
+    }
+    if (xml.nameIs(e.name, "rect")) {
+        return .{
+            .rect = .{
+                .x = try length(e, "x", 0),
+                .y = try length(e, "y", 0),
+                .width = try length(e, "width", 0),
+                .height = try length(e, "height", 0),
+                // Null rather than zero: §9.2 makes one specified radius supply
+                // the other, which "not specified" has to be distinguishable from
+                // zero to express.
+                .rx = try optionalLength(e, "rx"),
+                .ry = try optionalLength(e, "ry"),
+            },
+        };
+    }
+    if (xml.nameIs(e.name, "circle")) {
+        const r = try length(e, "r", 0);
+        return .{ .ellipse = .{
+            .cx = try length(e, "cx", 0),
+            .cy = try length(e, "cy", 0),
+            .rx = r,
+            .ry = r,
+        } };
+    }
+    if (xml.nameIs(e.name, "ellipse")) {
+        return .{ .ellipse = .{
+            .cx = try length(e, "cx", 0),
+            .cy = try length(e, "cy", 0),
+            .rx = try length(e, "rx", 0),
+            .ry = try length(e, "ry", 0),
+        } };
+    }
+    if (xml.nameIs(e.name, "line")) {
+        return .{ .line = .{
+            .x1 = try length(e, "x1", 0),
+            .y1 = try length(e, "y1", 0),
+            .x2 = try length(e, "x2", 0),
+            .y2 = try length(e, "y2", 0),
+        } };
+    }
+    if (xml.nameIs(e.name, "polyline")) {
+        return .{ .poly = .{ .points = e.attr("points") orelse "", .closed = false } };
+    }
+    if (xml.nameIs(e.name, "polygon")) {
+        return .{ .poly = .{ .points = e.attr("points") orelse "", .closed = true } };
+    }
+    return null;
+}
+
+/// One length-valued attribute, or `default` when the element does not carry
+/// it.
+fn length(e: xml.Element, name: []const u8, default: f64) Error!f64 {
+    return (try optionalLength(e, name)) orelse default;
+}
+
+/// A length, or null when the attribute is absent.
+///
+/// A bare number, or one suffixed `px`, which is the same thing: the user unit
+/// *is* the CSS pixel. Every other unit -- `pt`, `mm`, `em`, `%` -- is refused
+/// rather than guessed at, because each needs something this reader has not
+/// got yet: a document size, a font size, or a viewport to be a percentage of.
+fn optionalLength(e: xml.Element, name: []const u8) Error!?f64 {
+    const raw = e.attr(name) orelse return null;
+    var text = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.endsWith(u8, text, "px")) text = text[0 .. text.len - 2];
+    const value = std.fmt.parseFloat(f64, text) catch return error.BadLength;
+    // An infinity or a NaN reaching the rasterizer is a hang or a panic rather
+    // than a wrong picture, which is the same rule the path parser follows.
+    if (!std.math.isFinite(value)) return error.BadLength;
+    return value;
 }
 
 /// An element's own `transform`, or the identity when it has none.
@@ -446,10 +535,10 @@ pub fn read(src: []const u8) Error!Document {
     };
 
     var it = doc.paths();
-    var shapes: usize = 0;
-    while (try it.next()) |_| shapes += 1;
-    if (shapes == 0) return error.NoPath;
-    doc.shape_count = shapes;
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    if (count == 0) return error.NoPath;
+    doc.shape_count = count;
     return doc;
 }
 
@@ -467,9 +556,9 @@ fn parseViewBox(raw: []const u8) Error!ViewBox {
     return .{ .min_x = v[0], .min_y = v[1], .width = v[2], .height = v[3] };
 }
 
-pub const BuildError = Error || path.BuildError;
+pub const BuildError = Error || shapes.BuildError;
 
-/// Build one `d` into `p`, under `ctm`.
+/// Build one shape's geometry into `p`, under `ctm`.
 ///
 /// z2d applies the transformation when a point is added rather than when the
 /// path is filled, so it has to be in place before the first `moveTo`; this
@@ -477,7 +566,7 @@ pub const BuildError = Error || path.BuildError;
 pub fn buildShape(
     p: *z2d.Path,
     alloc: std.mem.Allocator,
-    d: []const u8,
+    geometry: shapes.Geometry,
     ctm: z2d.Transformation,
     opts: path.Options,
 ) BuildError!void {
@@ -486,7 +575,7 @@ pub fn buildShape(
         const saved = p.transformation;
         defer p.transformation = saved;
         p.transformation = saved.mul(ctm);
-        try path.build(p, alloc, d, opts);
+        try shapes.build(p, alloc, geometry, opts);
     }
     // Checked here rather than in `path.build`, because z2d applies the matrix
     // when a point is added: the numbers the parser read are in user units and
@@ -540,7 +629,7 @@ fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(gpa);
     var it = doc.paths();
-    while (try it.next()) |shape| try out.append(gpa, shape.d);
+    while (try it.next()) |shape| try out.append(gpa, shape.geometry.path);
     return out.toOwnedSlice(gpa);
 }
 
@@ -551,7 +640,7 @@ test "a well formed icon reads" {
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 
     var it = doc.paths();
-    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?.d);
+    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?.geometry.path);
     try testing.expectEqual(@as(?Shape, null), try it.next());
 }
 
@@ -647,11 +736,15 @@ test "a self-closing ignorable does not end the subtree it is in" {
 test "an element with geometry this reader cannot draw is refused" {
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>"),
+        read("<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>"),
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>"),
+        read("<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>"),
+    );
+    try testing.expectError(
+        error.UnsupportedElement,
+        read("<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>"),
     );
 }
 
@@ -660,7 +753,7 @@ test "a document is refused before any of it is drawn" {
     // rather than hand out those two and fail on the third, which would be a
     // half-drawn picture and an error at once.
     try testing.expectError(error.UnsupportedElement, read(
-        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><circle/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><use href=\"#a\"/></svg>",
     ));
     try testing.expectError(error.NoPath, read(
         "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path/></svg>",
@@ -693,7 +786,7 @@ test "the viewBox is scaled into the box asked for" {
     defer p.deinit(gpa);
     // A 24-unit viewBox into a 48-pixel box doubles everything.
     var it = doc.paths();
-    try buildShape(&p, gpa, (try it.next()).?.d, doc.transformFor(0, 0, 48, 48), .{});
+    try buildShape(&p, gpa, (try it.next()).?.geometry, doc.transformFor(0, 0, 48, 48), .{});
     try testing.expectApproxEqAbs(@as(f64, 6), p.nodes.items[0].move_to.point.x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 18), p.nodes.items[0].move_to.point.y, 1e-9);
 }

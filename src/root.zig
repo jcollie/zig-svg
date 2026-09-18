@@ -60,6 +60,8 @@ pub const document = @import("document.zig");
 pub const color = @import("color.zig");
 /// The `transform` attribute, as one matrix.
 pub const transform = @import("transform.zig");
+/// SVG's basic shapes, as path operations.
+pub const shapes = @import("shapes.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
 pub const path = @import("path.zig");
 /// SVG's elliptical arc command, as cubic Béziers.
@@ -78,8 +80,10 @@ pub const draw = raster.draw;
 pub const Document = document.Document;
 /// Walks a document's `<path>` elements in painting order.
 pub const PathIterator = document.PathIterator;
-/// One `<path>`, with the paint that applies to it.
+/// One drawable element, with the paint that applies to it.
 pub const Shape = document.Shape;
+/// What a drawable element contributes: a `d`, or a basic shape's numbers.
+pub const Geometry = shapes.Geometry;
 /// A colour, in straight alpha.
 pub const Color = color.Color;
 /// What a `fill` attribute can say.
@@ -102,6 +106,7 @@ test {
     _ = document;
     _ = color;
     _ = transform;
+    _ = shapes;
     _ = path;
     _ = arc;
     _ = raster;

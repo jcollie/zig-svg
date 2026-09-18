@@ -477,6 +477,7 @@ const WireError = enum(u16) {
     too_deeply_nested = 20,
     non_finite_transform = 21,
     coordinate_out_of_range = 22,
+    bad_length = 23,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -508,6 +509,7 @@ fn wireFromError(err: anyerror) WireError {
         error.TooDeeplyNested => .too_deeply_nested,
         error.NonFiniteTransform => .non_finite_transform,
         error.CoordinateOutOfRange => .coordinate_out_of_range,
+        error.BadLength => .bad_length,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -551,6 +553,7 @@ fn wireToError(status: u16) Error {
         .too_deeply_nested => error.TooDeeplyNested,
         .non_finite_transform => error.NonFiniteTransform,
         .coordinate_out_of_range => error.CoordinateOutOfRange,
+        .bad_length => error.BadLength,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -762,7 +765,7 @@ test "a document the reader refuses comes back as that refusal" {
 
     try testing.expectError(error.UnsupportedElement, render(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
     try testing.expectError(error.BadViewBox, render(
@@ -812,6 +815,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.TooDeeplyNested, .too_deeply_nested },
         .{ error.NonFiniteTransform, .non_finite_transform },
         .{ error.CoordinateOutOfRange, .coordinate_out_of_range },
+        .{ error.BadLength, .bad_length },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },

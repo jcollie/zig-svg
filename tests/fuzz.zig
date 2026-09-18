@@ -94,7 +94,8 @@ pub const path_interesting = "MmLlHhVvCcSsQqTtAaZz0123456789.-+, eE";
 /// reaches the refusal branch, where one that turns it into noise does not.
 pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;" ++
     "fill-opacityrulenonzeevdcurColor#%()," ++
-    "transformatrixlscewXYkyop";
+    "transformatrixlscewXYkyop" ++
+    "rectcirclepsoygnlinwdthxy12points";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -199,10 +200,45 @@ fn documentTarget(input: []const u8) anyerror!void {
     var seen: usize = 0;
     while (try shapes.next()) |shape| {
         seen += 1;
-        // Every `d` points into the source the reader was given.
-        try testing.expect(@intFromPtr(shape.d.ptr) >= @intFromPtr(src.ptr));
-        try testing.expect(@intFromPtr(shape.d.ptr) + shape.d.len <=
-            @intFromPtr(src.ptr) + src.len);
+        // Whatever the shape borrowed points into the source it was given.
+        // `<path>` borrows its `d` and the polys borrow their `points`; the
+        // rest carry numbers and borrow nothing.
+        const borrowed: ?[]const u8 = switch (shape.geometry) {
+            .path => |d| d,
+            .poly => |poly| poly.points,
+            else => null,
+        };
+        // An empty slice borrows nothing -- a `<polyline>` with no `points`
+        // gets `""`, which is a static empty string rather than a window into
+        // the source -- so there is nothing to check for one.
+        if (borrowed) |b| if (b.len != 0) {
+            try testing.expect(@intFromPtr(b.ptr) >= @intFromPtr(src.ptr));
+            try testing.expect(@intFromPtr(b.ptr) + b.len <= @intFromPtr(src.ptr) + src.len);
+        };
+        // And every number a shape carries is one the rasterizer can use.
+        switch (shape.geometry) {
+            .rect => |r| {
+                try expectUsable(r.x);
+                try expectUsable(r.y);
+                try expectUsable(r.width);
+                try expectUsable(r.height);
+                if (r.rx) |v| try expectUsable(v);
+                if (r.ry) |v| try expectUsable(v);
+            },
+            .ellipse => |el| {
+                try expectUsable(el.cx);
+                try expectUsable(el.cy);
+                try expectUsable(el.rx);
+                try expectUsable(el.ry);
+            },
+            .line => |l| {
+                try expectUsable(l.x1);
+                try expectUsable(l.y1);
+                try expectUsable(l.x2);
+                try expectUsable(l.y2);
+            },
+            else => {},
+        }
         // And every alpha the reader produced is a number a compositor can
         // use: `parseOpacity` clamps, so nothing here should ever be outside
         // the range or be a NaN.
@@ -298,6 +334,10 @@ fn expectAllFinite(p: z2d.Path) !void {
             .close_path => {},
         }
     }
+}
+
+fn expectUsable(v: f64) !void {
+    if (!std.math.isFinite(v)) return error.NonFiniteLength;
 }
 
 fn expectFinite(point: anytype) !void {
@@ -437,6 +477,35 @@ const document_corpus = [_][]const u8{
     // the transform rather than after it. Kept so that a change to that order
     // shows up here.
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H1e300V1e300H0Z\"/></svg>",
+    // The basic shapes, each in the spellings §9 gives them.
+    "<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"2\" width=\"8\" height=\"6\" fill=\"red\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"16\" height=\"16\" rx=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"16\" height=\"16\" ry=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"16\" height=\"16\" rx=\"99\" ry=\"-1\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><circle cx=\"8\" cy=\"8\" r=\"5\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><ellipse cx=\"8\" cy=\"8\" rx=\"6\" ry=\"3\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"2\" x2=\"12\" y2=\"12\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polygon points=\"2,2 12,2 8,12\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polyline points=\"2 2 12 2 8 12\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polygon points=\"2-2 12-2 8-12\"/></svg>",
+    // Shapes with nothing in them, which draw nothing and are not errors.
+    "<svg viewBox=\"0 0 24 24\"><rect/><path d=\"M0 0Z\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><circle/><ellipse/><polygon points=\"\"/><path d=\"M0 0Z\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"-4\" height=\"8\"/><path d=\"M0 0Z\"/></svg>",
+    // An odd coordinate count, which drops the incomplete pair rather than
+    // voiding the element -- the commonest way a generated document has one is
+    // a trailing comma.
+    "<svg viewBox=\"0 0 24 24\"><polygon points=\"2,2 12,2 8,12 5\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polygon points=\"2,2 12,2 8,12,\"/></svg>",
+    // Lengths: `px` is the user unit, and every other unit is refused today.
+    "<svg viewBox=\"0 0 24 24\"><circle cx=\"8px\" cy=\"8px\" r=\"4px\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><circle cx=\"8\" cy=\"8\" r=\"4pt\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><circle cx=\"8\" cy=\"8\" r=\"50%\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"abc\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"1e400\" height=\"8\"/></svg>",
+    // Elements that are still refused.
+    "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

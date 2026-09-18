@@ -96,17 +96,6 @@ pub const Error = error{
     /// An element in *another* namespace is not this: it is not SVG content,
     /// nothing is meant to draw it, and it is passed over.
     UnsupportedElement,
-    /// `opacity` on a container -- the root `<svg>` or a `<g>` -- which is a
-    /// *group* opacity: the container is drawn into a layer of its own and
-    /// that layer is composited once at the given alpha.
-    ///
-    /// Multiplying it into each shape's alpha instead -- which is what
-    /// `opacity` on a shape amounts to, and is exactly right there -- is wrong
-    /// the moment two shapes overlap, because each would then show through the
-    /// other where the group would have shown only the upper one. Refused
-    /// rather than approximated, and it comes back with the composited layers
-    /// that clipping and masking need.
-    GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
     /// A `preserveAspectRatio` that is not `none` or one of the nine
@@ -312,6 +301,27 @@ pub const Inherited = struct {
     }
 };
 
+/// What the walk produces: a shape to draw, or the edges of a group that has
+/// to be drawn into a surface of its own.
+///
+/// A plain `<g>` produces neither -- it contributes its attributes to what is
+/// inside it and nothing more, which is why the walk has always been able to
+/// flatten one away. A group only becomes visible here when it needs
+/// compositing: `opacity` on a container applies to the container once it is
+/// flattened, so multiplying it into each shape would show every shape through
+/// every other where the group shows only the upper one.
+pub const Item = union(enum) {
+    shape: Shape,
+    open_group: Group,
+    close_group,
+};
+
+/// A container that needs a layer of its own.
+pub const Group = struct {
+    /// The `opacity` to composite the finished layer at.
+    opacity: f64,
+};
+
 /// One drawable element, with the paint and the transform that apply to it.
 pub const Shape = struct {
     /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
@@ -469,31 +479,40 @@ pub const PathIterator = struct {
         /// combined with its ancestors'.
         inherited: Inherited,
         transform: z2d.Transformation,
+        /// Whether this container opened a layer that has to be closed when
+        /// the walk leaves it.
+        opens_layer: bool = false,
+        /// Whether that close has already been reported.
+        closed: bool = false,
     };
 
-    pub fn next(self: *PathIterator) Error!?Shape {
+    pub fn next(self: *PathIterator) Error!?Item {
         const tree = self.doc.tree;
 
         if (!self.started) {
             self.started = true;
             const root = self.doc.root_node;
-            // Not `opacity`: on the root it is a group opacity, and there is
-            // no layer to composite one into. Checked here rather than in
-            // `visit`, because the root is the one element the walk never
-            // visits as somebody's child.
-            if (self.attr(root, "opacity") != null) return error.GroupOpacityUnsupported;
+            const opacity = try self.opacityOf(root);
             self.stack[0] = .{
                 .node = root,
                 .next_child = 0,
                 .inherited = try self.readInherited(root),
                 .transform = try self.readTransform(root),
+                .opens_layer = opacity < 1.0,
             };
+            // The root is the one container the walk never meets as somebody's
+            // child, so its layer is opened here rather than in `visit`.
+            if (self.stack[0].opens_layer) return .{ .open_group = .{ .opacity = opacity } };
         }
 
         while (true) {
             const top = &self.stack[self.depth];
             const children = tree.node(top.node).children.items;
             if (top.next_child >= children.len) {
+                if (top.opens_layer and !top.closed) {
+                    top.closed = true;
+                    return .close_group;
+                }
                 if (self.depth == 0) return null;
                 self.depth -= 1;
                 continue;
@@ -501,15 +520,21 @@ pub const PathIterator = struct {
             const child = children[top.next_child];
             top.next_child += 1;
 
-            if (try self.visit(child, top.*)) |shape| return shape;
+            if (try self.visit(child, top.*)) |item| return item;
         }
+    }
+
+    /// An element's own `opacity`, which is not inherited.
+    fn opacityOf(self: *const PathIterator, node: ztree.NodeId) Error!f64 {
+        const raw = self.attr(node, "opacity") orelse return 1.0;
+        return color.parseOpacity(raw);
     }
 
     /// Look at one element, following any `<use>` to what it draws.
     ///
     /// Returns a shape when the element is one, and otherwise has either
     /// pushed a frame to descend into it or decided there is nothing to do.
-    fn visit(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Shape {
+    fn visit(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
         if (tree.node(child).kind != .element) return null;
 
@@ -549,7 +574,7 @@ pub const PathIterator = struct {
         if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
         if (try self.readGeometry(node)) |geometry| {
-            return .{
+            return .{ .shape = .{
                 .geometry = geometry,
                 .fill = effective.fill,
                 .fill_opacity = effective.fill_opacity,
@@ -563,19 +588,18 @@ pub const PathIterator = struct {
                 .stroke_miterlimit = effective.stroke_miterlimit,
                 .stroke_dasharray = effective.stroke_dasharray,
                 .stroke_dashoffset = effective.stroke_dashoffset,
-                .opacity = if (self.attr(node, "opacity")) |v|
-                    try color.parseOpacity(v)
-                else
-                    1.0,
+                .opacity = try self.opacityOf(node),
                 .transform = own_ctm,
-            };
+            } };
         }
 
         if (isContainer(name)) {
-            // Not `opacity`: on a container it is a group opacity, and there
-            // is no layer to composite one into.
-            if (self.attr(node, "opacity") != null) return error.GroupOpacityUnsupported;
-            try self.push(node, effective, own_ctm);
+            // A container's `opacity` applies to it once it is flattened, so
+            // it needs a surface of its own to flatten into. One that does not
+            // ask for that is invisible here, as it always was.
+            const opacity = try self.opacityOf(node);
+            try self.push(node, effective, own_ctm, opacity < 1.0);
+            if (opacity < 1.0) return .{ .open_group = .{ .opacity = opacity } };
             return null;
         }
 
@@ -595,6 +619,7 @@ pub const PathIterator = struct {
         node: ztree.NodeId,
         inherited: Inherited,
         ctm: z2d.Transformation,
+        opens_layer: bool,
     ) Error!void {
         for (self.stack[0 .. self.depth + 1]) |frame| {
             if (frame.node == node) return error.RecursiveUse;
@@ -606,6 +631,7 @@ pub const PathIterator = struct {
             .next_child = 0,
             .inherited = inherited,
             .transform = ctm,
+            .opens_layer = opens_layer,
         };
     }
 
@@ -873,7 +899,11 @@ pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
 
     var it = doc.paths();
     var count: usize = 0;
-    while (try it.next()) |_| count += 1;
+    while (try it.next()) |item| {
+        // Shapes, not items: `shape_count` is what `Limits.max_shapes` bounds,
+        // and a group is not a thing that gets painted.
+        if (item == .shape) count += 1;
+    }
     if (count == 0) return error.NoPath;
     doc.shape_count = count;
     return doc;
@@ -1039,7 +1069,11 @@ fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]u8 {
         out.deinit(gpa);
     }
     var it = doc.paths();
-    while (try it.next()) |shape| try out.append(gpa, try gpa.dupe(u8, shape.geometry.path));
+    while (try it.next()) |item| switch (item) {
+        .shape => |shape| try out.append(gpa, try gpa.dupe(u8, shape.geometry.path)),
+        // A group is not a shape; `collect` is about what gets drawn.
+        else => {},
+    };
     return out.toOwnedSlice(gpa);
 }
 
@@ -1067,8 +1101,8 @@ test "a well formed icon reads" {
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 
     var it = doc.paths();
-    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?.geometry.path);
-    try testing.expectEqual(@as(?Shape, null), try it.next());
+    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?.shape.geometry.path);
+    try testing.expectEqual(@as(?Item, null), try it.next());
 }
 
 test "every path is handed out, in document order" {
@@ -1225,7 +1259,7 @@ test "the viewBox is scaled into the box asked for" {
     defer p.deinit(gpa);
     // A 24-unit viewBox into a 48-pixel box doubles everything.
     var it = doc.paths();
-    try buildShape(&p, gpa, (try it.next()).?.geometry, doc.transformFor(0, 0, 48, 48), .{});
+    try buildShape(&p, gpa, (try it.next()).?.shape.geometry, doc.transformFor(0, 0, 48, 48), .{});
     try testing.expectApproxEqAbs(@as(f64, 6), p.nodes.items[0].move_to.point.x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 18), p.nodes.items[0].move_to.point.y, 1e-9);
 }
@@ -1317,7 +1351,7 @@ test "a percentage is measured against the viewBox, not the drawn size" {
     try testing.expectEqual(@as(f64, 100), doc.viewport().width);
     try testing.expectEqual(@as(f64, 200), doc.viewport().height);
     var it = doc.paths();
-    const shape = (try it.next()).?;
+    const shape = (try it.next()).?.shape;
     try testing.expectApproxEqAbs(@as(f64, 100), shape.geometry.rect.height, 1e-9);
 }
 
@@ -1392,7 +1426,7 @@ test "a use inherits from where it is, not from where its target is" {
         "<g fill=\"blue\"><use href=\"#p\"/></g></svg>");
     defer doc.deinit();
     var it = doc.paths();
-    const shape = (try it.next()).?;
+    const shape = (try it.next()).?.shape;
     try testing.expectEqual(@as(u8, 255), shape.fill.?.color.b);
     try testing.expectEqual(@as(u8, 0), shape.fill.?.color.r);
 }
@@ -1403,7 +1437,7 @@ test "a use folds its x and y into the transform" {
         "<defs><path id=\"p\" d=\"M0 0Z\"/></defs><use href=\"#p\" x=\"3\" y=\"5\"/></svg>");
     defer doc.deinit();
     var it = doc.paths();
-    const shape = (try it.next()).?;
+    const shape = (try it.next()).?.shape;
     try testing.expectApproxEqAbs(@as(f64, 3), shape.transform.tx, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 5), shape.transform.ty, 1e-12);
 }

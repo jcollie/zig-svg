@@ -68,6 +68,17 @@ pub const Limits = struct {
     /// million empty paths is bounded by this and by nothing else.
     max_shapes: usize = 1 << 12,
 
+    /// How deep a stack of composited layers to allow.
+    ///
+    /// A container with an `opacity` has to be drawn into a surface of its own
+    /// and composited once, and each such surface is the size of the whole
+    /// picture. So this multiplies the memory a render can take: the ceiling
+    /// is `max_pixels` times four bytes times *this*, and a sandboxed render's
+    /// `working_bytes` has to cover it.
+    ///
+    /// Eight is far past any document that means something by its nesting.
+    max_layers: usize = 8,
+
     /// The most source to buffer, for the callers that have to buffer it --
     /// `sandbox.render` copies the document into memory before it forks,
     /// because a sandboxed process that could still read its input would need
@@ -85,6 +96,7 @@ pub const Limits = struct {
         .max_pixels = math.maxInt(u64),
         .max_path_nodes = math.maxInt(usize),
         .max_shapes = math.maxInt(usize),
+        .max_layers = 64,
         .max_input_bytes = math.maxInt(u64),
     };
 
@@ -173,6 +185,9 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     /// library implements -- a `<pattern>`, or an element that is not a paint
     /// server at all.
     UnsupportedPaintServer,
+    /// Containers needing a layer of their own, nested more deeply than
+    /// `Limits.max_layers`.
+    TooManyLayers,
 } || gradient.Error;
 
 /// Where in a surface to draw, in pixels.
@@ -240,7 +255,7 @@ pub fn draw(
 /// choose the first answer for a document that means the second.
 fn drawDocument(
     gpa: Allocator,
-    surface: *z2d.Surface,
+    destination: *z2d.Surface,
     doc: *const document.Document,
     box: Box,
     opts: Options,
@@ -253,8 +268,26 @@ fn drawDocument(
     // `Limits.max_path_nodes`.
     var nodes_left = opts.limits.max_path_nodes;
 
+    // A container with an `opacity` is drawn into a surface of its own and
+    // composited once, so the walk's groups become a stack of surfaces here.
+    // `target` is whichever is on top, and the caller's surface at the bottom.
+    var layers: Layers = .{ .bottom = destination };
+    defer layers.deinit(gpa);
+
     var shapes = doc.paths();
-    while (try shapes.next()) |shape| {
+    while (try shapes.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            .open_group => |g| {
+                try layers.open(gpa, g.opacity, opts.limits.max_layers);
+                continue;
+            },
+            .close_group => {
+                layers.close(gpa);
+                continue;
+            },
+        };
+        const surface = layers.target();
         const ctm = view_box.mul(shape.transform);
         const fill_paint = resolveFill(shape, opts);
         const stroke = try resolveStroke(shape, opts);
@@ -441,6 +474,90 @@ const Source = union(enum) {
         };
     }
 };
+
+/// The stack of surfaces a document with composited groups is drawn onto.
+///
+/// The caller's surface is the bottom and is never owned. Each layer above it
+/// is a transparent surface the size of the picture, drawn into as though it
+/// were the real one and then composited down in two steps: its alpha is
+/// multiplied by the group's `opacity`, and the result is painted over what is
+/// below. That is what makes a group's opacity apply to the group *once*
+/// rather than to each shape in it -- two overlapping shapes at half opacity
+/// show only the upper one through the group, where halving each separately
+/// would show both.
+const Layers = struct {
+    bottom: *z2d.Surface,
+    stack: [max_stack]Entry = undefined,
+    depth: usize = 0,
+
+    /// Room for any `Limits.max_layers` a caller can sensibly ask for. The
+    /// limit itself is checked against the caller's value, not this.
+    const max_stack = 64;
+
+    const Entry = struct {
+        surface: z2d.Surface,
+        opacity: f64,
+    };
+
+    fn target(self: *Layers) *z2d.Surface {
+        if (self.depth == 0) return self.bottom;
+        return &self.stack[self.depth - 1].surface;
+    }
+
+    fn open(self: *Layers, gpa: Allocator, opacity: f64, limit: usize) Error!void {
+        if (self.depth >= @min(limit, max_stack)) return error.TooManyLayers;
+        const below = self.target();
+        // Transparent and with an alpha channel whatever the destination is,
+        // because the whole point is to know afterwards which of its pixels
+        // were painted.
+        const sfc = try z2d.Surface.init(
+            .image_surface_rgba,
+            gpa,
+            below.getWidth(),
+            below.getHeight(),
+        );
+        self.stack[self.depth] = .{ .surface = sfc, .opacity = opacity };
+        self.depth += 1;
+    }
+
+    fn close(self: *Layers, gpa: Allocator) void {
+        if (self.depth == 0) return;
+        self.depth -= 1;
+        var entry = self.stack[self.depth];
+        defer entry.surface.deinit(gpa);
+
+        const below = self.target();
+        // `dst_in` against a uniform alpha multiplies the layer's own alpha by
+        // it, which is the group opacity; then `src_over` paints the result
+        // down. Two operations in one batch, so the intermediate never has to
+        // be written anywhere.
+        // In float precision rather than z2d's default of integer. Each
+        // nested layer is another multiply rounded back into a byte, and two
+        // of them put every pixel of a nested group about two levels away from
+        // what resvg draws -- a uniform haze rather than a wrong picture, but
+        // one that compounds with depth and costs nothing to avoid.
+        const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
+        const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(entry.opacity) } };
+        z2d.compositor.SurfaceCompositor.run(&entry.surface, 0, 0, 1, .{
+            .{ .operator = .dst_in, .src = .{ .pixel = faded } },
+        }, precision);
+        below.composite(&entry.surface, .src_over, 0, 0, precision);
+    }
+
+    fn deinit(self: *Layers, gpa: Allocator) void {
+        // Only reached when a draw failed part way through; the layers a
+        // successful one opened have all been closed.
+        while (self.depth > 0) {
+            self.depth -= 1;
+            self.stack[self.depth].surface.deinit(gpa);
+        }
+    }
+};
+
+/// An opacity as the byte an alpha mask wants.
+fn alphaByte(opacity: f64) u8 {
+    return @intFromFloat(@round(std.math.clamp(opacity, 0.0, 1.0) * 255.0));
+}
 
 /// Turn a resolved paint into something z2d can draw with.
 ///
@@ -1084,13 +1201,62 @@ test "a value that cannot be read is refused rather than defaulted" {
     try testing.expectError(error.BadOpacity, render(gpa, square("fill-opacity=\"\""), .{}));
 }
 
-test "opacity on the root is refused rather than approximated" {
+test "a group's opacity applies to the group once, not to each shape" {
     const gpa = testing.allocator;
-    try testing.expectError(error.GroupOpacityUnsupported, render(
+    // Two overlapping opaque squares at half opacity. Composited as a group
+    // the overlap shows only the upper one at half; multiplied into each shape
+    // it would show both, and come out more opaque where they meet.
+    const grouped = "<svg viewBox=\"0 0 16 16\"><g opacity=\"0.5\">" ++
+        "<rect x=\"0\" y=\"0\" width=\"10\" height=\"16\" fill=\"red\"/>" ++
+        "<rect x=\"6\" y=\"0\" width=\"10\" height=\"16\" fill=\"red\"/></g></svg>";
+    const each = "<svg viewBox=\"0 0 16 16\">" ++
+        "<rect x=\"0\" y=\"0\" width=\"10\" height=\"16\" fill=\"red\" opacity=\"0.5\"/>" ++
+        "<rect x=\"6\" y=\"0\" width=\"10\" height=\"16\" fill=\"red\" opacity=\"0.5\"/></svg>";
+
+    var a = try render(gpa, grouped, .{ .width = 16, .height = 16 });
+    defer a.deinit(gpa);
+    var b = try render(gpa, each, .{ .width = 16, .height = 16 });
+    defer b.deinit(gpa);
+
+    // Away from the overlap the two agree.
+    try testing.expectEqual(a.getPixel(2, 8).?.rgba.a, b.getPixel(2, 8).?.rgba.a);
+    // In it they must not: the group stays half, the other pair stacks up.
+    const group_overlap = a.getPixel(8, 8).?.rgba.a;
+    const each_overlap = b.getPixel(8, 8).?.rgba.a;
+    try testing.expectApproxEqAbs(@as(f64, 128), @as(f64, @floatFromInt(group_overlap)), 2);
+    try testing.expect(each_overlap > group_overlap + 30);
+}
+
+test "opacity on the root is a group opacity too" {
+    const gpa = testing.allocator;
+    var surface = try render(
         gpa,
-        "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
-        .{},
-    ));
+        "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><rect width=\"8\" height=\"8\" fill=\"red\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectApproxEqAbs(
+        @as(f64, 128),
+        @as(f64, @floatFromInt(surface.getPixel(4, 4).?.rgba.a)),
+        2,
+    );
+}
+
+test "groups nested past the layer limit are refused" {
+    const gpa = testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "<svg viewBox=\"0 0 8 8\">");
+    for (0..6) |_| try src.appendSlice(gpa, "<g opacity=\"0.9\">");
+    try src.appendSlice(gpa, "<rect width=\"8\" height=\"8\"/>");
+    for (0..6) |_| try src.appendSlice(gpa, "</g>");
+    try src.appendSlice(gpa, "</svg>");
+
+    try testing.expectError(error.TooManyLayers, render(gpa, src.items, .{
+        .width = 8,
+        .height = 8,
+        .limits = .{ .max_layers = 3 },
+    }));
 }
 
 test "a transform moves a shape" {
@@ -1214,15 +1380,6 @@ test "a malformed transform is refused, and an empty one is the identity" {
         .{},
     );
     try testing.expectEqual(@as(u8, 255), identity.a);
-}
-
-test "opacity on a group is refused like opacity on the root" {
-    const gpa = testing.allocator;
-    try testing.expectError(error.GroupOpacityUnsupported, render(
-        gpa,
-        "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></g></svg>",
-        .{},
-    ));
 }
 
 test "groups nested past the limit are refused rather than overflowing" {
@@ -1349,7 +1506,7 @@ test "a shape with no stroke named is not stroked" {
     var doc = try document.read(gpa, square(""));
     defer doc.deinit();
     var it = doc.paths();
-    const only = (try it.next()).?;
+    const only = (try it.next()).?.shape;
     try testing.expectEqual(@as(?color.Paint, null), only.stroke);
     try testing.expectEqual(@as(?Stroke, null), try resolveStroke(only, .{}));
 }

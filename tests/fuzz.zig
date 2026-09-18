@@ -230,7 +230,22 @@ fn documentTarget(input: []const u8) anyerror!void {
     // counted is the dangerous direction.
     var shapes = doc.paths();
     var seen: usize = 0;
-    while (try shapes.next()) |shape| {
+    var open_groups: usize = 0;
+    while (try shapes.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            // Every group the walk opens has to be closed again, or the
+            // renderer's surface stack never comes back down.
+            .open_group => {
+                open_groups += 1;
+                continue;
+            },
+            .close_group => {
+                if (open_groups == 0) return error.GroupClosedWithoutOpening;
+                open_groups -= 1;
+                continue;
+            },
+        };
         seen += 1;
         // Whatever the shape borrowed points into the source it was given.
         // `<path>` borrows its `d` and the polys borrow their `points`; the
@@ -303,6 +318,7 @@ fn documentTarget(input: []const u8) anyerror!void {
         try testing.expect(svg.transform.isFinite(shape.transform));
     }
     try testing.expectEqual(doc.shape_count, seen);
+    try testing.expectEqual(@as(usize, 0), open_groups);
 }
 
 /// The whole thing, from bytes to pixels.
@@ -647,6 +663,18 @@ const document_corpus = [_][]const u8{
     // A gradient on a shape with no extent, which has no box to be fractions
     // of.
     "<svg viewBox=\"0 0 8 8\"><defs><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient></defs><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" fill=\"url(#g)\"/></svg>",
+    // A container's `opacity`, which needs a layer of its own -- so the walk
+    // has to open and close one, and the renderer has to balance a stack of
+    // surfaces.
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"><g opacity=\"0.5\"><rect width=\"8\" height=\"8\"/></g></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"/><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0\"><rect width=\"8\" height=\"8\"/></g><rect width=\"2\" height=\"2\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"1\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"bogus\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\" transform=\"rotate(20)\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><g id=\"g\" opacity=\"0.5\"><rect width=\"4\" height=\"4\"/></g></defs><use href=\"#g\"/><use href=\"#g\" x=\"4\"/></svg>",
     // Elements that are still refused.
     // `<use>` naming an id the document does not have.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",

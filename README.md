@@ -82,6 +82,16 @@ no font here and no right answer for what it would be: CSS's initial
 against. Either choice draws a picture the wrong size somewhere. They arrive
 with text.
 
+`opacity` on a `<g>` or on the root is a **group** opacity, and is drawn as
+one: the container goes into a surface of its own, that surface's alpha is
+multiplied by the opacity, and the result is painted down once. Multiplying it
+into each shape instead would be wrong the moment two shapes overlap — each
+would show through the other where the group shows only the upper one, and
+`tests/oracle/opacity-group-vs-shape.svg` is the two side by side. The layers
+are composited in float rather than integer precision, because each nested one
+is another multiply rounded back into a byte and two of them put every pixel
+about two levels off.
+
 `fill` and `stroke` default differently, and deliberately. A shape naming no
 `fill` gets the caller's colour; a shape naming no `stroke` is **not stroked**,
 because SVG's initial `stroke` is `none` and a shape stroked without asking
@@ -144,7 +154,7 @@ short of the specification.
 | `transform` | all six functions, on `<svg>`, `<g>` and any shape |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
-| `opacity` | yes, on a shape |
+| `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
 | `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
@@ -154,9 +164,10 @@ short of the specification.
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
+| Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
+| `clip-path`, `mask` | **no** |
 | `<pattern>`, `style`, text, CSS | **no** |
-| `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -398,14 +409,12 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
-`clip-rule`, and `opacity` on a container. All four need a composited layer
-rather than one surface: a group's opacity applies to the group once it is
-flattened, so multiplying it into each shape shows every shape through every
-other where the group would have shown only the upper one. That is why
-`opacity` on an `<svg>` or a `<g>` is `error.GroupOpacityUnsupported` rather
-than an approximation — on a `<path>`, where there is nothing to overlap, it is
-implemented and exact.
+**1. Clipping and masking.** `<clipPath>`, `clip-rule` and `<mask>`. The layer
+machinery they need is now here — group opacity built it, and a clip is the
+same two-step composite with an alpha mask in place of a uniform alpha, so
+`Layers.close` is most of the work already. A `<mask>` needs one thing more:
+its content is converted to *luminance* rather than taken as coverage, which is
+a pass over the layer that nothing here does yet.
 
 **2. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in

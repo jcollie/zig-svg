@@ -129,11 +129,16 @@ pub fn main(init: std.process.Init) !void {
     try log.flush();
 }
 
-/// A viewBox dimension as a pixel count, never zero: a viewBox a thousand
-/// times wider than it is tall would otherwise round its height away, and a
-/// surface cannot be zero pixels in either direction.
+/// A viewBox dimension as a pixel count, never zero.
+///
+/// Rounded **up**, which is what resvg does: asked for a 256-square box, a
+/// 13-by-5 viewBox comes back 99 tall rather than the 98 that rounding to
+/// nearest would give. Getting this wrong does not make a picture slightly
+/// wrong, it makes the two images different sizes and the comparison
+/// impossible -- so it is worth matching exactly rather than approximately.
+/// It is also what `raster.fitDimension` does for a document's default size.
 fn atLeastOne(v: f64) u32 {
-    return @max(1, @as(u32, @intFromFloat(@round(v))));
+    return @max(1, @as(u32, @intFromFloat(@ceil(v))));
 }
 
 fn usage() error{BadUsage} {

@@ -92,7 +92,8 @@ pub const path_interesting = "MmLlHhVvCcSsQqTtAaZz0123456789.-+, eE";
 /// XML's punctuation, the element and attribute names this reader knows, and
 /// the ones it deliberately refuses -- a mutation that turns `path` into `g`
 /// reaches the refusal branch, where one that turns it into noise does not.
-pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;";
+pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;" ++
+    "fill-opacityrulenonzeevdcurColor#%(),";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -195,11 +196,21 @@ fn documentTarget(input: []const u8) anyerror!void {
     // counted is the dangerous direction.
     var shapes = doc.paths();
     var seen: usize = 0;
-    while (try shapes.next()) |d| {
+    while (try shapes.next()) |shape| {
         seen += 1;
         // Every `d` points into the source the reader was given.
-        try testing.expect(@intFromPtr(d.ptr) >= @intFromPtr(src.ptr));
-        try testing.expect(@intFromPtr(d.ptr) + d.len <= @intFromPtr(src.ptr) + src.len);
+        try testing.expect(@intFromPtr(shape.d.ptr) >= @intFromPtr(src.ptr));
+        try testing.expect(@intFromPtr(shape.d.ptr) + shape.d.len <=
+            @intFromPtr(src.ptr) + src.len);
+        // And every alpha the reader produced is a number a compositor can
+        // use: `parseOpacity` clamps, so nothing here should ever be outside
+        // the range or be a NaN.
+        try testing.expect(shape.opacity >= 0.0 and shape.opacity <= 1.0);
+        if (shape.fill_opacity) |o| try testing.expect(o >= 0.0 and o <= 1.0);
+        if (shape.fill) |paint| switch (paint) {
+            .color => |c| try testing.expect(c.alpha >= 0.0 and c.alpha <= 1.0),
+            else => {},
+        };
     }
     try testing.expectEqual(doc.shape_count, seen);
 }
@@ -378,6 +389,23 @@ const document_corpus = [_][]const u8{
     // parser without decoding. It is not a path today; it is here so that it
     // is noticed the day the reader learns to decode one.
     "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0L1 1&#90;\"/></svg>",
+    // The presentation attributes, in every syntax they are written in.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"red\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"#ff000080\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"rgba(1,2,3,0.5)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"rgb(0% 60% 100%)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"none\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"currentColor\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" color=\"teal\"><path d=\"M0 0H8V8H0Z\" fill=\"currentColor\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" fill=\"red\" fill-opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-opacity=\"50%\" opacity=\"0.25\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-rule=\"evenodd\"/></svg>",
+    // And the shapes of them that have to be refused rather than defaulted.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"notacolour\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"#12345\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" opacity=\"half\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-rule=\"EVENODD\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

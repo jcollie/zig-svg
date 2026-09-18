@@ -56,6 +56,8 @@ const std = @import("std");
 
 /// Reading an `<svg>` element far enough to draw what is in it.
 pub const document = @import("document.zig");
+/// The colour syntax a presentation attribute is written in.
+pub const color = @import("color.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
 pub const path = @import("path.zig");
 /// SVG's elliptical arc command, as cubic Béziers.
@@ -74,6 +76,12 @@ pub const draw = raster.draw;
 pub const Document = document.Document;
 /// Walks a document's `<path>` elements in painting order.
 pub const PathIterator = document.PathIterator;
+/// One `<path>`, with the paint that applies to it.
+pub const Shape = document.Shape;
+/// A colour, in straight alpha.
+pub const Color = color.Color;
+/// What a `fill` attribute can say.
+pub const Paint = color.Paint;
 pub const ViewBox = document.ViewBox;
 /// Read a document without drawing it.
 pub const read = document.read;
@@ -90,6 +98,7 @@ pub const Error = raster.Error;
 test {
     std.testing.refAllDecls(@This());
     _ = document;
+    _ = color;
     _ = path;
     _ = arc;
     _ = raster;

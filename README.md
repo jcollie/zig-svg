@@ -51,27 +51,44 @@ seeds it. Any of the three is the whole project.
 ## What it draws
 
 One `<svg>` carrying a `viewBox`, and any number of `<path>` elements carrying
-a `d`, painted in document order in one colour. That is every one of the 7,447
-[Material Design Icons](https://pictogrammers.com/library/mdi/), most other
-icon sets, and a long way short of SVG.
+a `d`, each with its own colour, painted in document order. That is every one
+of the 7,447 [Material Design Icons](https://pictogrammers.com/library/mdi/),
+most other icon sets, and a long way short of SVG.
 
 | | |
 | --- | --- |
 | Path data — SVG 1.1 §8.3 | complete, every command in both spellings |
 | Elliptical arcs — appendix F.6 | complete, including the degenerate cases |
 | Several `<path>` elements | yes, painted in document order |
+| `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
+| `fill-opacity`, `opacity`, `fill-rule` | yes, on a shape; the first and third inherit from the root |
+| `color` | yes, and it is what `currentColor` resolves to |
 | `viewBox` and `preserveAspectRatio` | the viewBox; aspect ratio always `xMidYMid meet` |
-| Fill colour and fill rule | chosen by the caller, not read from the document |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
-| `<g>`, `transform`, `style`, `fill` | **no** |
+| `<g>`, `transform`, `style` | **no** |
 | Gradients, strokes, text, `<use>`, CSS | **no** |
 
-An element it cannot draw is **refused**, not skipped. A renderer that skips
-what it does not understand produces a picture quietly missing a piece, which
-is the failure nobody notices; `error.UnsupportedElement` is the failure
-somebody does. The refusal happens while the document is *read*, before
-anything has been painted, so an unsupported element at the end of a document
-is an error rather than four shapes drawn and then an error.
+A shape that names no `fill` is painted in the colour the **caller** chose, not
+in SVG's initial black. That is a deliberate difference and it is the whole
+reason an icon can be drawn in any colour: not one of the 7,447 Material Design
+Icons carries a `fill`, so under the letter of the specification the set could
+only ever be black. `fill="currentColor"`, which many other icon sets use
+instead, reaches the same colour by the honest route — it is the initial value
+of the `color` property, and the caller chooses that too. A document that
+*does* name a colour is drawn in the colour it names.
+
+An element it cannot draw is **refused**, not skipped, and so is an attribute
+value it cannot read. A renderer that skips what it does not understand
+produces a picture quietly missing a piece, and one that falls back to black on
+`fill="notacolour"` produces a picture that looks finished and is not — both
+are the failure nobody notices, where `error.UnsupportedElement` and
+`error.BadColor` are the failure somebody does. resvg and every browser default
+instead; see [resvg as the oracle](#resvg-as-the-oracle) for where the two
+deliberately part company.
+
+The refusal happens while the document is *read*, before anything has been
+painted, so an unsupported element at the end of a document is an error rather
+than four shapes drawn and then an error.
 
 Each shape is filled on its own rather than built into one path and filled
 once, which would be cheaper. Two overlapping subpaths wound in opposite
@@ -157,6 +174,19 @@ the corpus measures, so a regression moves a number somebody can see rather
 than flipping a boolean. A fixture this library refuses produces no PNG and is
 reported as *not implemented*, which is how the feature list stays honest.
 
+Colour is the exception that *is* exact. `fill-named-table.svg` paints all 147
+CSS colour keywords resvg knows as a grid aligned to whole pixels, so there is
+no antialiasing anywhere in it, and the two renderers agree on every pixel:
+`mean 0.000  worst 0`.
+
+Four differences are deliberate, and `src/color.zig` says why for each. This
+library **refuses** a value it cannot read where resvg falls back to the
+initial one; and it accepts three things CSS Color 4 defines that resvg 0.48.1
+paints black — `rebeccapurple`, the slash alpha separator `rgb(255 0 0 / 0.5)`,
+and a percentage alpha `rgba(255, 0, 0, 50%)`. None of the three appears in the
+corpus, since a fixture using one would be testing resvg's gap rather than this
+code.
+
 ## Fuzzing
 
 `tests/fuzz.zig` holds five targets — the path grammar, the same path
@@ -190,50 +220,53 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Per-shape presentation attributes.** `fill`, `fill-opacity`, `fill-rule`
-and `opacity` read from the document rather than chosen by the caller, with CSS
-colour names and `#rgb`/`#rrggbb`. The caller's `fill` becomes the default for
-a shape that names none. This is now the largest gap: a document can hold
-several shapes but they all come out the same colour, so an illustration still
-renders as a silhouette.
+**1. `<g>` and `transform`.** Grouping and the six `transform` functions. The
+inheritance is already there — `document.Inherited` carries the four inherited
+presentation attributes and `Inherited.with` layers a child over a parent — so
+what a `<g>` adds is a *stack* of those rather than the root and the shape.
+z2d applies its transformation when a point is added rather than when the path
+is filled, so a transform stack is a multiply before each subpath rather than a
+wrapper around the fill. Group `opacity` comes with the composited layers under
+item 8, which is why `opacity` on the root is refused today rather than
+approximated.
 
-**2. `<g>` and `transform`.** Grouping with inherited presentation attributes,
-and the six `transform` functions. z2d applies its transformation when a point
-is added rather than when the path is filled, so a transform stack is a
-multiply before each subpath rather than a wrapper around the fill.
-
-**3. The basic shapes.** `<rect>` (with `rx`/`ry`), `<circle>`, `<ellipse>`,
+**2. The basic shapes.** `<rect>` (with `rx`/`ry`), `<circle>`, `<ellipse>`,
 `<line>`, `<polyline>`, `<polygon>` — each a short conversion to path data, and
 together most of what hand-written SVG contains.
 
-**4. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
+**3. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
 `stroke-miterlimit`, `stroke-dasharray`. z2d has `painter.stroke` with all of
 it, so this is mostly plumbing — but a stroked open subpath must *not* be
 closed, which is the opposite of what filling needs, so the "close every
 subpath" rule has to become a decision rather than an invariant.
 
-**5. `width`, `height` and `preserveAspectRatio` on `<svg>`.** The document's
+**4. `width`, `height` and `preserveAspectRatio` on `<svg>`.** The document's
 own idea of how large it is and how to fit it, instead of the viewBox and a
 hardcoded `xMidYMid meet`. Needs a length parser — `px`, `pt`, `mm`, `%` and a
 bare number are all legal.
 
-**6. Entity references in attribute values.** The XML reader hands back raw
+**5. Entity references in attribute values.** The XML reader hands back raw
 attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
 entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
 is a parse error rather than a `Z`.
 
-**7. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+**6. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
 a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
 the classic denial of service.
 
-**8. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+**7. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
 `gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
 systems.
 
-**9. Clipping and masking.** `<clipPath>`, `<mask>`, `clip-rule`. Needs
-composited layers rather than one surface.
+**8. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+`clip-rule`, and `opacity` on a container. All four need a composited layer
+rather than one surface: a group's opacity applies to the group once it is
+flattened, so multiplying it into each shape shows every shape through every
+other where the group would have shown only the upper one. That is why
+`opacity` on the root is `error.GroupOpacityUnsupported` rather than an
+approximation.
 
-**10. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
+**9. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
 a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and

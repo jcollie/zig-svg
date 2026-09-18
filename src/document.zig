@@ -4,15 +4,37 @@
 //! Reading an `<svg>` element far enough to draw what is in it.
 //!
 //! What this understands is one `<svg>` carrying a `viewBox` and any number of
-//! `<path>` elements carrying a `d`:
+//! `<path>` elements carrying a `d`, each with its own colour:
 //!
 //! ```
-//! <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3,9H7L12,4V20L7,15H3V9Z" /></svg>
+//! <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3,9H7L12,4V20L7,15H3V9Z" fill="#c00" /></svg>
 //! ```
 //!
 //! Which is every one of the 7,447 Material Design Icons, a great many other
 //! icon sets, and a long way short of SVG. There is no `<g>`, no `transform`,
-//! no `style`, no gradient, no stroke and no `fill` attribute.
+//! no `style`, no gradient and no stroke.
+//!
+//! ## The presentation attributes it reads
+//!
+//! `fill`, `fill-opacity`, `fill-rule` and `color` on the root `<svg>` are
+//! inherited by every shape, as CSS inheritance says; the same four on a
+//! `<path>` override them for that shape. `opacity` is read on a `<path>` and
+//! is not inherited, because it is not an inherited property.
+//!
+//! A shape that names no `fill` is painted in the colour the *caller* chose,
+//! not in SVG's initial black. That is a deliberate difference, and it is the
+//! whole reason a caller can draw a Material Design Icon in any colour: not
+//! one of the 7,447 carries a `fill`, so under the letter of the specification
+//! the set could only ever be black. `fill="currentColor"`, which many other
+//! icon sets use instead, lands on the same caller's colour by the honest
+//! route -- it is the initial value of the `color` property, and the caller
+//! chooses that too.
+//!
+//! Anything else is ignored rather than refused: `xmlns`, `id`, `class`,
+//! `width`, `height`, `style`. Elements are refused, attributes are ignored --
+//! an element carries geometry that would go missing, and an attribute is
+//! usually decoration. The exception is `opacity` on the root, which would go
+//! quietly wrong; see `Error.GroupOpacityUnsupported`.
 //!
 //! An element this does not implement is **refused** rather than skipped.
 //! Skipping it would draw a picture quietly missing a piece, which is the
@@ -38,6 +60,7 @@ const std = @import("std");
 const xml = @import("zxml");
 const z2d = @import("z2d");
 
+const color = @import("color.zig");
 const path = @import("path.zig");
 
 pub const Error = error{
@@ -51,7 +74,62 @@ pub const Error = error{
     /// `<use>`. Refused rather than skipped: skipping it would draw a picture
     /// that is quietly missing a piece.
     UnsupportedElement,
-} || xml.Error;
+    /// `opacity` on the root `<svg>`, which is a *group* opacity: the document
+    /// is drawn into a layer of its own and that layer is composited once at
+    /// the given alpha.
+    ///
+    /// Multiplying it into each shape's alpha instead -- which is what
+    /// `opacity` on a single `<path>` amounts to, and is exactly right there
+    /// -- is wrong the moment two shapes overlap, because each would then show
+    /// through the other where the group would have shown only the upper one.
+    /// Refused rather than approximated, and it comes back with the composited
+    /// layers that clipping and masking need.
+    GroupOpacityUnsupported,
+    /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
+    BadFillRule,
+} || color.Error || xml.Error;
+
+/// The presentation attributes that an element passes down to its children.
+///
+/// Null in each field means nothing has named it, so the caller's choice
+/// stands. That is what lets `Options.fill` be the default for a document that
+/// names no colour anywhere, which is every icon set worth drawing.
+pub const Inherited = struct {
+    fill: ?color.Paint = null,
+    fill_opacity: ?f64 = null,
+    fill_rule: ?z2d.options.FillRule = null,
+    /// The `color` property, which is what `fill="currentColor"` resolves to.
+    current_color: ?color.Color = null,
+
+    /// `self` with everything `child` names overridden.
+    pub fn with(self: Inherited, child: Inherited) Inherited {
+        return .{
+            .fill = child.fill orelse self.fill,
+            .fill_opacity = child.fill_opacity orelse self.fill_opacity,
+            .fill_rule = child.fill_rule orelse self.fill_rule,
+            .current_color = child.current_color orelse self.current_color,
+        };
+    }
+};
+
+/// One `<path>`, with the paint that applies to it.
+pub const Shape = struct {
+    /// The `d` attribute, borrowed from the source.
+    d: []const u8,
+    /// What to paint it with, after inheritance. Null means nothing named a
+    /// `fill`, so the caller's colour stands.
+    fill: ?color.Paint,
+    /// `fill-opacity`, or null for the caller's default of fully opaque.
+    fill_opacity: ?f64,
+    /// `fill-rule`, or null for the caller's choice.
+    fill_rule: ?z2d.options.FillRule,
+    /// The `color` in force, for a `fill` of `currentColor`. Null means the
+    /// caller's colour.
+    current_color: ?color.Color,
+    /// This element's own `opacity`, which is not inherited. One when the
+    /// element does not name it.
+    opacity: f64,
+};
 
 pub const ViewBox = struct {
     min_x: f64,
@@ -70,13 +148,15 @@ pub const Document = struct {
     /// How many `<path>` elements `read` found, so that a caller can bound the
     /// work before starting it.
     shape_count: usize,
+    /// What the root `<svg>` named, which every shape inherits.
+    root: Inherited,
 
-    /// The `d` of each `<path>`, in document order.
+    /// Each `<path>`, in document order.
     ///
     /// Order is the painting order: SVG paints shapes in the order they are
     /// written, each over the last.
     pub fn paths(self: Document) PathIterator {
-        return .{ .reader = .init(self.src) };
+        return .{ .reader = .init(self.src), .inherited = self.root };
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -108,13 +188,15 @@ pub const Document = struct {
 /// paper over.
 pub const PathIterator = struct {
     reader: xml.Reader,
+    /// What the root named, which each shape starts from.
+    inherited: Inherited,
     /// How deep inside a subtree that is not painted. Kept because `read` and
     /// this have to agree exactly on what counts as a shape: a `<path>` inside
     /// `<defs>` is not one, and an iterator that yielded it anyway would paint
     /// something the document said to keep back, having passed every check.
     depth_ignored: usize = 0,
 
-    pub fn next(self: *PathIterator) Error!?[]const u8 {
+    pub fn next(self: *PathIterator) Error!?Shape {
         while (true) switch (try self.reader.next()) {
             .start_element => |e| {
                 if (self.depth_ignored > 0) {
@@ -122,7 +204,19 @@ pub const PathIterator = struct {
                     continue;
                 }
                 if (xml.nameIs(e.name, "path")) {
-                    return e.attr("d") orelse return error.NoPath;
+                    const own = try readInherited(e);
+                    const effective = self.inherited.with(own);
+                    return .{
+                        .d = e.attr("d") orelse return error.NoPath,
+                        .fill = effective.fill,
+                        .fill_opacity = effective.fill_opacity,
+                        .fill_rule = effective.fill_rule,
+                        .current_color = effective.current_color,
+                        .opacity = if (e.attr("opacity")) |v|
+                            try color.parseOpacity(v)
+                        else
+                            1.0,
+                    };
                 }
                 if (isIgnorable(e.name) and !e.self_closing) self.depth_ignored += 1;
             },
@@ -134,6 +228,34 @@ pub const PathIterator = struct {
         };
     }
 };
+
+/// The four inherited presentation attributes, where an element names them.
+///
+/// Every one of them is refused rather than defaulted when it cannot be read.
+/// resvg, and every browser, falls back to the initial value and paints on;
+/// see `color.zig` for why this does not.
+fn readInherited(e: xml.Element) Error!Inherited {
+    return .{
+        .fill = if (e.attr("fill")) |v| try color.parsePaint(v) else null,
+        .fill_opacity = if (e.attr("fill-opacity")) |v| try color.parseOpacity(v) else null,
+        .fill_rule = if (e.attr("fill-rule")) |v| try parseFillRule(v) else null,
+        .current_color = if (e.attr("color")) |v| try color.parseColor(v) else null,
+    };
+}
+
+/// `nonzero` or `evenodd`, and nothing else.
+///
+/// Matched with regard to case, unlike a colour name. The difference is real
+/// and it is not an inconsistency: a colour keyword is CSS, where keywords are
+/// ASCII case-insensitive, while this is an XML attribute value, where they
+/// are not. resvg draws `fill-rule="EVENODD"` with the nonzero rule, which is
+/// the same reading.
+fn parseFillRule(text: []const u8) Error!z2d.options.FillRule {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.eql(u8, t, "nonzero")) return .non_zero;
+    if (std.mem.eql(u8, t, "evenodd")) return .even_odd;
+    return error.BadFillRule;
+}
 
 /// The elements that carry no geometry and so may be passed over.
 fn isIgnorable(name: []const u8) bool {
@@ -151,6 +273,7 @@ pub fn read(src: []const u8) Error!Document {
     var reader: xml.Reader = .init(src);
 
     var view_box: ?ViewBox = null;
+    var root: Inherited = .{};
     var shapes: usize = 0;
     var depth_ignored: usize = 0;
 
@@ -162,11 +285,18 @@ pub fn read(src: []const u8) Error!Document {
             }
             if (xml.nameIs(e.name, "svg")) {
                 view_box = try parseViewBox(e.attr("viewBox") orelse return error.BadViewBox);
+                root = try readInherited(e);
+                // Not `opacity`: on the root it is a group opacity, and there
+                // is no layer to composite one into. See the error.
+                if (e.attr("opacity") != null) return error.GroupOpacityUnsupported;
             } else if (xml.nameIs(e.name, "path")) {
-                // Checked here rather than left to the iterator, so that a
-                // `<path>` with no `d` is refused before anything is drawn
-                // like every other malformed thing.
+                // Every attribute is parsed here as well as in the iterator,
+                // so that a malformed one is refused before anything is drawn
+                // like every other malformed thing -- and so that the two
+                // walks cannot disagree about which documents are drawable.
                 _ = e.attr("d") orelse return error.NoPath;
+                _ = try readInherited(e);
+                if (e.attr("opacity")) |v| _ = try color.parseOpacity(v);
                 shapes += 1;
             } else if (isIgnorable(e.name)) {
                 if (!e.self_closing) depth_ignored += 1;
@@ -186,6 +316,7 @@ pub fn read(src: []const u8) Error!Document {
         .view_box = view_box orelse return error.NotAnSvg,
         .src = src,
         .shape_count = shapes,
+        .root = root,
     };
 }
 
@@ -237,7 +368,7 @@ fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(gpa);
     var it = doc.paths();
-    while (try it.next()) |d| try out.append(gpa, d);
+    while (try it.next()) |shape| try out.append(gpa, shape.d);
     return out.toOwnedSlice(gpa);
 }
 
@@ -248,8 +379,8 @@ test "a well formed icon reads" {
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 
     var it = doc.paths();
-    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?);
-    try testing.expectEqual(@as(?[]const u8, null), try it.next());
+    try testing.expectEqualStrings("M3,9H7L12,4V20L7,15H3V9Z", (try it.next()).?.d);
+    try testing.expectEqual(@as(?Shape, null), try it.next());
 }
 
 test "every path is handed out, in document order" {
@@ -358,7 +489,7 @@ test "the viewBox is scaled into the box asked for" {
     defer p.deinit(gpa);
     // A 24-unit viewBox into a 48-pixel box doubles everything.
     var it = doc.paths();
-    try buildShape(&p, gpa, (try it.next()).?, doc.transformFor(0, 0, 48, 48), .{});
+    try buildShape(&p, gpa, (try it.next()).?.d, doc.transformFor(0, 0, 48, 48), .{});
     try testing.expectApproxEqAbs(@as(f64, 6), p.nodes.items[0].move_to.point.x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 18), p.nodes.items[0].move_to.point.y, 1e-9);
 }

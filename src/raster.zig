@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 
 const z2d = @import("z2d");
 
+const color = @import("color.zig");
 const document = @import("document.zig");
 const path = @import("path.zig");
 
@@ -106,8 +107,16 @@ pub const Options = struct {
     width: ?u32 = null,
     height: ?u32 = null,
 
-    /// What to paint the path with. SVG's default `fill` is black, and this
-    /// is that; the `fill` attribute is not read.
+    /// What to paint a shape that names no colour of its own, and what
+    /// `fill="currentColor"` resolves to.
+    ///
+    /// SVG's initial `fill` is black, and so is this -- but a shape whose
+    /// document says nothing is painted in *this* colour rather than in black,
+    /// which is a deliberate difference. Not one of the 7,447 Material Design
+    /// Icons carries a `fill`, so under the letter of the specification the
+    /// set could only ever be drawn black; this is what lets a caller draw one
+    /// in any colour they like. A document that does name a colour is drawn in
+    /// the colour it names.
     ///
     /// An `rgba` or `argb` pixel must be premultiplied, which z2d checks and
     /// refuses.
@@ -128,8 +137,8 @@ pub const Options = struct {
     /// disagree would mean silently ignoring one of them.
     surface_type: z2d.surface.SurfaceType = .image_surface_rgba,
 
-    /// SVG's default `fill-rule` is `nonzero`, and this is that; the
-    /// attribute is not read.
+    /// The rule for a shape whose document names none. SVG's initial
+    /// `fill-rule` is `nonzero`, and so is this.
     fill_rule: z2d.options.FillRule = .non_zero,
 
     anti_aliasing_mode: z2d.options.AntiAliasMode = .default,
@@ -219,30 +228,87 @@ fn drawDocument(
     if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
 
     const transform = doc.transformFor(box.x, box.y, box.width, box.height);
-    const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = opts.fill } };
 
     // Spent down across the whole document rather than reset per shape. See
     // `Limits.max_path_nodes`.
     var nodes_left = opts.limits.max_path_nodes;
 
     var shapes = doc.paths();
-    while (try shapes.next()) |d| {
+    while (try shapes.next()) |shape| {
+        const paint = resolve(shape, opts) orelse continue;
+
         var p: z2d.Path = .empty;
         defer p.deinit(gpa);
 
-        try document.buildShape(&p, gpa, d, transform, .{ .max_nodes = nodes_left });
+        try document.buildShape(&p, gpa, shape.d, transform, .{ .max_nodes = nodes_left });
         nodes_left -= p.nodes.items.len;
 
         // An empty `d` is a shape that draws nothing, which is not an error;
         // `painter.fill` would take it too, but this says so on purpose.
         if (p.nodes.items.len == 0) continue;
 
+        const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = paint } };
         try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-            .fill_rule = opts.fill_rule,
+            .fill_rule = shape.fill_rule orelse opts.fill_rule,
             .anti_aliasing_mode = opts.anti_aliasing_mode,
             .tolerance = opts.tolerance,
         });
     }
+}
+
+/// The pixel one shape is painted with, or null when it is not painted at all.
+///
+/// Three alphas multiply together: the colour's own, from `#rrggbbaa` or
+/// `rgba()`; `fill-opacity`; and `opacity`. For a shape that has a fill and
+/// nothing else, multiplying `opacity` in like this is exactly what
+/// compositing the shape as its own layer would produce -- which is why
+/// `opacity` on a `<path>` is implemented and `opacity` on the root `<svg>`,
+/// where shapes could overlap, is refused by the reader instead.
+fn resolve(shape: document.Shape, opts: Options) ?z2d.Pixel {
+    const alpha = (shape.fill_opacity orelse 1.0) * shape.opacity;
+    if (alpha <= 0) return null;
+
+    // A shape that named no `fill` is treated as though it had named
+    // `currentColor`, which lands on the caller's colour by the same route --
+    // `color`'s initial value is the caller's choice. The two spellings are
+    // the same picture, and the icon sets in the world use one or the other.
+    const named: ?color.Color = switch (shape.fill orelse .current) {
+        .none => return null,
+        .color => |c| c,
+        .current => shape.current_color,
+    };
+
+    if (named) |c| return fadeColor(c, alpha);
+    return fadePixel(opts.fill, alpha);
+}
+
+/// A parsed colour as a premultiplied pixel, faded by `alpha`.
+fn fadeColor(c: color.Color, alpha: f64) ?z2d.Pixel {
+    const a = c.alpha * alpha;
+    if (a <= 0) return null;
+    return .{ .rgba = .fromClamped(
+        @as(f64, @floatFromInt(c.r)) / 255.0,
+        @as(f64, @floatFromInt(c.g)) / 255.0,
+        @as(f64, @floatFromInt(c.b)) / 255.0,
+        a,
+    ) };
+}
+
+/// The caller's own pixel, faded by `alpha`.
+///
+/// Returned exactly as given when there is nothing to fade, so that a caller
+/// who named an `rgb` pixel keeps it: widening every fill to `rgba` would make
+/// z2d composite where it could have copied, for no visible difference.
+fn fadePixel(px: z2d.Pixel, alpha: f64) ?z2d.Pixel {
+    if (alpha >= 1.0) return px;
+    if (alpha <= 0) return null;
+    const straight = z2d.pixel.RGBA.fromPixel(px).demultiply();
+    return .{ .rgba = .fromClamped(
+        @as(f64, @floatFromInt(straight.r)) / 255.0,
+        @as(f64, @floatFromInt(straight.g)) / 255.0,
+        @as(f64, @floatFromInt(straight.b)) / 255.0,
+        @as(f64, @floatFromInt(straight.a)) / 255.0 * alpha,
+    ) };
 }
 
 /// A viewBox dimension as a pixel count.
@@ -396,6 +462,170 @@ test "a document with more shapes than the limit allows is refused" {
         .height = 16,
         .limits = .{ .max_shapes = 2 },
     }));
+}
+
+/// The pixel at the middle of a 20x20 render of a full-viewBox square.
+fn middleOf(gpa: Allocator, src: []const u8, opts: Options) !z2d.pixel.RGBA {
+    var o = opts;
+    o.width = 20;
+    o.height = 20;
+    var surface = try render(gpa, src, o);
+    defer surface.deinit(gpa);
+    return z2d.pixel.RGBA.fromPixel(surface.getPixel(10, 10).?).demultiply();
+}
+
+fn square(comptime attrs: []const u8) []const u8 {
+    return "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" " ++ attrs ++ "/></svg>";
+}
+
+test "a shape is painted the colour its document names" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        square("fill=\"red\""),
+        square("fill=\"#f00\""),
+        square("fill=\"#ff0000\""),
+        square("fill=\"rgb(255,0,0)\""),
+        square("fill=\"RED\""),
+    }) |src| {
+        const px = try middleOf(gpa, src, .{});
+        try testing.expectEqual(@as(u8, 255), px.r);
+        try testing.expectEqual(@as(u8, 0), px.g);
+        try testing.expectEqual(@as(u8, 255), px.a);
+    }
+}
+
+test "a shape that names no colour is painted the caller's" {
+    // The whole reason a Material Design Icon can be drawn in any colour: not
+    // one of the 7,447 carries a `fill`.
+    const gpa = testing.allocator;
+    const px = try middleOf(gpa, square(""), .{
+        .fill = .{ .rgba = .{ .r = 0, .g = 255, .b = 0, .a = 255 } },
+    });
+    try testing.expectEqual(@as(u8, 255), px.g);
+    try testing.expectEqual(@as(u8, 0), px.r);
+}
+
+test "currentColor is the caller's colour, or the color property when there is one" {
+    const gpa = testing.allocator;
+    const callers: Options = .{ .fill = .{ .rgba = .{ .r = 0, .g = 0, .b = 255, .a = 255 } } };
+
+    const from_caller = try middleOf(gpa, square("fill=\"currentColor\""), callers);
+    try testing.expectEqual(@as(u8, 255), from_caller.b);
+
+    // `color` on the root is inherited and is what `currentColor` resolves to.
+    const from_color = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" color=\"red\"><path d=\"M0 0H8V8H0Z\" fill=\"currentColor\"/></svg>",
+        callers,
+    );
+    try testing.expectEqual(@as(u8, 255), from_color.r);
+    try testing.expectEqual(@as(u8, 0), from_color.b);
+
+    // `fill` on the root is *not* what it resolves to -- that is the trap, and
+    // resvg agrees: a `fill` ancestor leaves `color` at its initial value.
+    const not_fill = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill=\"red\"><path d=\"M0 0H8V8H0Z\" fill=\"currentColor\"/></svg>",
+        callers,
+    );
+    try testing.expectEqual(@as(u8, 255), not_fill.b);
+}
+
+test "fill and fill-opacity are inherited from the root, and overridden by the shape" {
+    const gpa = testing.allocator;
+    const inherited = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill=\"red\"><path d=\"M0 0H8V8H0Z\"/></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), inherited.r);
+
+    const overridden = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill=\"red\"><path d=\"M0 0H8V8H0Z\" fill=\"blue\"/></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), overridden.b);
+    try testing.expectEqual(@as(u8, 0), overridden.r);
+
+    const faded = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill-opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\" fill=\"red\"/></svg>",
+        .{},
+    );
+    try testing.expectApproxEqAbs(@as(f64, 128), @as(f64, @floatFromInt(faded.a)), 1.0);
+}
+
+test "the three alphas multiply together" {
+    const gpa = testing.allocator;
+    // The colour's own alpha, then fill-opacity, then opacity.
+    const px = try middleOf(gpa, square("fill=\"#ff000080\" fill-opacity=\"0.5\" opacity=\"0.5\""), .{});
+    // 0.5 * 0.5 * 0.5 = 0.125, which is 32 of 255.
+    try testing.expectApproxEqAbs(@as(f64, 32), @as(f64, @floatFromInt(px.a)), 1.5);
+}
+
+test "a shape that would paint nothing is skipped" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        square("fill=\"none\""),
+        square("fill=\"transparent\""),
+        square("fill-opacity=\"0\""),
+        square("opacity=\"0\""),
+        square("fill=\"#ff000000\""),
+    }) |src| {
+        const px = try middleOf(gpa, src, .{});
+        try testing.expectEqual(@as(u8, 0), px.a);
+    }
+}
+
+test "shapes in one document can be different colours" {
+    const gpa = testing.allocator;
+    const src =
+        \\<svg viewBox="0 0 4 2"><path d="M0 0H2V2H0Z" fill="red"/><path d="M2 0H4V2H2Z" fill="blue"/></svg>
+    ;
+    var surface = try render(gpa, src, .{ .width = 40, .height = 20 });
+    defer surface.deinit(gpa);
+    const left = z2d.pixel.RGBA.fromPixel(surface.getPixel(10, 10).?).demultiply();
+    const right = z2d.pixel.RGBA.fromPixel(surface.getPixel(30, 10).?).demultiply();
+    try testing.expectEqual(@as(u8, 255), left.r);
+    try testing.expectEqual(@as(u8, 0), left.b);
+    try testing.expectEqual(@as(u8, 255), right.b);
+    try testing.expectEqual(@as(u8, 0), right.r);
+}
+
+test "fill-rule is read from the document, and is case-sensitive" {
+    const gpa = testing.allocator;
+    // Both subpaths wound the same way: nonzero fills the middle, evenodd
+    // leaves a hole.
+    const both = "M0 0H8V8H0ZM2 2H6V6H2Z";
+    const nonzero = "<svg viewBox=\"0 0 8 8\"><path d=\"" ++ both ++ "\"/></svg>";
+    const evenodd = "<svg viewBox=\"0 0 8 8\"><path d=\"" ++ both ++ "\" fill-rule=\"evenodd\"/></svg>";
+
+    try testing.expectEqual(@as(u8, 255), (try middleOf(gpa, nonzero, .{})).a);
+    try testing.expectEqual(@as(u8, 0), (try middleOf(gpa, evenodd, .{})).a);
+
+    // `EVENODD` is not `evenodd`: this is an XML attribute value, not a CSS
+    // keyword, so it is not matched without regard to case. resvg reads it the
+    // same way -- but it falls back to nonzero where this refuses.
+    try testing.expectError(error.BadFillRule, render(gpa, "<svg viewBox=\"0 0 8 8\"><path d=\"" ++
+        both ++ "\" fill-rule=\"EVENODD\"/></svg>", .{}));
+}
+
+test "a value that cannot be read is refused rather than defaulted" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.BadColor, render(gpa, square("fill=\"notacolour\""), .{}));
+    try testing.expectError(error.BadColor, render(gpa, square("fill=\"#12345\""), .{}));
+    try testing.expectError(error.BadOpacity, render(gpa, square("opacity=\"half\""), .{}));
+    try testing.expectError(error.BadOpacity, render(gpa, square("fill-opacity=\"\""), .{}));
+}
+
+test "opacity on the root is refused rather than approximated" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.GroupOpacityUnsupported, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
+        .{},
+    ));
 }
 
 test "a path past the node limit is refused" {

@@ -20,10 +20,12 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const z2d = @import("z2d");
+const ztree = @import("ztree");
 
 const color = @import("color.zig");
 const document = @import("document.zig");
 const gradient = @import("gradient.zig");
+const length = @import("length.zig");
 const path = @import("path.zig");
 const transform = @import("transform.zig");
 
@@ -74,10 +76,22 @@ pub const Limits = struct {
     /// and composited once, and each such surface is the size of the whole
     /// picture. So this multiplies the memory a render can take: the ceiling
     /// is `max_pixels` times four bytes times *this*, and a sandboxed render's
-    /// `working_bytes` has to cover it.
+    /// `working_bytes` has to cover it. A clip or a mask is another such
+    /// surface on top, and `max_mask_depth` says how many of those can be
+    /// alive at once.
     ///
     /// Eight is far past any document that means something by its nesting.
     max_layers: usize = 8,
+
+    /// How deep to follow a mask into another mask.
+    ///
+    /// A `<mask>` may carry a `mask` of its own and a `<clipPath>` a
+    /// `clip-path` of its own, and each level is another surface the size of
+    /// the picture plus a walk of its content. The recursion is bounded here
+    /// rather than by the cycle check in the walk, because a mask naming
+    /// itself is a cycle the *iterator* never sees -- each level starts a
+    /// fresh walk that is perfectly finite on its own.
+    max_mask_depth: usize = 4,
 
     /// The most source to buffer, for the callers that have to buffer it --
     /// `sandbox.render` copies the document into memory before it forks,
@@ -190,11 +204,17 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     TooManyLayers,
     /// A `clip-path` naming something that is not a `<clipPath>`.
     BadClipPath,
-    /// A `clipPathUnits="objectBoundingBox"`. The bounding box of a *group*
-    /// is the union of everything in it, which is not known until it has been
-    /// drawn -- and the clip has to be built before that. The default,
-    /// `userSpaceOnUse`, needs no box.
+    /// A `mask` naming something that is not a `<mask>`.
+    BadMask,
+    /// A `clipPathUnits`, `maskUnits` or `maskContentUnits` that is neither
+    /// `userSpaceOnUse` nor `objectBoundingBox`. Refused rather than taken as
+    /// the default, because a document that misspells one means something by
+    /// it and the two answers differ by the whole bounding box.
     UnsupportedClipUnits,
+    /// Masks and clips nested more deeply than `Limits.max_mask_depth` -- a
+    /// `<mask>` whose content is itself masked, or a `<clipPath>` carrying a
+    /// `clip-path` of its own, repeated past any sense.
+    TooManyMaskHops,
 } || gradient.Error;
 
 /// Where in a surface to draw, in pixels.
@@ -269,8 +289,6 @@ fn drawDocument(
 ) Error!void {
     if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
 
-    const view_box = doc.transformFor(box.x, box.y, box.width, box.height);
-
     // Spent down across the whole document rather than reset per shape. See
     // `Limits.max_path_nodes`.
     var nodes_left = opts.limits.max_path_nodes;
@@ -282,20 +300,60 @@ fn drawDocument(
     defer layers.deinit(gpa);
 
     var shapes = doc.paths();
-    while (try shapes.next()) |item| {
+    return drawItems(gpa, &layers, doc, &shapes, .{
+        .base = doc.transformFor(box.x, box.y, box.width, box.height),
+        .nodes_left = &nodes_left,
+        .depth = 0,
+    }, opts);
+}
+
+/// Everything a run of `drawItems` shares with the one that called it.
+const Pass = struct {
+    /// The matrix outside every shape's own: the viewBox-to-pixels mapping for
+    /// the document itself, and the identity for a `<mask>`, whose content
+    /// matrix is folded into its iterator instead.
+    base: z2d.Transformation,
+    /// The document's node budget, spent by every pass alike so that a
+    /// document cannot buy itself more of it by drawing inside a mask.
+    nodes_left: *usize,
+    /// How many masks and clips deep this pass already is.
+    depth: usize,
+};
+
+/// Draw whatever a walk yields onto the top of a layer stack.
+///
+/// The document itself and the content of a `<mask>` are drawn by the same
+/// code, which is what makes a mask as expressive as the picture: a group
+/// inside one gets its layer, a gradient inside one gets its bounding box, and
+/// a clip inside one gets cut.
+fn drawItems(
+    gpa: Allocator,
+    layers: *Layers,
+    doc: *const document.Document,
+    items: *document.PathIterator,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    const width = layers.bottom.getWidth();
+    const height = layers.bottom.getHeight();
+    const view_box = pass.base;
+
+    while (try items.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
             .open_group => |g| {
-                const clip = if (g.clip_path) |id| try buildClip(
+                const cut = try buildCut(
                     gpa,
                     doc,
-                    id,
+                    .{ .clip_path = g.clip_path, .mask = g.mask },
                     view_box.mul(g.transform),
-                    destination.getWidth(),
-                    destination.getHeight(),
+                    .{ .container = g.node },
+                    pass,
+                    width,
+                    height,
                     opts,
-                ) else null;
-                try layers.open(gpa, g.opacity, clip, opts.limits.max_layers);
+                );
+                try layers.open(gpa, g.opacity, cut, opts.limits.max_layers);
                 continue;
             },
             .close_group => {
@@ -305,22 +363,23 @@ fn drawDocument(
         };
         const ctm = view_box.mul(shape.transform);
 
-        // A clip on a shape is the same layer a clip on a group gets. It costs
-        // a surface the size of the picture for one shape, which is the price
-        // of `dst_in` being a whole-surface operation -- documents clip groups
-        // far more often than single shapes.
+        // A clip or a mask on a shape is the same layer a clip on a group
+        // gets. It costs a surface the size of the picture for one shape,
+        // which is the price of `dst_in` being a whole-surface operation --
+        // documents clip groups far more often than single shapes.
         var shape_layer = false;
-        if (shape.clip_path) |id| {
-            const clip = try buildClip(
-                gpa,
-                doc,
-                id,
-                ctm,
-                destination.getWidth(),
-                destination.getHeight(),
-                opts,
-            );
-            try layers.open(gpa, 1.0, clip, opts.limits.max_layers);
+        if (try buildCut(
+            gpa,
+            doc,
+            .{ .clip_path = shape.clip_path, .mask = shape.mask },
+            ctm,
+            .{ .shape = shape },
+            pass,
+            width,
+            height,
+            opts,
+        )) |cut| {
+            try layers.open(gpa, 1.0, cut, opts.limits.max_layers);
             shape_layer = true;
         }
         defer if (shape_layer) layers.close(gpa);
@@ -338,9 +397,9 @@ fn drawDocument(
             // inside, so that a `transform` is in user units like the path
             // data it applies to.
             try document.buildShape(&p, gpa, shape.geometry, ctm, .{
-                .max_nodes = nodes_left,
+                .max_nodes = pass.nodes_left.*,
             });
-            nodes_left -= p.nodes.items.len;
+            pass.nodes_left.* -= p.nodes.items.len;
 
             // A shape with no geometry draws nothing, which is not an error;
             // `painter.fill` would take it too, but this says so on purpose.
@@ -372,10 +431,10 @@ fn drawDocument(
             defer p.deinit(gpa);
 
             try document.buildShape(&p, gpa, shape.geometry, ctm, .{
-                .max_nodes = nodes_left,
+                .max_nodes = pass.nodes_left.*,
                 .close_subpaths = false,
             });
-            nodes_left -= p.nodes.items.len;
+            pass.nodes_left.* -= p.nodes.items.len;
 
             if (p.nodes.items.len != 0) {
                 // Where the matrix is a similarity, the pen is scaled here and
@@ -612,6 +671,127 @@ const Layers = struct {
     }
 };
 
+/// Which coordinate system a `clipPathUnits`, `maskUnits` or
+/// `maskContentUnits` names.
+const Units = enum {
+    /// The user space in force on the element being clipped or masked -- not
+    /// on the `<clipPath>` or `<mask>`, which have none of their own.
+    user_space,
+    /// Fractions of §7.11's object bounding box: the extent of the clipped
+    /// element's own geometry, before its own `transform` and without its
+    /// stroke.
+    object_bounding_box,
+
+    fn of(
+        doc: *const document.Document,
+        node: ztree.NodeId,
+        name: []const u8,
+        default: Units,
+    ) Error!Units {
+        const raw = doc.tree.attributeValue(node, "", name) orelse return default;
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len == 0) return default;
+        if (std.mem.eql(u8, t, "userSpaceOnUse")) return .user_space;
+        if (std.mem.eql(u8, t, "objectBoundingBox")) return .object_bounding_box;
+        return error.UnsupportedClipUnits;
+    }
+
+    /// The matrix that takes a coordinate written in these units into the user
+    /// space of the element being clipped.
+    fn placement(self: Units, box: Box) z2d.Transformation {
+        return switch (self) {
+            .user_space => .identity,
+            .object_bounding_box => .{
+                .ax = box.width,
+                .by = 0,
+                .cx = 0,
+                .dy = box.height,
+                .tx = box.x,
+                .ty = box.y,
+            },
+        };
+    }
+};
+
+/// What has to be measured when something asks for `objectBoundingBox` units.
+///
+/// Held rather than measured up front because measuring costs a walk and a
+/// rebuild of every path in it, and most documents' clips are in user space
+/// and never ask.
+const Subject = union(enum) {
+    /// One element, measured from its own geometry.
+    shape: document.Shape,
+    /// A container, measured as the union of everything inside it.
+    container: ztree.NodeId,
+};
+
+/// The cached answer to "what is this element's bounding box", so that an
+/// element with both a clip and a mask in `objectBoundingBox` units is walked
+/// once rather than twice.
+const Measure = struct {
+    subject: Subject,
+    box: ?Box = null,
+
+    fn get(
+        self: *Measure,
+        gpa: Allocator,
+        doc: *const document.Document,
+        opts: Options,
+    ) Error!Box {
+        if (self.box) |b| return b;
+        const b = switch (self.subject) {
+            .shape => |sh| try boundingBox(gpa, sh, opts),
+            .container => |node| try contentBox(gpa, doc, node, opts),
+        };
+        self.box = b;
+        return b;
+    }
+};
+
+/// The ids an element's `clip-path` and `mask` name.
+const Cut = struct {
+    clip_path: ?[]const u8,
+    mask: ?[]const u8,
+};
+
+/// The alpha mask an element is cut to, or null when it names neither a clip
+/// nor a mask.
+///
+/// An element may carry both, and §14.4 makes the result the intersection:
+/// multiplying the two masks together with `dst_in` is that intersection, and
+/// it means the layer machinery still sees one mask however many produced it.
+fn buildCut(
+    gpa: Allocator,
+    doc: *const document.Document,
+    cut: Cut,
+    ctm: z2d.Transformation,
+    subject: Subject,
+    pass: Pass,
+    width: i32,
+    height: i32,
+    opts: Options,
+) Error!?z2d.Surface {
+    if (cut.clip_path == null and cut.mask == null) return null;
+    var measure: Measure = .{ .subject = subject };
+
+    var result: ?z2d.Surface = null;
+    errdefer if (result) |*r| r.deinit(gpa);
+
+    if (cut.clip_path) |id| {
+        result = try buildClip(gpa, doc, id, ctm, &measure, pass, width, height, opts);
+    }
+    if (cut.mask) |id| {
+        var m = try buildMask(gpa, doc, id, ctm, &measure, pass, width, height, opts);
+        if (result) |*r| {
+            defer m.deinit(gpa);
+            r.composite(&m, .dst_in, 0, 0, .{ .precision = .float });
+        } else {
+            result = m;
+        }
+    }
+    return result;
+}
+
 /// Render a `<clipPath>` into an alpha mask the size of the picture.
 ///
 /// The mask is opaque wherever the clip path's shapes cover and transparent
@@ -621,31 +801,54 @@ const Layers = struct {
 ///
 /// The shapes are drawn under the matrix in force on the clipped element, not
 /// on the `<clipPath>` -- `clipPathUnits="userSpaceOnUse"` means the user space
-/// of the thing being clipped. Each may carry its own `transform`, and a
-/// `clip-rule` decides its winding.
+/// of the thing being clipped, and `objectBoundingBox` means fractions of that
+/// element's own box. Each may carry its own `transform`, and a `clip-rule`
+/// decides its winding; and §14.3 gives the `<clipPath>` element itself a
+/// `transform` that applies to all of them together.
+///
+/// A `<clipPath>` may itself carry a `clip-path`, and then the clip is the
+/// intersection of the two. That is a second surface and a second walk, which
+/// is why `Limits.max_mask_depth` bounds how far it goes.
 fn buildClip(
     gpa: Allocator,
     doc: *const document.Document,
     id: []const u8,
     ctm: z2d.Transformation,
+    measure: *Measure,
+    pass: Pass,
     width: i32,
     height: i32,
     opts: Options,
 ) Error!z2d.Surface {
+    if (pass.depth >= opts.limits.max_mask_depth) return error.TooManyMaskHops;
     const node = doc.ids.get(id) orelse return error.UnknownReference;
     if (!std.mem.eql(u8, doc.tree.node(node).name.local, "clipPath")) return error.BadClipPath;
-    if (doc.tree.attributeValue(node, "", "clipPathUnits")) |raw| {
-        const t = std.mem.trim(u8, raw, " \t\r\n");
-        if (!std.mem.eql(u8, t, "userSpaceOnUse")) return error.UnsupportedClipUnits;
+
+    const units = try Units.of(doc, node, "clipPathUnits", .user_space);
+    const box = if (units == .object_bounding_box) try measure.get(gpa, doc, opts) else Box{
+        .width = 0,
+        .height = 0,
+    };
+    // A shape with no extent in one direction has no box to be fractions of,
+    // and a clip that is fractions of nothing covers nothing. `or`, not `and`:
+    // a box of some width and no height is just as degenerate, and letting it
+    // through hands z2d a matrix that collapses the plane.
+    if (units == .object_bounding_box and (!(box.width > 0) or !(box.height > 0))) {
+        return z2d.Surface.init(.image_surface_alpha8, gpa, width, height);
     }
+    // §14.3: a `transform` on the `<clipPath>` itself applies, inside the
+    // units mapping. `subtree` leaves the root's attributes alone, so it is
+    // folded in here -- and nowhere else, since a `transform` on a `<mask>`
+    // does not apply at all.
+    const placed = ctm.mul(units.placement(box)).mul(try doc.transformOf(node));
+    if (!transform.isFinite(placed)) return error.NonFiniteTransform;
 
     var mask = try z2d.Surface.init(.image_surface_alpha8, gpa, width, height);
     errdefer mask.deinit(gpa);
 
     const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
-    var nodes_left = opts.limits.max_path_nodes;
 
-    var it = doc.clipShapes(node, ctm);
+    var it = doc.subtree(node, placed);
     while (try it.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
@@ -656,9 +859,9 @@ fn buildClip(
         var p: z2d.Path = .empty;
         defer p.deinit(gpa);
         try document.buildShape(&p, gpa, shape.geometry, shape.transform, .{
-            .max_nodes = nodes_left,
+            .max_nodes = pass.nodes_left.*,
         });
-        nodes_left -= p.nodes.items.len;
+        pass.nodes_left.* -= p.nodes.items.len;
         if (p.nodes.items.len == 0) continue;
 
         try z2d.painter.fill(gpa, &mask, &white, p.nodes.items, .{
@@ -670,7 +873,303 @@ fn buildClip(
             .tolerance = opts.tolerance,
         });
     }
+
+    // §14.3.5: a `clip-path` on the `<clipPath>` itself intersects what its
+    // children came to. Measured against the same element, because the units
+    // of a clip on a clip are still the clipped element's.
+    if (try clipOnClip(doc, node)) |outer| {
+        var deeper = pass;
+        deeper.depth += 1;
+        var second = try buildClip(gpa, doc, outer, ctm, measure, deeper, width, height, opts);
+        defer second.deinit(gpa);
+        mask.composite(&second, .dst_in, 0, 0, .{ .precision = .float });
+    }
     return mask;
+}
+
+/// Render a `<mask>` into the alpha mask that `dst_in` cuts a layer with.
+///
+/// §14.4. The content is drawn as an ordinary picture -- gradients, groups,
+/// opacity and all -- and then each pixel's *luminance* becomes its alpha.
+/// That is the whole difference from a clip: a clip asks where its shapes are,
+/// a mask asks how bright they are, so a white shape masks nothing away and a
+/// grey one halves what is under it. `mask-type="alpha"` asks how opaque they
+/// are instead, and then the colour does not matter.
+///
+/// Two accidents make the luminance pass exact rather than approximate. The
+/// surface holds premultiplied colour, and luminance is linear, so the
+/// luminance of the premultiplied channels is already the luminance times the
+/// alpha -- which is the product §14.4 asks for, with no demultiply to round
+/// through. And the coefficients are applied to the bytes as stored: resvg
+/// does not linearize first, and measuring it says so plainly, because `#808080`
+/// yields an alpha of 128 where a linearized one would yield 55.
+fn buildMask(
+    gpa: Allocator,
+    doc: *const document.Document,
+    id: []const u8,
+    ctm: z2d.Transformation,
+    measure: *Measure,
+    pass: Pass,
+    width: i32,
+    height: i32,
+    opts: Options,
+) Error!z2d.Surface {
+    if (pass.depth >= opts.limits.max_mask_depth) return error.TooManyMaskHops;
+    const node = doc.ids.get(id) orelse return error.UnknownReference;
+    if (!std.mem.eql(u8, doc.tree.node(node).name.local, "mask")) return error.BadMask;
+
+    const region_units = try Units.of(doc, node, "maskUnits", .object_bounding_box);
+    const content_units = try Units.of(doc, node, "maskContentUnits", .user_space);
+    const kind = try MaskType.of(doc, node);
+
+    // §14.4's defaults are a tenth of the box outside it on every side, which
+    // leaves room for a mask whose content is blurred or stroked past the edge
+    // of what it masks.
+    const region = try maskRegion(doc, node, region_units);
+
+    var out = try z2d.Surface.init(.image_surface_alpha8, gpa, width, height);
+    errdefer out.deinit(gpa);
+    // A region with no extent masks everything away, and so does a mask in
+    // bounding-box units on a shape that has no box. Both leave `out`
+    // transparent, which is that answer.
+    if (!(region.width > 0) or !(region.height > 0)) return out;
+
+    const box = if (region_units == .object_bounding_box or
+        content_units == .object_bounding_box)
+        try measure.get(gpa, doc, opts)
+    else
+        Box{ .width = 0, .height = 0 };
+    if ((region_units == .object_bounding_box or content_units == .object_bounding_box) and
+        (!(box.width > 0) or !(box.height > 0)))
+    {
+        return out;
+    }
+
+    // The mask's content is drawn into a colour surface, because luminance
+    // needs colour; the alpha surface above is what it is turned into.
+    var canvas = try z2d.Surface.init(.image_surface_rgba, gpa, width, height);
+    defer canvas.deinit(gpa);
+
+    const content = ctm.mul(content_units.placement(box));
+    if (!transform.isFinite(content)) return error.NonFiniteTransform;
+
+    {
+        var layers: Layers = .{ .bottom = &canvas };
+        defer layers.deinit(gpa);
+        var it = doc.subtree(node, content);
+        // The content matrix rides in the iterator rather than in `base`, so
+        // that `<g transform>` inside the mask composes on top of it exactly
+        // as it would in the document.
+        //
+        // A deeper `Pass`, because the content may reach back out: a `<use>`
+        // inside a mask can name the very element the mask is on, and then the
+        // recursion is through the *drawing* rather than through a `mask`
+        // attribute. Counting it here is what bounds that too.
+        try drawItems(gpa, &layers, doc, &it, .{
+            .base = .identity,
+            .nodes_left = pass.nodes_left,
+            .depth = pass.depth + 1,
+        }, opts);
+    }
+
+    try coverage(kind, &canvas, &out, ctm.mul(region_units.placement(box)), region);
+
+    // §14.4: a `mask` on the `<mask>` itself masks the mask.
+    if (try maskOnMask(doc, node)) |outer| {
+        var deeper = pass;
+        deeper.depth += 1;
+        var second = try buildMask(gpa, doc, outer, ctm, measure, deeper, width, height, opts);
+        defer second.deinit(gpa);
+        out.composite(&second, .dst_in, 0, 0, .{ .precision = .float });
+    }
+    return out;
+}
+
+/// A `<mask>`'s `x`, `y`, `width` and `height`, in whatever units it named.
+///
+/// The defaults are §14.4's: `-10%`, `-10%`, `120%`, `120%`. In bounding-box
+/// units a percentage is just the number over a hundred, so both spellings of
+/// the default come out the same; in user space they are percentages of the
+/// viewport like any other length.
+fn maskRegion(
+    doc: *const document.Document,
+    node: ztree.NodeId,
+    units: Units,
+) Error!Box {
+    const viewport = doc.viewport();
+    const read = struct {
+        fn f(
+            d: *const document.Document,
+            n: ztree.NodeId,
+            name: []const u8,
+            axis: length.Axis,
+            u: Units,
+            vp: length.Viewport,
+            default: f64,
+        ) Error!f64 {
+            const raw = d.tree.attributeValue(n, "", name) orelse return default;
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            if (t.len == 0) return default;
+            if (u == .user_space) return length.parse(t, axis, vp);
+            // A fraction of the box, so there is no viewport in it: a bare
+            // number is the fraction and a percentage is that over a hundred.
+            if (std.mem.endsWith(u8, t, "%")) {
+                const v = std.fmt.parseFloat(f64, t[0 .. t.len - 1]) catch
+                    return error.BadLength;
+                return v / 100.0;
+            }
+            return std.fmt.parseFloat(f64, t) catch error.BadLength;
+        }
+    }.f;
+    return .{
+        .x = try read(doc, node, "x", .x, units, viewport, -0.1),
+        .y = try read(doc, node, "y", .y, units, viewport, -0.1),
+        .width = try read(doc, node, "width", .x, units, viewport, 1.2),
+        .height = try read(doc, node, "height", .y, units, viewport, 1.2),
+    };
+}
+
+/// A `clip-path` on a `<clipPath>` element itself, or null.
+fn clipOnClip(doc: *const document.Document, node: ztree.NodeId) Error!?[]const u8 {
+    return referenceAttribute(doc, node, "clip-path");
+}
+
+/// A `mask` on a `<mask>` element itself, or null.
+fn maskOnMask(doc: *const document.Document, node: ztree.NodeId) Error!?[]const u8 {
+    return referenceAttribute(doc, node, "mask");
+}
+
+/// The id a `url(#...)` attribute names, read straight off the tree.
+///
+/// The walk reads these for the elements it yields, but a `<clipPath>` and a
+/// `<mask>` are roots the walk never visits as a child, so their own are read
+/// here instead. Ignoring them would draw a clip wider than the document asked
+/// for, which is the kind of quiet difference this library exists to avoid.
+fn referenceAttribute(
+    doc: *const document.Document,
+    node: ztree.NodeId,
+    name: []const u8,
+) Error!?[]const u8 {
+    const raw = doc.tree.attributeValue(node, "", name) orelse return null;
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
+    const open = std.mem.indexOf(u8, t, "#") orelse return error.BadReference;
+    if (!std.mem.startsWith(u8, t, "url(")) return error.BadReference;
+    const close = std.mem.lastIndexOfScalar(u8, t, ')') orelse return error.BadReference;
+    if (close <= open + 1) return error.BadReference;
+    return std.mem.trim(u8, t[open + 1 .. close], " \t\r\n\"\'");
+}
+
+/// What a `<mask>` takes from its content: how bright it is, or how opaque.
+const MaskType = enum {
+    /// The default, and the one §14.4 defines.
+    luminance,
+    /// SVG 2's `mask-type: alpha`, which takes the content's alpha and ignores
+    /// its colour. resvg implements it, so this does too -- and refuses a
+    /// spelling it does not know rather than falling back to luminance, which
+    /// would draw a mask the document did not ask for.
+    ///
+    /// Only the presentation attribute is read. The `style="mask-type:alpha"`
+    /// spelling needs a CSS parser, which this library does not have and which
+    /// the capability table says so about.
+    alpha,
+
+    fn of(doc: *const document.Document, node: ztree.NodeId) Error!MaskType {
+        const raw = doc.tree.attributeValue(node, "", "mask-type") orelse return .luminance;
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len == 0 or std.mem.eql(u8, t, "luminance")) return .luminance;
+        if (std.mem.eql(u8, t, "alpha")) return .alpha;
+        return error.BadMask;
+    }
+};
+
+/// Turn a drawn mask into the alpha mask it stands for, clipped to its region.
+///
+/// `region` is in the space `placement` maps into pixels, and everything
+/// outside it is left at zero -- which is §14.4's statement that a mask does
+/// not extend past its own `x`, `y`, `width` and `height`. The rectangle is
+/// mapped rather than intersected, so a rotated element's mask region rotates
+/// with it, and the corners are taken as the axis-aligned span of the four
+/// mapped ones. That is exact for the similarity transforms a mask region is
+/// written under and generous for the rest, which errs towards drawing what
+/// the document asked for.
+fn coverage(
+    kind: MaskType,
+    canvas: *const z2d.Surface,
+    out: *z2d.Surface,
+    placement: z2d.Transformation,
+    region: Box,
+) Error!void {
+    const bounds = mappedBounds(placement, region);
+    const width = out.getWidth();
+    const height = out.getHeight();
+
+    // Clamped at both ends before the cast, not just at the end that would
+    // read outside the surface. `@intFromFloat` into an `i32` is a *panic* for
+    // anything the type cannot hold, and a mask region is four numbers the
+    // document chose -- `width="1e300"` is a crash rather than a large
+    // rectangle if only the near end is bounded.
+    const w: f64 = @floatFromInt(width);
+    const h: f64 = @floatFromInt(height);
+    const lo_x: i32 = @intFromFloat(std.math.clamp(@floor(bounds.x), 0.0, w));
+    const lo_y: i32 = @intFromFloat(std.math.clamp(@floor(bounds.y), 0.0, h));
+    const hi_x: i32 = @intFromFloat(std.math.clamp(@ceil(bounds.x + bounds.width), 0.0, w));
+    const hi_y: i32 = @intFromFloat(std.math.clamp(@ceil(bounds.y + bounds.height), 0.0, h));
+
+    var y = lo_y;
+    while (y < hi_y) : (y += 1) {
+        var x = lo_x;
+        while (x < hi_x) : (x += 1) {
+            const px = canvas.getPixel(x, y) orelse continue;
+            const rgba = z2d.pixel.RGBA.fromPixel(px);
+            const a: u8 = switch (kind) {
+                // §14.4's coefficients, on the bytes as stored. They sum to
+                // one, so a premultiplied channel set can never exceed its own
+                // alpha and the result is always a valid alpha.
+                .luminance => @intFromFloat(@round(std.math.clamp(
+                    0.2125 * @as(f64, @floatFromInt(rgba.r)) +
+                        0.7154 * @as(f64, @floatFromInt(rgba.g)) +
+                        0.0721 * @as(f64, @floatFromInt(rgba.b)),
+                    0.0,
+                    255.0,
+                ))),
+                .alpha => rgba.a,
+            };
+            out.putPixel(x, y, .{ .alpha8 = .{ .a = a } });
+        }
+    }
+}
+
+/// The axis-aligned span of a rectangle after a matrix.
+fn mappedBounds(m: z2d.Transformation, box: Box) Box {
+    var min_x = std.math.inf(f64);
+    var min_y = std.math.inf(f64);
+    var max_x = -std.math.inf(f64);
+    var max_y = -std.math.inf(f64);
+    const xs = [2]f64{ box.x, box.x + box.width };
+    const ys = [2]f64{ box.y, box.y + box.height };
+    for (xs) |x| for (ys) |y| {
+        // z2d's own, rather than the arithmetic written out here. Its matrix
+        // is `[ax by tx; cx dy ty]`, so `by` and `cx` are not where a reader
+        // coming from SVG's `matrix(a b c d e f)` expects them, and writing
+        // the multiply by hand got them the wrong way round once already --
+        // which a rotated mask region showed and nothing else would have.
+        var px = x;
+        var py = y;
+        m.userToDevice(&px, &py);
+        min_x = @min(min_x, px);
+        min_y = @min(min_y, py);
+        max_x = @max(max_x, px);
+        max_y = @max(max_y, py);
+    };
+    // All four, because a NaN coordinate leaves the others perfectly finite
+    // and would be carried into a cast that cannot take it.
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y) or
+        !std.math.isFinite(max_x) or !std.math.isFinite(max_y))
+    {
+        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    }
+    return .{ .x = min_x, .y = min_y, .width = max_x - min_x, .height = max_y - min_y };
 }
 
 /// An opacity as the byte an alpha mask wants.
@@ -806,7 +1305,64 @@ fn boundingBox(gpa: Allocator, shape: document.Shape, opts: Options) Error!Box {
     try document.buildShape(&p, gpa, shape.geometry, .identity, .{
         .max_nodes = opts.limits.max_path_nodes,
     });
+    return pathBox(p.nodes.items);
+}
 
+/// A container's bounding box, in the container's own user space.
+///
+/// The union of the boxes of everything inside it, each under its own
+/// transform relative to the container -- which is what walking the subtree
+/// from the identity yields, since the walk composes every `transform` it
+/// meets on top of the matrix it started with and the container's own is not
+/// among them.
+///
+/// It costs a walk and a rebuild of every path under the container, so it is
+/// asked for only when a `clipPathUnits` or a `maskUnits` actually says
+/// `objectBoundingBox`, and asked for once per element however many of them
+/// say it.
+fn contentBox(
+    gpa: Allocator,
+    doc: *const document.Document,
+    node: ztree.NodeId,
+    opts: Options,
+) Error!Box {
+    var min_x: f64 = std.math.inf(f64);
+    var min_y: f64 = std.math.inf(f64);
+    var max_x: f64 = -std.math.inf(f64);
+    var max_y: f64 = -std.math.inf(f64);
+
+    var it = doc.subtree(node, .identity);
+    while (try it.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            // A group inside contributes its shapes, which the walk yields in
+            // their own right; the group itself has no geometry to measure.
+            else => continue,
+        };
+        var p: z2d.Path = .empty;
+        defer p.deinit(gpa);
+        try document.buildShape(&p, gpa, shape.geometry, shape.transform, .{
+            .max_nodes = opts.limits.max_path_nodes,
+        });
+        if (p.nodes.items.len == 0) continue;
+        const box = pathBox(p.nodes.items);
+        min_x = @min(min_x, box.x);
+        min_y = @min(min_y, box.y);
+        max_x = @max(max_x, box.x + box.width);
+        max_y = @max(max_y, box.y + box.height);
+    }
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y)) {
+        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    }
+    return .{ .x = min_x, .y = min_y, .width = max_x - min_x, .height = max_y - min_y };
+}
+
+/// One node of a built path. z2d does not re-export the type from its root,
+/// so it is named through the field that holds them.
+const PathNode = std.meta.Elem(@FieldType(z2d.Path, "nodes").Slice);
+
+/// The axis-aligned extent of a built path.
+fn pathBox(nodes: []const PathNode) Box {
     var min_x: f64 = std.math.inf(f64);
     var min_y: f64 = std.math.inf(f64);
     var max_x: f64 = -std.math.inf(f64);
@@ -819,7 +1375,7 @@ fn boundingBox(gpa: Allocator, shape: document.Shape, opts: Options) Error!Box {
             hi_y.* = @max(hi_y.*, pt.y);
         }
     }.f;
-    for (p.nodes.items) |node| switch (node) {
+    for (nodes) |node| switch (node) {
         .move_to => |n| see(n.point, &min_x, &min_y, &max_x, &max_y),
         .line_to => |n| see(n.point, &min_x, &min_y, &max_x, &max_y),
         // The control points, not the curve. A hull is larger than the curve
@@ -1404,24 +1960,62 @@ test "a clip that names the wrong thing is refused" {
             "<rect width=\"8\" height=\"8\" clip-path=\"url(#r)\"/></svg>",
         .{},
     ));
+    // Neither of the two units the specification defines, so it is refused
+    // rather than taken as the default: the two answers differ by the whole
+    // bounding box, and a document that misspells one means something by it.
     try testing.expectError(error.UnsupportedClipUnits, render(
         gpa,
-        "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\">" ++
+        "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"fractionOfTheMoon\">" ++
             "<rect width=\"1\" height=\"1\"/></clipPath></defs>" ++
             "<rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
         .{},
     ));
 }
 
-test "a mask or a filter is refused rather than quietly dropped" {
+test "a clip in objectBoundingBox units is fractions of what it clips" {
+    const gpa = testing.allocator;
+    const head = "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\">" ++
+        "<rect width=\"0.5\" height=\"1\"/></clipPath>";
+    // The clip is the left half of the box, and the box is what it clips. On
+    // the shape that is its own geometry, 0..8, so the cut falls at x=4. On
+    // the group it is the union of the two halves, 0..8 again, so the same
+    // `<clipPath>` cuts the group in the same place -- which is the whole
+    // point of the units, and is what needed measuring a container to do.
+    for ([_][]const u8{
+        head ++ "<rect width=\"8\" height=\"8\" fill=\"black\" clip-path=\"url(#c)\"/></svg>",
+        head ++ "<g clip-path=\"url(#c)\"><rect width=\"4\" height=\"8\" fill=\"black\"/>" ++
+            "<rect x=\"4\" width=\"4\" height=\"8\" fill=\"black\"/></g></svg>",
+    }) |src| {
+        var surface = try render(gpa, src, .{ .width = 8, .height = 8 });
+        defer surface.deinit(gpa);
+        try testing.expectEqual(@as(u8, 255), surface.getPixel(2, 4).?.rgba.a);
+        try testing.expectEqual(@as(u8, 0), surface.getPixel(6, 4).?.rgba.a);
+    }
+}
+
+test "the object bounding box is measured before the element's own transform" {
+    const gpa = testing.allocator;
+    // §7.11's box is the geometry in the element's own coordinate system, so
+    // the `translate` is outside it: the rect measures 0..8 and the clip cuts
+    // it at its own midpoint, which lands at x=6 once it is moved.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 16 8\"><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\">" ++
+            "<rect width=\"0.5\" height=\"1\"/></clipPath>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" transform=\"translate(2,0)\"" ++
+            " clip-path=\"url(#c)\"/></svg>",
+        .{ .width = 16, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(4, 4).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(8, 4).?.rgba.a);
+}
+
+test "a filter is refused rather than quietly dropped" {
     const gpa = testing.allocator;
     // Attributes are normally ignored, but drawing an element *without* the
-    // mask or filter it asked for is a picture that looks finished and is not.
-    try testing.expectError(error.MaskUnsupported, render(
-        gpa,
-        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
-        .{},
-    ));
+    // filter it asked for is a picture that looks finished and is not. `mask`
+    // was refused here too until it was implemented.
     try testing.expectError(error.FilterUnsupported, render(
         gpa,
         "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
@@ -1434,6 +2028,129 @@ test "a mask or a filter is refused rather than quietly dropped" {
         .{ .width = 8, .height = 8 },
     );
     defer surface.deinit(gpa);
+}
+
+test "a mask turns its content's luminance into coverage" {
+    const gpa = testing.allocator;
+    // White masks nothing away, mid-grey halves what is under it, and black
+    // masks everything. The greys are the whole difference between a mask and
+    // a clip, which only ever answers "covered" or "not".
+    //
+    // Mid-grey coming out at 128 rather than at 55 is also the evidence that
+    // the coefficients go on the bytes as stored: linearizing first would more
+    // than halve it. resvg draws 128, and so does this.
+    for ([_]struct { src: []const u8, alpha: u8 }{
+        .{ .src = "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\"" ++
+            " fill=\"#ffffff\"/></mask><rect width=\"8\" height=\"8\" fill=\"black\"" ++
+            " mask=\"url(#m)\"/></svg>", .alpha = 255 },
+        .{ .src = "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\"" ++
+            " fill=\"#808080\"/></mask><rect width=\"8\" height=\"8\" fill=\"black\"" ++
+            " mask=\"url(#m)\"/></svg>", .alpha = 128 },
+        .{ .src = "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\"" ++
+            " fill=\"#000000\"/></mask><rect width=\"8\" height=\"8\" fill=\"black\"" ++
+            " mask=\"url(#m)\"/></svg>", .alpha = 0 },
+    }) |case| {
+        var surface = try render(gpa, case.src, .{ .width = 8, .height = 8 });
+        defer surface.deinit(gpa);
+        // Within one of the answer: the coefficients are applied in floating
+        // point and rounded once.
+        const got = surface.getPixel(4, 4).?.rgba.a;
+        try testing.expect(@abs(@as(i32, got) - @as(i32, case.alpha)) <= 1);
+    }
+}
+
+test "a mask's region clips it, and a mask that names the wrong thing is refused" {
+    const gpa = testing.allocator;
+    // The content covers everything; the region is the top half, in the user
+    // space of the masked element.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskUnits=\"userSpaceOnUse\"" ++
+            " x=\"0\" y=\"0\" width=\"8\" height=\"4\">" ++
+            "<rect width=\"8\" height=\"8\" fill=\"white\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" mask=\"url(#m)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(4, 2).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(4, 6).?.rgba.a);
+
+    try testing.expectError(error.UnknownReference, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"url(#nothing)\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.BadMask, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><rect width=\"8\" height=\"8\"/></clipPath>" ++
+            "<rect width=\"8\" height=\"8\" mask=\"url(#c)\"/></svg>",
+        .{},
+    ));
+}
+
+test "mask-type=alpha takes the content's opacity and not its colour" {
+    const gpa = testing.allocator;
+    // Red and green have wildly different luminances and the same alpha, so a
+    // mask that cannot tell them apart is reading alpha.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"alpha\"><rect width=\"8\"" ++
+            " height=\"8\" fill=\"#ff0000\" fill-opacity=\"0.5\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" mask=\"url(#m)\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"alpha\"><rect width=\"8\"" ++
+            " height=\"8\" fill=\"#00ff00\" fill-opacity=\"0.5\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" mask=\"url(#m)\"/></svg>",
+    }) |src| {
+        var surface = try render(gpa, src, .{ .width = 8, .height = 8 });
+        defer surface.deinit(gpa);
+        try testing.expectEqual(@as(u8, 128), surface.getPixel(4, 4).?.rgba.a);
+    }
+    // A spelling neither this nor the specification knows is refused rather
+    // than taken as luminance.
+    try testing.expectError(error.BadMask, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"lightness\">" ++
+            "<rect width=\"8\" height=\"8\" fill=\"white\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+        .{},
+    ));
+}
+
+test "an absurd mask region is bounded rather than a crash" {
+    const gpa = testing.allocator;
+    // The region's four numbers are the document's, and turning a float into
+    // the surface's `i32` is a panic for anything the type cannot hold.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"-1e300\"" ++
+            " y=\"-1e300\" width=\"1e300\" height=\"1e300\"><rect width=\"8\" height=\"8\"" ++
+            " fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" x=\"1e300\" y=\"1e300\" width=\"1e300\"" ++
+            " height=\"1e300\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    }) |src| {
+        var surface = render(gpa, src, .{ .width = 8, .height = 8 }) catch continue;
+        defer surface.deinit(gpa);
+    }
+}
+
+test "a mask that masks itself is bounded rather than endless" {
+    const gpa = testing.allocator;
+    // Through the `mask` attribute on the `<mask>` itself.
+    try testing.expectError(error.TooManyMaskHops, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask=\"url(#m)\">" ++
+            "<rect width=\"8\" height=\"8\" fill=\"white\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" mask=\"url(#m)\"/></svg>",
+        .{},
+    ));
+    // And through what the mask *draws*: a `<use>` inside it naming the very
+    // element the mask is on. The walk sees no cycle here -- each level is a
+    // finite document of its own -- so only the pass depth catches it.
+    try testing.expectError(error.TooManyMaskHops, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><use href=\"#r\"/></mask>" ++
+            "<rect id=\"r\" width=\"8\" height=\"8\" fill=\"white\" mask=\"url(#m)\"/></svg>",
+        .{},
+    ));
 }
 
 test "a definition is not drawn where it stands" {

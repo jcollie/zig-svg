@@ -197,7 +197,10 @@ pub const Options = struct {
 
     /// Working memory the renderer gets on top of the pixels: the path nodes,
     /// the plotted polygons and the scanline mask that `z2d.painter.fill`
-    /// allocates while running.
+    /// allocates while running -- and every composited layer, clip and mask,
+    /// each of which is a surface the size of the whole picture. A document
+    /// nesting groups, clips and masks as deeply as `raster.Limits` permits
+    /// wants this several times the picture rather than a fixed 32 MiB.
     ///
     /// Address space rather than memory, like the rest of the mapping. Too
     /// small shows up as `error.OutOfMemory` from the render.
@@ -493,10 +496,11 @@ const WireError = enum(u16) {
     bad_stop_offset = 37,
     too_many_gradient_hops = 38,
     too_many_layers = 39,
-    mask_unsupported = 40,
+    bad_mask = 40,
     filter_unsupported = 41,
     bad_clip_path = 42,
     unsupported_clip_units = 43,
+    too_many_mask_hops = 44,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -543,7 +547,8 @@ fn wireFromError(err: anyerror) WireError {
         error.BadStopOffset => .bad_stop_offset,
         error.TooManyGradientHops => .too_many_gradient_hops,
         error.TooManyLayers => .too_many_layers,
-        error.MaskUnsupported => .mask_unsupported,
+        error.BadMask => .bad_mask,
+        error.TooManyMaskHops => .too_many_mask_hops,
         error.FilterUnsupported => .filter_unsupported,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -605,7 +610,8 @@ fn wireToError(status: u16) Error {
         .bad_stop_offset => error.BadStopOffset,
         .too_many_gradient_hops => error.TooManyGradientHops,
         .too_many_layers => error.TooManyLayers,
-        .mask_unsupported => error.MaskUnsupported,
+        .bad_mask => error.BadMask,
+        .too_many_mask_hops => error.TooManyMaskHops,
         .filter_unsupported => error.FilterUnsupported,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,

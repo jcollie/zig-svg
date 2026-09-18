@@ -98,11 +98,60 @@ in place of a uniform alpha. `clip-rule` is read as a property of its own
 rather than as `fill-rule`: a document can fill nonzero and clip even-odd, and
 reading one for the other cuts the wrong hole.
 
-**`mask` and `filter` are refused, not ignored.** Every other attribute this
-library does not implement is passed over, because an attribute is usually
-decoration — but drawing an element *without* the mask or filter it asked for
-is a picture that looks finished and is not. `clip-path` was the third of those
-until now.
+`mask` uses that same layer, and differs from a clip in one thing: the
+`<mask>`'s content is drawn as an ordinary picture and then each pixel's
+**luminance** becomes its alpha. A clip asks where its shapes are, a mask asks
+how bright they are — so white masks nothing away, mid-grey halves what is
+under it, and a gradient from black to white is a fade. Because the content is
+drawn by the same code that draws the document, a mask is as expressive as the
+picture: a gradient inside one gets its bounding box, a `<g opacity="0.5">`
+inside one masks half as much, and a clip inside one gets cut.
+
+Two things make that luminance pass exact rather than approximate. The surface
+holds **premultiplied** colour, and luminance is linear, so the luminance of
+the premultiplied channels is already the luminance times the alpha — which is
+the product §14.4 asks for, with no demultiply to round through. And the
+coefficients go on the bytes **as stored**: SVG 1.1's `color-interpolation-filters`
+would have them linearized first, and resvg does not, which measuring says
+plainly — `#808080` masks to an alpha of 128 where a linearized one would give
+55. This follows resvg, and a fixture pins it.
+
+`mask-type="alpha"` asks for the content's opacity instead of its brightness,
+and is implemented because resvg implements it; a spelling that is neither is
+refused rather than falling back to luminance, which would draw a mask the
+document did not ask for. Only the presentation attribute is read — the
+`style="mask-type:alpha"` spelling needs a CSS parser, which this does not
+have.
+
+`maskUnits` and `maskContentUnits` are both implemented, as is
+`clipPathUnits="objectBoundingBox"`, and all three needed the same thing: the
+bounding box of the element being clipped. For a shape that is its own
+geometry, before its own `transform` and without its stroke, which §7.11
+defines and a gradient already wanted. For a **group** it is the union of
+everything inside, which is found by walking the group's subtree from the
+identity — the same walk the renderer uses, rooted elsewhere, which puts every
+shape it yields in the group's own user space. It costs a walk and a rebuild of
+every path under the element, so it is asked for only when some `…Units`
+attribute actually says `objectBoundingBox`, and asked for once per element
+however many of them say it.
+
+A `transform` on the `<clipPath>` element itself applies, and a `transform` on
+a `<mask>` element does not — §14.3 gives the first one and §14.4 gives the
+second nothing, resvg agrees, and `tests/oracle` pins both halves, because an
+asymmetry nobody expects is exactly the one that rots.
+
+A `<clipPath>` may carry a `clip-path` of its own and a `<mask>` a `mask` of
+its own, and then the result is the intersection. Those are read off the tree
+rather than by the walk, which never visits either element as somebody's child;
+`Limits.max_mask_depth` bounds the recursion, because a mask naming *itself* is
+a cycle the walk cannot see — each level starts a fresh walk that is perfectly
+finite on its own.
+
+**`filter` is refused, not ignored.** Every other attribute this library does
+not implement is passed over, because an attribute is usually decoration — but
+drawing an element *without* the filter it asked for is a picture that looks
+finished and is not. `clip-path` and `mask` were both refused here too, until
+each was implemented.
 
 A **definition** is never drawn where it stands. A `<linearGradient>` or a
 `<clipPath>` written straight into the document body rather than into `<defs>`
@@ -169,7 +218,7 @@ short of the specification.
 | `gradientUnits`, `gradientTransform` | yes — both unit systems |
 | `spreadMethod` | `pad` only; `reflect` and `repeat` are refused |
 | A foreign namespace | passed over, not refused — an Inkscape file reads |
-| `transform` | all six functions, on `<svg>`, `<g>` and any shape |
+| `transform` | all six functions, on `<svg>`, `<g>`, any shape, and a `<clipPath>` |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
@@ -183,9 +232,12 @@ short of the specification.
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
+| Masks and clips inside one another | to `Limits.max_mask_depth` (4) |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
-| `clip-path`, `clip-rule` | yes, with `<clipPath>` in `userSpaceOnUse` |
-| `mask`, `filter` | **no** — refused, not ignored |
+| `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
+| `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
+| `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
+| `filter` | **no** — refused, not ignored |
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>`, `style`, text, CSS | **no** |
 
@@ -278,6 +330,12 @@ whole document rather than for each shape — per shape it would bound nothing,
 since ten thousand `<path>` elements each just under the limit is the same
 denial of service written out longhand. `max_shapes` covers what the node
 budget cannot: an empty `d` produces no nodes and still costs a fill.
+
+`max_layers` and `max_mask_depth` bound the *memory* rather than the work.
+Every composited group, every clip and every mask is a surface the size of the
+whole picture, so the ceiling is `max_pixels` times four bytes times how many
+of them can be alive at once — which is what a sandboxed render's
+`working_bytes` has to cover.
 
 ## A tree, not a stream
 
@@ -429,15 +487,7 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. `<mask>`, and `clipPathUnits="objectBoundingBox"`.** A mask is the same
-layer a clip uses, with one thing more: its content is converted to
-*luminance* rather than taken as coverage, which is a pass over the layer that
-nothing here does yet. `objectBoundingBox` clip units need the bounding box of
-the clipped element, which for a *group* is the union of everything in it —
-not known until the group has been drawn, and the clip has to exist before
-that.
-
-**2. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
+**1. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in
 hand, the `em` and `ex` that are refused today. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
@@ -445,7 +495,7 @@ a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and
 handed in.
 
-**3. Patterns and the rest of `spreadMethod`.** `<pattern>` needs a tile
+**2. Patterns and the rest of `spreadMethod`.** `<pattern>` needs a tile
 rendered to its own surface and then repeated, and `reflect`/`repeat` need an
 extend mode z2d does not have — so both are upstream work before they are work
 here.

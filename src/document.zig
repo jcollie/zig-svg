@@ -133,11 +133,9 @@ pub const Error = error{
     /// `max_use_hops`. Not a cycle -- those are caught exactly -- but a chain
     /// nothing sensible produces.
     TooManyUseHops,
-    /// A `mask` attribute naming a `<mask>`. Refused rather than ignored:
-    /// drawing the element without its mask is a picture that looks finished
-    /// and is not.
-    MaskUnsupported,
-    /// A `filter` attribute, for the same reason.
+    /// A `filter` attribute. Refused rather than ignored: drawing the element
+    /// without the filter it asked for is a picture that looks finished and is
+    /// not.
     FilterUnsupported,
 } || transform.Error || color.Error || length.Error || ztree.ParseError;
 
@@ -329,13 +327,32 @@ pub const Item = union(enum) {
 
 /// A container that needs a layer of its own.
 pub const Group = struct {
+    /// The element the container was resolved to -- the `<g>` itself, or what
+    /// a `<use>` chain ended at. The renderer needs it to measure the group:
+    /// a clip or a mask in `objectBoundingBox` units is a fraction of the
+    /// union of everything inside, which can only be found by walking it, and
+    /// `Document.subtree` walks from here.
+    node: ztree.NodeId,
     /// The `opacity` to composite the finished layer at.
     opacity: f64,
     /// The id of a `<clipPath>` the layer is cut to, or null.
     clip_path: ?[]const u8,
+    /// The id of a `<mask>` the layer is cut to, or null. A layer may have
+    /// both, and then it is cut to the intersection.
+    mask: ?[]const u8,
     /// The user-space matrix in force on the container, which is the space the
     /// clip path's own coordinates are in.
     transform: z2d.Transformation,
+};
+
+/// What an element's `clip-path` and `mask` attributes name.
+const Refs = struct {
+    clip_path: ?[]const u8,
+    mask: ?[]const u8,
+
+    fn any(self: Refs) bool {
+        return self.clip_path != null or self.mask != null;
+    }
 };
 
 /// One drawable element, with the paint and the transform that apply to it.
@@ -364,6 +381,9 @@ pub const Shape = struct {
     /// The id of a `<clipPath>` this shape is cut to, or null. Not inherited:
     /// a clip applies to the element that names it.
     clip_path: ?[]const u8,
+    /// The id of a `<mask>` this shape is cut to, or null. Not inherited
+    /// either, and a shape may carry both.
+    mask: ?[]const u8,
     /// Every `transform` from the root down to and including this element,
     /// composed, with each `<use>`'s `x` and `y` folded in. In user units: the
     /// viewBox-to-pixels mapping is *not* in here, because it belongs to the
@@ -431,31 +451,55 @@ pub const Document = struct {
         return .{ .doc = self, .viewport = self.viewport() };
     }
 
-    /// The shapes inside one `<clipPath>`, under the matrix in force on the
-    /// element being clipped.
+    /// The same walk as `paths`, rooted somewhere else in the document and
+    /// somewhere else in the coordinate system.
     ///
-    /// The same walk as `paths`, rooted somewhere else and started somewhere
-    /// else in the coordinate system -- `clipPathUnits="userSpaceOnUse"` means
-    /// the user space of the *clipped* element, not of the `<clipPath>`, so
-    /// the matrix comes from the caller.
+    /// Three things need it. A `<clipPath>` is walked with the matrix of the
+    /// element being clipped, because `clipPathUnits="userSpaceOnUse"` means
+    /// the user space of the *clipped* element rather than of the
+    /// `<clipPath>`. A `<mask>` is walked the same way, with the region and
+    /// content units folded into the matrix first. And measuring a container
+    /// walks it with the identity, which puts every shape it yields in the
+    /// container's own user space -- the space §7.11's object bounding box is
+    /// measured in.
     ///
-    /// Its `open_group` and `close_group` items are not meaningful: there is
-    /// nothing to composite inside a mask, and §14.3 makes a clip the union of
-    /// its shapes whatever they are nested in. The caller drops them.
-    pub fn clipShapes(
+    /// The root's own `transform` and attributes are *not* applied: the
+    /// caller's matrix stands in for everything above the children. That is
+    /// what makes the identity case measure a group rather than measure it
+    /// already transformed.
+    ///
+    /// A clip drops the `open_group` and `close_group` items it yields --
+    /// §14.3 makes a clip the union of its shapes whatever they are nested in,
+    /// and there is nothing to composite inside an alpha mask. A mask honours
+    /// them, because a `<g opacity="0.5">` inside one is half as opaque and so
+    /// masks half as much.
+    pub fn subtree(
         self: *const Document,
-        clip_path: ztree.NodeId,
+        root: ztree.NodeId,
         ctm: z2d.Transformation,
     ) PathIterator {
         var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
         it.started = true;
         it.stack[0] = .{
-            .node = clip_path,
+            .node = root,
             .next_child = 0,
             .inherited = .{},
             .transform = ctm,
         };
         return it;
+    }
+
+    /// An element's own `transform`, or the identity when it has none.
+    ///
+    /// `subtree` deliberately leaves the root's attributes alone, because the
+    /// caller's matrix stands in for everything above the children. §14.3's
+    /// `transform` on a `<clipPath>` is the exception: it applies, and it is
+    /// the caller that has to fold it in. A `transform` on a `<mask>` does
+    /// *not* apply -- confirmed against resvg, which moves a clip and leaves a
+    /// mask where it was.
+    pub fn transformOf(self: Document, node: ztree.NodeId) Error!z2d.Transformation {
+        const raw = self.tree.attributeValue(node, "", "transform") orelse return .identity;
+        return transform.parse(raw);
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -540,20 +584,22 @@ pub const PathIterator = struct {
             self.started = true;
             const root = self.doc.root_node;
             const opacity = try self.opacityOf(root);
-            const clip = try self.clipOf(root);
+            const refs = try self.refsOf(root);
             const ctm = try self.readTransform(root);
             self.stack[0] = .{
                 .node = root,
                 .next_child = 0,
                 .inherited = try self.readInherited(root),
                 .transform = ctm,
-                .opens_layer = opacity < 1.0 or clip != null,
+                .opens_layer = opacity < 1.0 or refs.any(),
             };
             // The root is the one container the walk never meets as somebody's
             // child, so its layer is opened here rather than in `visit`.
             if (self.stack[0].opens_layer) return .{ .open_group = .{
+                .node = root,
                 .opacity = opacity,
-                .clip_path = clip,
+                .clip_path = refs.clip_path,
+                .mask = refs.mask,
                 .transform = ctm,
             } };
         }
@@ -583,20 +629,30 @@ pub const PathIterator = struct {
         return color.parseOpacity(raw);
     }
 
-    /// The id of an element's `clip-path`, or null.
+    /// What an element's `clip-path` and `mask` name, or null for each.
     ///
-    /// This is also where `mask` and `filter` are refused. They are attributes
-    /// and attributes are normally ignored -- but ignoring one of these draws
-    /// the element *without* the mask or the filter it asked for, which is a
-    /// picture that looks finished and is not. `clip-path` would have been the
-    /// third until this commit.
-    fn clipOf(self: *const PathIterator, node: ztree.NodeId) Error!?[]const u8 {
-        if (namesSomething(self.attr(node, "mask"))) return error.MaskUnsupported;
+    /// This is also where `filter` is refused. It is an attribute and
+    /// attributes are normally ignored -- but ignoring this one draws the
+    /// element *without* the filter it asked for, which is a picture that
+    /// looks finished and is not. `clip-path` and `mask` were both refused
+    /// here too until each was implemented.
+    fn refsOf(self: *const PathIterator, node: ztree.NodeId) Error!Refs {
         if (namesSomething(self.attr(node, "filter"))) return error.FilterUnsupported;
+        return .{
+            .clip_path = try self.referenceAttr(node, "clip-path"),
+            .mask = try self.referenceAttr(node, "mask"),
+        };
+    }
 
-        const raw = self.attr(node, "clip-path") orelse return null;
+    /// The id a `url(#...)` attribute names, or null when it names nothing.
+    fn referenceAttr(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+    ) Error!?[]const u8 {
+        const raw = self.attr(node, name) orelse return null;
         const t = std.mem.trim(u8, raw, " \t\r\n");
-        // `none` is the initial value and says there is no clip.
+        // `none` is the initial value and says there is nothing to apply.
         if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
         return referenceId(t) orelse error.BadReference;
     }
@@ -644,6 +700,10 @@ pub const PathIterator = struct {
         const own_ctm = ctm.mul(try self.readTransform(node));
         if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
+        // Read before the geometry test because a shape and a container both
+        // want them, and `filter` has to be refused either way.
+        const refs = try self.refsOf(node);
+
         if (try self.readGeometry(node)) |geometry| {
             return .{ .shape = .{
                 .geometry = geometry,
@@ -661,7 +721,8 @@ pub const PathIterator = struct {
                 .stroke_dasharray = effective.stroke_dasharray,
                 .stroke_dashoffset = effective.stroke_dashoffset,
                 .opacity = try self.opacityOf(node),
-                .clip_path = try self.clipOf(node),
+                .clip_path = refs.clip_path,
+                .mask = refs.mask,
                 .transform = own_ctm,
             } };
         }
@@ -671,12 +732,13 @@ pub const PathIterator = struct {
             // it needs a surface of its own to flatten into. One that does not
             // ask for that is invisible here, as it always was.
             const opacity = try self.opacityOf(node);
-            const clip = try self.clipOf(node);
-            const needs_layer = opacity < 1.0 or clip != null;
+            const needs_layer = opacity < 1.0 or refs.any();
             try self.push(node, effective, own_ctm, needs_layer);
             if (needs_layer) return .{ .open_group = .{
+                .node = node,
                 .opacity = opacity,
-                .clip_path = clip,
+                .clip_path = refs.clip_path,
+                .mask = refs.mask,
                 .transform = own_ctm,
             } };
             return null;

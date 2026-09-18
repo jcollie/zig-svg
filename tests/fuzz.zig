@@ -116,7 +116,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "&#;xampltqsogu09AZ" ++
     "usehrfid#defxlink:" ++
     "linearGradstopfetURuns%BoxpM" ++
-    "clip-pathruevnodmaskfilter";
+    "clip-pathruevnodmaskfilter" ++
+    "maskUnitContbjeBoudgxywh-typelumnac";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -686,11 +687,34 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" clip-path=\"none\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" clip-path=\"url(#missing)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#r)\"/></svg>",
-    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\"1\" height=\"1\"/></clipPath></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
-    // A mask or a filter, which are refused rather than quietly dropped.
-    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\"0.5\" height=\"1\"/></clipPath></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><circle cx=\"0.5\" cy=\"0.5\" r=\"0.4\"/></clipPath><g clip-path=\"url(#c)\"><rect width=\"4\" height=\"8\"/><rect x=\"4\" width=\"4\" height=\"4\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><clipPath id=\"a\"><rect width=\"8\" height=\"4\"/></clipPath><clipPath id=\"c\" clip-path=\"url(#a)\"><rect width=\"4\" height=\"8\"/></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    // `<mask>`, which draws its content as a picture and takes its luminance
+    // -- so every path the renderer has runs inside one too, which is what
+    // makes these worth mutating rather than just the shapes above.
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"1\" y=\"1\" width=\"4\" height=\"4\"><circle cx=\"4\" cy=\"4\" r=\"4\" fill=\"#808080\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskContentUnits=\"objectBoundingBox\"><rect width=\"0.5\" height=\"1\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"black\"/><stop offset=\"1\" stop-color=\"white\"/></linearGradient><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></mask><g mask=\"url(#m)\" opacity=\"0.5\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"a\"><rect width=\"8\" height=\"4\" fill=\"white\"/></mask><mask id=\"m\" mask=\"url(#a)\"><rect width=\"4\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    // A mask that masks itself, and a clip that clips itself: bounded by
+    // `Limits.max_mask_depth` rather than by the walk, which sees no cycle.
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask=\"url(#m)\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\" clip-path=\"url(#c)\"><rect width=\"8\" height=\"8\"/></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    // The nastier shape of the same thing: the recursion is through what the
+    // mask *draws* rather than through a `mask` attribute, so the walk sees no
+    // cycle and each level is a perfectly finite document on its own.
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><use href=\"#r\"/></mask><rect id=\"r\" width=\"8\" height=\"8\" fill=\"white\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><g><rect width=\"8\" height=\"8\" fill=\"white\" mask=\"url(#m)\"/></g></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\" clip-path=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    // Still refused: a filter, and units that are neither of the two.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskUnits=\"nope\"><rect width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"alpha\"><rect width=\"8\" height=\"8\" fill=\"#ff0000\" fill-opacity=\"0.5\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"nope\"><rect width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     // A definition written outside `<defs>`, which is not drawn where it
     // stands and used to be refused for standing there.
     "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",

@@ -29,6 +29,25 @@ try svg.draw(gpa, &surface, source, .{ .x = 0, .y = 0, .width = 72, .height = 56
 });
 ```
 
+## Where this lives
+
+The repository lives in three places that carry the same history. The Forgejo
+instance at <https://git.jcollie.dev/jeff/zig-svg> is the web-visible one:
+
+```console
+$ git clone https://git.jcollie.dev/jeff/zig-svg.git
+```
+
+it is mirrored on Tangled at <https://tangled.org/jcollie.dev/zig-svg>, and it
+is also on the Radicle network, where the repository's identifier is
+
+```
+rad:z2u6JeD6AUFAFSTYuG32WjsSivLnc
+```
+
+and `rad clone rad:z2u6JeD6AUFAFSTYuG32WjsSivLnc` fetches it from any node that
+seeds it. Any of the three is the whole project.
+
 ## What it draws
 
 One `<svg>` carrying a `viewBox`, one `<path>` carrying a `d`, filled in one

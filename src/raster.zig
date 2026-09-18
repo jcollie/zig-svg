@@ -227,7 +227,7 @@ fn drawDocument(
 ) Error!void {
     if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
 
-    const transform = doc.transformFor(box.x, box.y, box.width, box.height);
+    const view_box = doc.transformFor(box.x, box.y, box.width, box.height);
 
     // Spent down across the whole document rather than reset per shape. See
     // `Limits.max_path_nodes`.
@@ -240,7 +240,16 @@ fn drawDocument(
         var p: z2d.Path = .empty;
         defer p.deinit(gpa);
 
-        try document.buildShape(&p, gpa, shape.d, transform, .{ .max_nodes = nodes_left });
+        // The viewBox mapping outside, the shape's own `transform` chain
+        // inside, so that a `transform` is in user units like the path data
+        // it applies to.
+        try document.buildShape(
+            &p,
+            gpa,
+            shape.d,
+            view_box.mul(shape.transform),
+            .{ .max_nodes = nodes_left },
+        );
         nodes_left -= p.nodes.items.len;
 
         // An empty `d` is a shape that draws nothing, which is not an error;
@@ -624,6 +633,199 @@ test "opacity on the root is refused rather than approximated" {
     try testing.expectError(error.GroupOpacityUnsupported, render(
         gpa,
         "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
+        .{},
+    ));
+}
+
+test "a transform moves a shape" {
+    const gpa = testing.allocator;
+    // A 4x4 square at the origin of an 8x8 viewBox, rendered at 8 pixels: the
+    // square covers the top-left quadrant, and translate(4,4) puts it in the
+    // bottom-right.
+    const plain = "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" fill=\"red\"/></svg>";
+    const moved = "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" fill=\"red\" transform=\"translate(4,4)\"/></svg>";
+
+    var a = try render(gpa, plain, .{ .width = 8, .height = 8 });
+    defer a.deinit(gpa);
+    var b = try render(gpa, moved, .{ .width = 8, .height = 8 });
+    defer b.deinit(gpa);
+
+    try testing.expectEqual(@as(u8, 255), a.getPixel(1, 1).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), a.getPixel(6, 6).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), b.getPixel(1, 1).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), b.getPixel(6, 6).?.rgba.a);
+}
+
+test "a group's transform applies to what is inside it, and composes" {
+    const gpa = testing.allocator;
+    // Two ways of putting the square in the bottom-right: on the group, or
+    // split between the group and the shape. Both must land in the same place.
+    const on_group = "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(4,4)\">" ++
+        "<path d=\"M0 0H4V4H0Z\" fill=\"red\"/></g></svg>";
+    const split = "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(4,0)\">" ++
+        "<path d=\"M0 0H4V4H0Z\" fill=\"red\" transform=\"translate(0,4)\"/></g></svg>";
+    const nested = "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(4,0)\">" ++
+        "<g transform=\"translate(0,4)\"><path d=\"M0 0H4V4H0Z\" fill=\"red\"/></g></g></svg>";
+
+    for ([_][]const u8{ on_group, split, nested }) |src| {
+        var surface = try render(gpa, src, .{ .width = 8, .height = 8 });
+        defer surface.deinit(gpa);
+        try testing.expectEqual(@as(u8, 255), surface.getPixel(6, 6).?.rgba.a);
+        try testing.expectEqual(@as(u8, 0), surface.getPixel(1, 1).?.rgba.a);
+    }
+}
+
+test "a group's transform is undone when the group closes" {
+    const gpa = testing.allocator;
+    // The second shape is a sibling of the group, not a child, so the
+    // translate must not still be in force when it is drawn. A stack that
+    // never pops would put both squares in the bottom-right.
+    const src = "<svg viewBox=\"0 0 8 8\">" ++
+        "<g transform=\"translate(4,4)\"><path d=\"M0 0H4V4H0Z\" fill=\"red\"/></g>" ++
+        "<path d=\"M0 0H4V4H0Z\" fill=\"blue\"/></svg>";
+    var surface = try render(gpa, src, .{ .width = 8, .height = 8 });
+    defer surface.deinit(gpa);
+    const top_left = z2d.pixel.RGBA.fromPixel(surface.getPixel(1, 1).?).demultiply();
+    const bottom_right = z2d.pixel.RGBA.fromPixel(surface.getPixel(6, 6).?).demultiply();
+    try testing.expectEqual(@as(u8, 255), top_left.b);
+    try testing.expectEqual(@as(u8, 255), bottom_right.r);
+}
+
+test "a group's presentation attributes are inherited and overridden" {
+    const gpa = testing.allocator;
+    const inherited = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g fill=\"red\"><path d=\"M0 0H8V8H0Z\"/></g></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), inherited.r);
+
+    const overridden = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g fill=\"red\"><path d=\"M0 0H8V8H0Z\" fill=\"blue\"/></g></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), overridden.b);
+
+    // Three levels: the root, a group, and the shape, each overriding the last.
+    const deep = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill=\"red\"><g fill=\"blue\">" ++
+            "<g><path d=\"M0 0H8V8H0Z\" fill=\"lime\"/></g></g></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), deep.g);
+    try testing.expectEqual(@as(u8, 0), deep.r);
+    try testing.expectEqual(@as(u8, 0), deep.b);
+
+    // And a group that names nothing passes its parent's value straight down.
+    const through = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\" fill=\"red\"><g><path d=\"M0 0H8V8H0Z\"/></g></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), through.r);
+}
+
+test "a transform on the root applies in user units" {
+    const gpa = testing.allocator;
+    // viewBox 8 units wide rendered at 32 pixels, so the scale is 4. A root
+    // translate of 2 *user* units moves the shape 8 pixels, not 2 -- the
+    // viewBox mapping is outside the document's own transforms.
+    const src = "<svg viewBox=\"0 0 8 8\" transform=\"translate(2,0)\">" ++
+        "<path d=\"M0 0H2V2H0Z\" fill=\"red\"/></svg>";
+    var surface = try render(gpa, src, .{ .width = 32, .height = 32 });
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(4, 4).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(12, 4).?.rgba.a);
+}
+
+test "a malformed transform is refused, and an empty one is the identity" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.BadTransform, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" transform=\"bogus(1)\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.BadTransform, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(\"><path d=\"M0 0H8V8H0Z\"/></g></svg>",
+        .{},
+    ));
+    const identity = try middleOf(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" transform=\"\"/></svg>",
+        .{},
+    );
+    try testing.expectEqual(@as(u8, 255), identity.a);
+}
+
+test "opacity on a group is refused like opacity on the root" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.GroupOpacityUnsupported, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></g></svg>",
+        .{},
+    ));
+}
+
+test "groups nested past the limit are refused rather than overflowing" {
+    const gpa = testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "<svg viewBox=\"0 0 8 8\">");
+    for (0..document.max_container_depth + 2) |_| try src.appendSlice(gpa, "<g>");
+    try src.appendSlice(gpa, "<path d=\"M0 0H8V8H0Z\"/>");
+    for (0..document.max_container_depth + 2) |_| try src.appendSlice(gpa, "</g>");
+    try src.appendSlice(gpa, "</svg>");
+
+    try testing.expectError(error.TooDeeplyNested, render(gpa, src.items, .{}));
+}
+
+test "a transform that puts a point past the rasterizer's reach is refused" {
+    // Found by the fuzzer, and it was a *panic* rather than an error: z2d
+    // reduces a polygon's extent to an i32, so a four-unit square scaled by
+    // 1e300 is `@intFromFloat` on a value out of range. The matrix itself is
+    // perfectly finite, which is why checking the matrix is not enough.
+    const gpa = testing.allocator;
+    try testing.expectError(error.CoordinateOutOfRange, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"scale(1e300)\"/></svg>",
+        .{},
+    ));
+    // The same number written in the path data is *not* an error, because
+    // z2d clamps a coordinate as it is added -- `H1e300` becomes 8388607. The
+    // clamp is on the wrong side of the transform, which is the whole reason
+    // the check above has to exist; see `document.max_coordinate`.
+    var clamped = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H1e300V1e300H0Z\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer clamped.deinit(gpa);
+    // And a translation far enough out to be nothing but arithmetic.
+    try testing.expectError(error.CoordinateOutOfRange, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(1e20,0)\">" ++
+            "<path d=\"M0 0H4V4H0Z\"/></g></svg>",
+        .{},
+    ));
+    // Far off the canvas but within reach is drawn, not refused: clipping is
+    // the rasterizer's job and an off-screen shape is perfectly legal.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"translate(1000,1000)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+}
+
+test "a transform that overflows to infinity is refused" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.NonFiniteTransform, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><g transform=\"scale(1e300)\">" ++
+            "<path d=\"M0 0H8V8H0Z\" transform=\"scale(1e300)\"/></g></svg>",
         .{},
     ));
 }

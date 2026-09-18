@@ -14,6 +14,18 @@
 //! icon sets, and a long way short of SVG. There is no `<g>`, no `transform`,
 //! no `style`, no gradient and no stroke.
 //!
+//! ## Groups
+//!
+//! `<g>` nests: it carries the same presentation attributes a shape does and
+//! passes them down, and it carries a `transform` that every descendant is
+//! drawn under. The root `<svg>` is a container in exactly the same way, so
+//! there is one code path rather than a special case for the root -- the only
+//! thing that makes the root special is that it is where the `viewBox` is.
+//!
+//! Nesting is bounded by `max_container_depth`. A document nesting groups more
+//! deeply than that is refused rather than overflowing a stack, which is the
+//! failure that is not catchable.
+//!
 //! ## The presentation attributes it reads
 //!
 //! `fill`, `fill-opacity`, `fill-rule` and `color` on the root `<svg>` are
@@ -33,8 +45,8 @@
 //! Anything else is ignored rather than refused: `xmlns`, `id`, `class`,
 //! `width`, `height`, `style`. Elements are refused, attributes are ignored --
 //! an element carries geometry that would go missing, and an attribute is
-//! usually decoration. The exception is `opacity` on the root, which would go
-//! quietly wrong; see `Error.GroupOpacityUnsupported`.
+//! usually decoration. The exception is `opacity` on a container, which would
+//! go quietly wrong; see `Error.GroupOpacityUnsupported`.
 //!
 //! An element this does not implement is **refused** rather than skipped.
 //! Skipping it would draw a picture quietly missing a piece, which is the
@@ -62,6 +74,7 @@ const z2d = @import("z2d");
 
 const color = @import("color.zig");
 const path = @import("path.zig");
+const transform = @import("transform.zig");
 
 pub const Error = error{
     /// The document has no `<svg>` element.
@@ -74,9 +87,9 @@ pub const Error = error{
     /// `<use>`. Refused rather than skipped: skipping it would draw a picture
     /// that is quietly missing a piece.
     UnsupportedElement,
-    /// `opacity` on the root `<svg>`, which is a *group* opacity: the document
-    /// is drawn into a layer of its own and that layer is composited once at
-    /// the given alpha.
+    /// `opacity` on a container -- the root `<svg>` or a `<g>` -- which is a
+    /// *group* opacity: the container is drawn into a layer of its own and
+    /// that layer is composited once at the given alpha.
     ///
     /// Multiplying it into each shape's alpha instead -- which is what
     /// `opacity` on a single `<path>` amounts to, and is exactly right there
@@ -87,7 +100,53 @@ pub const Error = error{
     GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
-} || color.Error || xml.Error;
+    /// Containers nested more deeply than `max_container_depth`.
+    TooDeeplyNested,
+    /// A `transform` whose composed matrix has an infinity or a NaN in it.
+    NonFiniteTransform,
+    /// A point that landed outside what the rasterizer can work with, after
+    /// the transforms and the viewBox mapping were applied. See
+    /// `max_coordinate`.
+    CoordinateOutOfRange,
+} || transform.Error || color.Error || xml.Error;
+
+/// The furthest from the origin a transformed point may land, in pixels.
+///
+/// Not a stylistic limit; it is here to stop a **panic**, which no caller can
+/// catch, in a library reached by every picture from anywhere.
+///
+/// z2d clamps a point to a signed 24-bit range as it is added, which sounds
+/// like it settles the matter, and does not:
+///
+/// ```zig
+/// const point: Point = (Point{ .x = clampI24(x), .y = clampI24(y) })
+///     .applyTransform(self.transformation);
+/// ```
+///
+/// The clamp is on the **wrong side of the transform**. A coordinate written
+/// in the path data is clamped and safe -- `H1e300` becomes 8388607 -- but
+/// `transform="scale(1e300)"` multiplies the clamped value *afterwards*, and
+/// nothing clamps it again. The rasterizer then reduces a polygon's extent to
+/// an `i32` and dies on `@intFromFloat` with a value out of range. The fuzzer
+/// found it, on a four-unit square.
+///
+/// So the check has to be on the stored nodes, which are what the transform
+/// produced, and it is why `buildShape` looks at them rather than `path.build`
+/// looking at the numbers it parsed.
+///
+/// Set at 2^28: eight thousand times the widest surface `Limits` permits, and
+/// low enough that the plotter's multiply by the antialiasing scale and the
+/// subtraction of two extents both stay comfortably inside an `i32`. A
+/// document putting geometry further away than that is not a picture.
+pub const max_coordinate: f64 = 1 << 28;
+
+/// How deeply `<g>` may nest.
+///
+/// Sized so that the walk's stack is a few kilobytes rather than tens, and so
+/// far above any drawing that a document reaching it is doing something other
+/// than describing a picture. Refused rather than overflowed: a stack overflow
+/// is the one failure a caller cannot catch.
+pub const max_container_depth = 64;
 
 /// The presentation attributes that an element passes down to its children.
 ///
@@ -129,6 +188,11 @@ pub const Shape = struct {
     /// This element's own `opacity`, which is not inherited. One when the
     /// element does not name it.
     opacity: f64,
+    /// Every `transform` from the root down to and including this element,
+    /// composed. In user units: the viewBox-to-pixels mapping is *not* in
+    /// here, because it belongs to the box being drawn into rather than to
+    /// the document, and `Document.transformFor` supplies it.
+    transform: z2d.Transformation,
 };
 
 pub const ViewBox = struct {
@@ -148,7 +212,10 @@ pub const Document = struct {
     /// How many `<path>` elements `read` found, so that a caller can bound the
     /// work before starting it.
     shape_count: usize,
-    /// What the root `<svg>` named, which every shape inherits.
+    /// What the root `<svg>` named, which every shape inherits unless a `<g>`
+    /// or the shape itself overrides it. Informational: `paths` walks the
+    /// document again and works this out for itself, rather than being seeded
+    /// with it, so that the root and a `<g>` go through one code path.
     root: Inherited,
 
     /// Each `<path>`, in document order.
@@ -156,7 +223,7 @@ pub const Document = struct {
     /// Order is the painting order: SVG paints shapes in the order they are
     /// written, each over the last.
     pub fn paths(self: Document) PathIterator {
-        return .{ .reader = .init(self.src), .inherited = self.root };
+        return .{ .reader = .init(self.src) };
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -188,24 +255,50 @@ pub const Document = struct {
 /// paper over.
 pub const PathIterator = struct {
     reader: xml.Reader,
-    /// What the root named, which each shape starts from.
-    inherited: Inherited,
+    /// What each open container contributes, innermost last. Level zero is
+    /// what applies before any container has been entered, which is what a
+    /// shape outside the root would see -- there is no such shape in a
+    /// well-formed document, and starting the stack non-empty means `next`
+    /// never has to ask whether there is one.
+    stack: [max_container_depth + 1]Level = undefined,
+    depth: usize = 0,
     /// How deep inside a subtree that is not painted. Kept because `read` and
     /// this have to agree exactly on what counts as a shape: a `<path>` inside
     /// `<defs>` is not one, and an iterator that yielded it anyway would paint
     /// something the document said to keep back, having passed every check.
     depth_ignored: usize = 0,
+    started: bool = false,
+
+    /// One open container's contribution, already combined with its ancestors'
+    /// so that a shape reads the innermost entry and nothing else.
+    pub const Level = struct {
+        inherited: Inherited,
+        transform: z2d.Transformation,
+    };
 
     pub fn next(self: *PathIterator) Error!?Shape {
+        if (!self.started) {
+            self.started = true;
+            self.stack[0] = .{ .inherited = .{}, .transform = .identity };
+        }
         while (true) switch (try self.reader.next()) {
             .start_element => |e| {
-                if (self.depth_ignored > 0) {
-                    if (!e.self_closing) self.depth_ignored += 1;
+                // First, and unconditionally: a `<defs>` inside a `<defs>` has
+                // to be counted so that its end tag takes the counter back
+                // down again. Every start tag has a matching end, the
+                // synthetic one a self-closing tag reports included, so what
+                // goes up here must come down there.
+                if (isIgnorable(e.name)) {
+                    self.depth_ignored += 1;
                     continue;
                 }
+                if (self.depth_ignored > 0) continue;
+                const top = self.stack[self.depth];
+
                 if (xml.nameIs(e.name, "path")) {
-                    const own = try readInherited(e);
-                    const effective = self.inherited.with(own);
+                    const effective = top.inherited.with(try readInherited(e));
+                    const ctm = top.transform.mul(try readTransform(e));
+                    if (!transform.isFinite(ctm)) return error.NonFiniteTransform;
                     return .{
                         .d = e.attr("d") orelse return error.NoPath,
                         .fill = effective.fill,
@@ -216,18 +309,62 @@ pub const PathIterator = struct {
                             try color.parseOpacity(v)
                         else
                             1.0,
+                        .transform = ctm,
                     };
                 }
-                if (isIgnorable(e.name) and !e.self_closing) self.depth_ignored += 1;
+
+                if (isContainer(e.name)) {
+                    // Not `opacity`: on a container it is a group opacity, and
+                    // there is no layer to composite one into.
+                    if (e.attr("opacity") != null) return error.GroupOpacityUnsupported;
+                    // Pushed even when self-closing. zxml reports a synthetic
+                    // end tag for `<g/>`, so a container that did not push
+                    // would have that end pop its *parent* -- which is how a
+                    // `<g/>` next to a group used to leak the group's
+                    // transform onto its siblings.
+                    if (self.depth == max_container_depth) return error.TooDeeplyNested;
+                    self.depth += 1;
+                    self.stack[self.depth] = .{
+                        .inherited = top.inherited.with(try readInherited(e)),
+                        .transform = top.transform.mul(try readTransform(e)),
+                    };
+                    continue;
+                }
+
+                // Refused rather than skipped: skipping it would draw a
+                // picture quietly missing a piece.
+                return error.UnsupportedElement;
             },
-            .end_element => {
-                if (self.depth_ignored > 0) self.depth_ignored -= 1;
+            .end_element => |name| {
+                // Matched on the name rather than by counting, so that a
+                // `<path/>` inside a `<defs>` does not take the ignore counter
+                // down with it.
+                if (isIgnorable(name)) {
+                    if (self.depth_ignored > 0) self.depth_ignored -= 1;
+                } else if (self.depth_ignored == 0 and isContainer(name) and self.depth > 0) {
+                    self.depth -= 1;
+                }
             },
             .eof => return null,
             else => {},
         };
     }
 };
+
+/// The elements that hold other elements and pass their own attributes down.
+///
+/// The root is one of these, which is what lets `<svg>` and `<g>` share a code
+/// path rather than the root being a special case that drifts from the general
+/// one.
+fn isContainer(name: []const u8) bool {
+    return xml.nameIs(name, "svg") or xml.nameIs(name, "g");
+}
+
+/// An element's own `transform`, or the identity when it has none.
+fn readTransform(e: xml.Element) Error!z2d.Transformation {
+    const raw = e.attr("transform") orelse return .identity;
+    return transform.parse(raw);
+}
 
 /// The four inherited presentation attributes, where an element names them.
 ///
@@ -269,55 +406,51 @@ fn isIgnorable(name: []const u8) bool {
 ///
 /// Allocates nothing: the returned `Document` borrows `src`, which must
 /// outlive it.
+///
+/// ## Why this drains the iterator
+///
+/// Everything a document can be refused for is refused here, before the caller
+/// has drawn anything: a `<g>` at the end of a document is an error rather
+/// than four shapes painted and then an error.
+///
+/// The obvious way to do that is a validating walk beside the drawing one --
+/// and it was, and the two drifted. The reader knew a `<path>` inside `<defs>`
+/// was not a shape and the iterator did not; the reader parsed each transform
+/// and only the iterator composed them, so a pair that multiplied to an
+/// infinity passed validation and failed while drawing. Each was a walk that
+/// had to be kept in step with another walk by hand.
+///
+/// So there is one walk. `read` finds the root and then runs the *same*
+/// iterator the renderer will, to the end, throwing the shapes away. Whatever
+/// it refuses, `read` refuses, and `shape_count` is the number it produced
+/// rather than a number counted alongside it. Agreement is not tested for
+/// here, it is the only thing that can happen.
 pub fn read(src: []const u8) Error!Document {
     var reader: xml.Reader = .init(src);
 
-    var view_box: ?ViewBox = null;
-    var root: Inherited = .{};
-    var shapes: usize = 0;
-    var depth_ignored: usize = 0;
-
-    while (true) switch (try reader.next()) {
+    // The root, for its `viewBox` -- the one thing the iterator has no use for
+    // and so does not collect. The first element of an SVG document is its
+    // `<svg>`; anything else is not one.
+    var doc: Document = while (true) switch (try reader.next()) {
         .start_element => |e| {
-            if (depth_ignored > 0) {
-                if (!e.self_closing) depth_ignored += 1;
-                continue;
-            }
-            if (xml.nameIs(e.name, "svg")) {
-                view_box = try parseViewBox(e.attr("viewBox") orelse return error.BadViewBox);
-                root = try readInherited(e);
-                // Not `opacity`: on the root it is a group opacity, and there
-                // is no layer to composite one into. See the error.
-                if (e.attr("opacity") != null) return error.GroupOpacityUnsupported;
-            } else if (xml.nameIs(e.name, "path")) {
-                // Every attribute is parsed here as well as in the iterator,
-                // so that a malformed one is refused before anything is drawn
-                // like every other malformed thing -- and so that the two
-                // walks cannot disagree about which documents are drawable.
-                _ = e.attr("d") orelse return error.NoPath;
-                _ = try readInherited(e);
-                if (e.attr("opacity")) |v| _ = try color.parseOpacity(v);
-                shapes += 1;
-            } else if (isIgnorable(e.name)) {
-                if (!e.self_closing) depth_ignored += 1;
-            } else {
-                return error.UnsupportedElement;
-            }
+            if (!xml.nameIs(e.name, "svg")) return error.NotAnSvg;
+            break .{
+                .view_box = try parseViewBox(e.attr("viewBox") orelse return error.BadViewBox),
+                .src = src,
+                .shape_count = 0,
+                .root = try readInherited(e),
+            };
         },
-        .end_element => {
-            if (depth_ignored > 0) depth_ignored -= 1;
-        },
-        .eof => break,
+        .eof => return error.NotAnSvg,
         else => {},
     };
 
+    var it = doc.paths();
+    var shapes: usize = 0;
+    while (try it.next()) |_| shapes += 1;
     if (shapes == 0) return error.NoPath;
-    return .{
-        .view_box = view_box orelse return error.NotAnSvg,
-        .src = src,
-        .shape_count = shapes,
-        .root = root,
-    };
+    doc.shape_count = shapes;
+    return doc;
 }
 
 /// `min-x min-y width height`, separated by whitespace or commas.
@@ -336,7 +469,7 @@ fn parseViewBox(raw: []const u8) Error!ViewBox {
 
 pub const BuildError = Error || path.BuildError;
 
-/// Build one `d` into `p`, under `transform`.
+/// Build one `d` into `p`, under `ctm`.
 ///
 /// z2d applies the transformation when a point is added rather than when the
 /// path is filled, so it has to be in place before the first `moveTo`; this
@@ -345,13 +478,52 @@ pub fn buildShape(
     p: *z2d.Path,
     alloc: std.mem.Allocator,
     d: []const u8,
-    transform: z2d.Transformation,
+    ctm: z2d.Transformation,
     opts: path.Options,
-) path.BuildError!void {
-    const saved = p.transformation;
-    defer p.transformation = saved;
-    p.transformation = saved.mul(transform);
-    try path.build(p, alloc, d, opts);
+) BuildError!void {
+    const first = p.nodes.items.len;
+    {
+        const saved = p.transformation;
+        defer p.transformation = saved;
+        p.transformation = saved.mul(ctm);
+        try path.build(p, alloc, d, opts);
+    }
+    // Checked here rather than in `path.build`, because z2d applies the matrix
+    // when a point is added: the numbers the parser read are in user units and
+    // the ones that reach the rasterizer are these.
+    try checkInRange(p.nodes.items[first..]);
+}
+
+/// Refuses points the rasterizer would panic on.
+///
+/// The parser already refuses a number that is not finite, and `transform`
+/// refuses a matrix that is not -- but a perfectly finite matrix applied to a
+/// perfectly finite point produces `scale(1e300)` times four, and z2d reduces
+/// a polygon's extent to an `i32`. See `max_coordinate`.
+/// z2d does not re-export its path node type, so it is named through the
+/// field that holds them rather than spelled out.
+const PathNode = std.meta.Elem(@FieldType(z2d.Path, "nodes").Slice);
+
+fn checkInRange(nodes: []const PathNode) Error!void {
+    for (nodes) |node| switch (node) {
+        .move_to => |n| try checkPoint(n.point),
+        .line_to => |n| try checkPoint(n.point),
+        .curve_to => |n| {
+            try checkPoint(n.p1);
+            try checkPoint(n.p2);
+            try checkPoint(n.p3);
+        },
+        .close_path => {},
+    };
+}
+
+fn checkPoint(point: anytype) Error!void {
+    if (!std.math.isFinite(point.x) or !std.math.isFinite(point.y)) {
+        return error.CoordinateOutOfRange;
+    }
+    if (@abs(point.x) > max_coordinate or @abs(point.y) > max_coordinate) {
+        return error.CoordinateOutOfRange;
+    }
 }
 
 // -- tests -------------------------------------------------------------------
@@ -420,9 +592,10 @@ test "a path inside an ignored element is not a shape" {
 }
 
 test "the reader and the iterator agree on what a shape is" {
-    // They are two walks of the same document, and a disagreement between them
-    // paints something that passed every check -- so every document in the
-    // corpus is counted both ways.
+    // True by construction now that `read` drains the iterator rather than
+    // walking beside it, so this cannot fail without someone having put a
+    // second walk back. That is exactly what it is here to notice: the two
+    // walks drifted twice before they were made one.
     const gpa = testing.allocator;
     const documents = [_][]const u8{
         icon,
@@ -431,6 +604,10 @@ test "the reader and the iterator agree on what a shape is" {
         "<svg viewBox=\"0 0 24 24\"><defs><title>x</title><path d=\"M9 9Z\"/></defs><path d=\"M0 0Z\"/></svg>",
         "<svg viewBox=\"0 0 24 24\"><title>x</title><path d=\"M0 0Z\"/><desc>y</desc><path d=\"M1 1Z\"/></svg>",
         "<svg viewBox=\"0 0 24 24\"><metadata/><path d=\"M0 0Z\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><g><path d=\"M0 0Z\"/></g></svg>",
+        "<svg viewBox=\"0 0 24 24\"><g><g><path d=\"M0 0Z\"/></g><path d=\"M1 1Z\"/></g></svg>",
+        "<svg viewBox=\"0 0 24 24\"><g/><path d=\"M0 0Z\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><g><defs><path d=\"M9 9Z\"/></defs><path d=\"M0 0Z\"/></g></svg>",
     };
     for (documents) |src| {
         const doc = try read(src);
@@ -440,14 +617,41 @@ test "the reader and the iterator agree on what a shape is" {
     }
 }
 
+test "a self-closing container does not disturb its siblings" {
+    // zxml reports a synthetic end tag for `<g/>`, so a container that opened
+    // without pushing had that end pop its *parent*. The shape after the
+    // `<g/>` then drew under the outer group's transform having escaped it.
+    const gpa = testing.allocator;
+    const found = try collect(gpa, "<svg viewBox=\"0 0 8 8\"><g/><g></g>" ++
+        "<g transform=\"translate(4,4)\"><g/><path d=\"M0 0H2V2H0Z\"/></g>" ++
+        "<path d=\"M0 0H2V2H0Z\"/></svg>");
+    defer gpa.free(found);
+    try testing.expectEqual(@as(usize, 2), found.len);
+}
+
+test "a self-closing ignorable does not end the subtree it is in" {
+    // The counter used to come down on *any* end tag while inside a `<defs>`,
+    // so a `<title/>` in there ended the skipping early and everything after
+    // it was drawn.
+    const gpa = testing.allocator;
+    const src = "<svg viewBox=\"0 0 8 8\"><defs><title/><path d=\"M9 9Z\"/></defs>" ++
+        "<path d=\"M0 0Z\"/></svg>";
+    const doc = try read(src);
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+    const found = try collect(gpa, src);
+    defer gpa.free(found);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqualStrings("M0 0Z", found[0]);
+}
+
 test "an element with geometry this reader cannot draw is refused" {
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><g><path d=\"M0 0L1 1Z\"/></g></svg>"),
+        read("<svg viewBox=\"0 0 24 24\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>"),
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read("<svg viewBox=\"0 0 24 24\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>"),
+        read("<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>"),
     );
 }
 
@@ -456,7 +660,7 @@ test "a document is refused before any of it is drawn" {
     // rather than hand out those two and fail on the third, which would be a
     // half-drawn picture and an error at once.
     try testing.expectError(error.UnsupportedElement, read(
-        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><g/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><circle/></svg>",
     ));
     try testing.expectError(error.NoPath, read(
         "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path/></svg>",

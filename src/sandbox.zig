@@ -469,6 +469,14 @@ const WireError = enum(u16) {
     bad_size = 9,
     out_of_memory = 10,
     too_many_shapes = 14,
+    bad_color = 15,
+    bad_opacity = 16,
+    bad_fill_rule = 17,
+    bad_transform = 18,
+    group_opacity_unsupported = 19,
+    too_deeply_nested = 20,
+    non_finite_transform = 21,
+    coordinate_out_of_range = 22,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -492,6 +500,14 @@ fn wireFromError(err: anyerror) WireError {
         => .bad_path_data,
         error.PathTooComplex => .path_too_complex,
         error.TooManyShapes => .too_many_shapes,
+        error.BadColor => .bad_color,
+        error.BadOpacity => .bad_opacity,
+        error.BadFillRule => .bad_fill_rule,
+        error.BadTransform => .bad_transform,
+        error.GroupOpacityUnsupported => .group_opacity_unsupported,
+        error.TooDeeplyNested => .too_deeply_nested,
+        error.NonFiniteTransform => .non_finite_transform,
+        error.CoordinateOutOfRange => .coordinate_out_of_range,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -527,6 +543,14 @@ fn wireToError(status: u16) Error {
         .bad_path_data => error.UnknownCommand,
         .path_too_complex => error.PathTooComplex,
         .too_many_shapes => error.TooManyShapes,
+        .bad_color => error.BadColor,
+        .bad_opacity => error.BadOpacity,
+        .bad_fill_rule => error.BadFillRule,
+        .bad_transform => error.BadTransform,
+        .group_opacity_unsupported => error.GroupOpacityUnsupported,
+        .too_deeply_nested => error.TooDeeplyNested,
+        .non_finite_transform => error.NonFiniteTransform,
+        .coordinate_out_of_range => error.CoordinateOutOfRange,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -738,7 +762,7 @@ test "a document the reader refuses comes back as that refusal" {
 
     try testing.expectError(error.UnsupportedElement, render(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><g><path d=\"M0 0L1 1Z\"/></g></svg>",
+        "<svg viewBox=\"0 0 24 24\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
     try testing.expectError(error.BadViewBox, render(
@@ -780,6 +804,14 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.InvalidFlag, .bad_path_data },
         .{ error.PathTooComplex, .path_too_complex },
         .{ error.TooManyShapes, .too_many_shapes },
+        .{ error.BadColor, .bad_color },
+        .{ error.BadOpacity, .bad_opacity },
+        .{ error.BadFillRule, .bad_fill_rule },
+        .{ error.BadTransform, .bad_transform },
+        .{ error.GroupOpacityUnsupported, .group_opacity_unsupported },
+        .{ error.TooDeeplyNested, .too_deeply_nested },
+        .{ error.NonFiniteTransform, .non_finite_transform },
+        .{ error.CoordinateOutOfRange, .coordinate_out_of_range },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },
@@ -794,4 +826,40 @@ test "every wire error round trips to something a caller can act on" {
     }
     // A status from the future is a protocol error and not a wrong error.
     try testing.expectEqual(error.SandboxProtocolError, wireToError(60000));
+}
+
+test "every error this library defines has a wire spelling of its own" {
+    // The failure this catches is silent: an error with no case in
+    // `wireFromError` falls through to `raster_failed`, and the caller of a
+    // sandboxed render is told "z2d refused this" for what was really a
+    // malformed colour. Adding an error to the library without adding it here
+    // is exactly the kind of thing nobody notices.
+    //
+    // Two whole sets are exempt rather than named one by one, so that this
+    // does not have to be edited when a dependency grows an error. An error
+    // from z2d genuinely *is* "the rasterizer refused", which is what
+    // `raster_failed` says; an error from zxml genuinely is "that was not
+    // XML", which is what `malformed_xml` says.
+    @setEvalBranchQuota(40000);
+    inline for (@typeInfo(raster.Error).error_set.?) |e| {
+        const err = @field(anyerror, e.name);
+        const exempt = comptime err == error.RasterFailed or
+            inSet(z2d.painter.FillError, err) or
+            inSet(z2d.Path.Error, err) or
+            inSet(@import("zxml").Error, err);
+        if (!exempt and wireFromError(err) == .raster_failed) {
+            std.debug.print("no wire spelling for error.{s}\n", .{e.name});
+            return error.ErrorMissingFromWire;
+        }
+    }
+}
+
+/// Whether `err` belongs to the error set `Set`.
+fn inSet(comptime Set: type, comptime err: anyerror) bool {
+    comptime {
+        for (@typeInfo(Set).error_set.?) |e| {
+            if (err == @field(anyerror, e.name)) return true;
+        }
+        return false;
+    }
 }

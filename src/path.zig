@@ -85,7 +85,7 @@ pub fn build(
     d: []const u8,
     opts: Options,
 ) BuildError!void {
-    var p: Parser = .{ .src = d };
+    var p: Scanner = .{ .src = d };
     var state: State = .{
         .path = path,
         .alloc = alloc,
@@ -190,7 +190,7 @@ const State = struct {
         if (self.path.nodes.items.len > self.node_ceiling) return error.PathTooComplex;
     }
 
-    fn run(self: *State, p: *Parser, command: u8) BuildError!void {
+    fn run(self: *State, p: *Scanner, command: u8) BuildError!void {
         // Lower case is the relative spelling of every command.
         const rel = std.ascii.isLower(command);
         switch (command) {
@@ -355,24 +355,29 @@ const State = struct {
     }
 };
 
-/// A scanner over the `d` string.
+/// A scanner over a string of numbers separated by commas and whitespace.
 ///
-/// The grammar's separators are commas and whitespace, either, both, or
-/// neither -- `M3,9H7` and `M 3 9 H 7` and `M3 9H7` are the same path -- so
-/// every number reads past whatever precedes it.
-const Parser = struct {
+/// The separators are commas and whitespace, either, both, or neither --
+/// `M3,9H7` and `M 3 9 H 7` and `M3 9H7` are the same path -- so every number
+/// reads past whatever precedes it.
+///
+/// Public because `transform.zig` needs exactly this: SVG's transform list is
+/// written in the same number syntax, down to numbers that abut, and a second
+/// implementation of `number` is a second place for `.5.5` to be read as one
+/// malformed number instead of two good ones.
+pub const Scanner = struct {
     src: []const u8,
     pos: usize = 0,
 
-    fn done(self: *const Parser) bool {
+    pub fn done(self: *const Scanner) bool {
         return self.pos >= self.src.len;
     }
 
-    fn peek(self: *const Parser) u8 {
+    pub fn peek(self: *const Scanner) u8 {
         return self.src[self.pos];
     }
 
-    fn skipWsAndCommas(self: *Parser) void {
+    pub fn skipWsAndCommas(self: *Scanner) void {
         while (self.pos < self.src.len) : (self.pos += 1) {
             switch (self.src[self.pos]) {
                 ' ', '\t', '\r', '\n', ',' => {},
@@ -386,7 +391,7 @@ const Parser = struct {
     /// The extent is found here rather than handed to `parseFloat` wholesale,
     /// because the grammar lets numbers abut: `1-2` is two of them, and so is
     /// `.5.5`, which a greedy scan would read as one malformed one.
-    fn number(self: *Parser) Error!f64 {
+    pub fn number(self: *Scanner) Error!f64 {
         self.skipWsAndCommas();
         const start = self.pos;
 
@@ -437,7 +442,7 @@ const Parser = struct {
     /// separated from what follows: `a1 1 0 011 1` carries the flags `0` and
     /// `1` and then the endpoint `1 1`. Reading it as a number would take the
     /// `011` and shift every remaining argument along by two.
-    fn flag(self: *Parser) Error!bool {
+    pub fn flag(self: *Scanner) Error!bool {
         self.skipWsAndCommas();
         if (self.done()) return error.TruncatedCommand;
         const c = self.src[self.pos];

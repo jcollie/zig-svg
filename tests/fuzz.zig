@@ -93,7 +93,8 @@ pub const path_interesting = "MmLlHhVvCcSsQqTtAaZz0123456789.-+, eE";
 /// the ones it deliberately refuses -- a mutation that turns `path` into `g`
 /// reaches the refusal branch, where one that turns it into noise does not.
 pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;" ++
-    "fill-opacityrulenonzeevdcurColor#%(),";
+    "fill-opacityrulenonzeevdcurColor#%()," ++
+    "transformatrixlscewXYkyop";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -211,6 +212,10 @@ fn documentTarget(input: []const u8) anyerror!void {
             .color => |c| try testing.expect(c.alpha >= 0.0 and c.alpha <= 1.0),
             else => {},
         };
+        // A matrix with an infinity or a NaN in it is a hang or a panic in the
+        // rasterizer rather than a wrong picture, so the reader has to have
+        // refused it rather than handed it over.
+        try testing.expect(svg.transform.isFinite(shape.transform));
     }
     try testing.expectEqual(doc.shape_count, seen);
 }
@@ -406,6 +411,32 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" opacity=\"half\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-rule=\"EVENODD\"/></svg>",
     "<svg viewBox=\"0 0 8 8\" opacity=\"0.5\"><path d=\"M0 0H8V8H0Z\"/></svg>",
+    // Groups: the stack has to come back down again, and a self-closing one
+    // reports a synthetic end tag that used to pop its parent.
+    "<svg viewBox=\"0 0 8 8\"><g><path d=\"M0 0H4V4H0Z\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g/><path d=\"M0 0H4V4H0Z\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(4,4)\"><g><path d=\"M0 0H4V4H0Z\"/></g></g><path d=\"M0 0Z\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" fill=\"red\"><g fill=\"blue\"><g><path d=\"M0 0H4V4H0Z\" fill=\"lime\"/></g></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g><defs><title/><path d=\"M9 9Z\"/></defs><path d=\"M0 0Z\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\"><path d=\"M0 0Z\"/></g></svg>",
+    // Every transform function, and the shapes that have to be refused.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"translate(2,2)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"matrix(1 .3 -.3 1 2 2)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"rotate(30,4,4)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"skewX(20) skewY(10)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"scale(2) translate(1,1)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"bogus(1)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"scale(1e300) scale(1e300)\"/></svg>",
+    // A finite matrix that puts a finite point out of the rasterizer's reach.
+    // This one panicked -- z2d casts a polygon extent to an i32 -- which is
+    // the failure a caller cannot catch.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"scale(1e300)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(1e20,0)\"><path d=\"M0 0H4V4H0Z\"/></g></svg>",
+    // Clamped by z2d rather than refused, because the clamp is applied before
+    // the transform rather than after it. Kept so that a change to that order
+    // shows up here.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H1e300V1e300H0Z\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

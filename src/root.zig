@@ -58,6 +58,8 @@ const std = @import("std");
 pub const document = @import("document.zig");
 /// The colour syntax a presentation attribute is written in.
 pub const color = @import("color.zig");
+/// The `transform` attribute, as one matrix.
+pub const transform = @import("transform.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
 pub const path = @import("path.zig");
 /// SVG's elliptical arc command, as cubic Béziers.
@@ -99,6 +101,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = document;
     _ = color;
+    _ = transform;
     _ = path;
     _ = arc;
     _ = raster;

@@ -133,6 +133,12 @@ pub const Error = error{
     /// `max_use_hops`. Not a cycle -- those are caught exactly -- but a chain
     /// nothing sensible produces.
     TooManyUseHops,
+    /// A `mask` attribute naming a `<mask>`. Refused rather than ignored:
+    /// drawing the element without its mask is a picture that looks finished
+    /// and is not.
+    MaskUnsupported,
+    /// A `filter` attribute, for the same reason.
+    FilterUnsupported,
 } || transform.Error || color.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -265,6 +271,10 @@ pub const Inherited = struct {
     fill: ?color.Paint = null,
     fill_opacity: ?f64 = null,
     fill_rule: ?z2d.options.FillRule = null,
+    /// §14.3's `clip-rule`, which is `fill-rule` for a shape inside a
+    /// `<clipPath>` and is inherited separately from it -- a document can fill
+    /// nonzero and clip even-odd, and several do.
+    clip_rule: ?z2d.options.FillRule = null,
     /// The `color` property, which is what a `fill` or `stroke` of
     /// `currentColor` resolves to.
     current_color: ?color.Color = null,
@@ -288,6 +298,7 @@ pub const Inherited = struct {
             .fill = child.fill orelse self.fill,
             .fill_opacity = child.fill_opacity orelse self.fill_opacity,
             .fill_rule = child.fill_rule orelse self.fill_rule,
+            .clip_rule = child.clip_rule orelse self.clip_rule,
             .current_color = child.current_color orelse self.current_color,
             .stroke = child.stroke orelse self.stroke,
             .stroke_width = child.stroke_width orelse self.stroke_width,
@@ -320,6 +331,11 @@ pub const Item = union(enum) {
 pub const Group = struct {
     /// The `opacity` to composite the finished layer at.
     opacity: f64,
+    /// The id of a `<clipPath>` the layer is cut to, or null.
+    clip_path: ?[]const u8,
+    /// The user-space matrix in force on the container, which is the space the
+    /// clip path's own coordinates are in.
+    transform: z2d.Transformation,
 };
 
 /// One drawable element, with the paint and the transform that apply to it.
@@ -332,6 +348,7 @@ pub const Shape = struct {
     fill: ?color.Paint,
     fill_opacity: ?f64,
     fill_rule: ?z2d.options.FillRule,
+    clip_rule: ?z2d.options.FillRule,
     current_color: ?color.Color,
     stroke: ?color.Paint,
     stroke_width: ?f64,
@@ -344,6 +361,9 @@ pub const Shape = struct {
     /// This element's own `opacity`, which is not inherited. One when the
     /// element does not name it.
     opacity: f64,
+    /// The id of a `<clipPath>` this shape is cut to, or null. Not inherited:
+    /// a clip applies to the element that names it.
+    clip_path: ?[]const u8,
     /// Every `transform` from the root down to and including this element,
     /// composed, with each `<use>`'s `x` and `y` folded in. In user units: the
     /// viewBox-to-pixels mapping is *not* in here, because it belongs to the
@@ -409,6 +429,33 @@ pub const Document = struct {
     /// Each shape, in painting order.
     pub fn paths(self: *const Document) PathIterator {
         return .{ .doc = self, .viewport = self.viewport() };
+    }
+
+    /// The shapes inside one `<clipPath>`, under the matrix in force on the
+    /// element being clipped.
+    ///
+    /// The same walk as `paths`, rooted somewhere else and started somewhere
+    /// else in the coordinate system -- `clipPathUnits="userSpaceOnUse"` means
+    /// the user space of the *clipped* element, not of the `<clipPath>`, so
+    /// the matrix comes from the caller.
+    ///
+    /// Its `open_group` and `close_group` items are not meaningful: there is
+    /// nothing to composite inside a mask, and §14.3 makes a clip the union of
+    /// its shapes whatever they are nested in. The caller drops them.
+    pub fn clipShapes(
+        self: *const Document,
+        clip_path: ztree.NodeId,
+        ctm: z2d.Transformation,
+    ) PathIterator {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        it.started = true;
+        it.stack[0] = .{
+            .node = clip_path,
+            .next_child = 0,
+            .inherited = .{},
+            .transform = ctm,
+        };
+        return it;
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -493,16 +540,22 @@ pub const PathIterator = struct {
             self.started = true;
             const root = self.doc.root_node;
             const opacity = try self.opacityOf(root);
+            const clip = try self.clipOf(root);
+            const ctm = try self.readTransform(root);
             self.stack[0] = .{
                 .node = root,
                 .next_child = 0,
                 .inherited = try self.readInherited(root),
-                .transform = try self.readTransform(root),
-                .opens_layer = opacity < 1.0,
+                .transform = ctm,
+                .opens_layer = opacity < 1.0 or clip != null,
             };
             // The root is the one container the walk never meets as somebody's
             // child, so its layer is opened here rather than in `visit`.
-            if (self.stack[0].opens_layer) return .{ .open_group = .{ .opacity = opacity } };
+            if (self.stack[0].opens_layer) return .{ .open_group = .{
+                .opacity = opacity,
+                .clip_path = clip,
+                .transform = ctm,
+            } };
         }
 
         while (true) {
@@ -528,6 +581,24 @@ pub const PathIterator = struct {
     fn opacityOf(self: *const PathIterator, node: ztree.NodeId) Error!f64 {
         const raw = self.attr(node, "opacity") orelse return 1.0;
         return color.parseOpacity(raw);
+    }
+
+    /// The id of an element's `clip-path`, or null.
+    ///
+    /// This is also where `mask` and `filter` are refused. They are attributes
+    /// and attributes are normally ignored -- but ignoring one of these draws
+    /// the element *without* the mask or the filter it asked for, which is a
+    /// picture that looks finished and is not. `clip-path` would have been the
+    /// third until this commit.
+    fn clipOf(self: *const PathIterator, node: ztree.NodeId) Error!?[]const u8 {
+        if (namesSomething(self.attr(node, "mask"))) return error.MaskUnsupported;
+        if (namesSomething(self.attr(node, "filter"))) return error.FilterUnsupported;
+
+        const raw = self.attr(node, "clip-path") orelse return null;
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        // `none` is the initial value and says there is no clip.
+        if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
+        return referenceId(t) orelse error.BadReference;
     }
 
     /// Look at one element, following any `<use>` to what it draws.
@@ -579,6 +650,7 @@ pub const PathIterator = struct {
                 .fill = effective.fill,
                 .fill_opacity = effective.fill_opacity,
                 .fill_rule = effective.fill_rule,
+                .clip_rule = effective.clip_rule,
                 .current_color = effective.current_color,
                 .stroke = effective.stroke,
                 .stroke_width = effective.stroke_width,
@@ -589,6 +661,7 @@ pub const PathIterator = struct {
                 .stroke_dasharray = effective.stroke_dasharray,
                 .stroke_dashoffset = effective.stroke_dashoffset,
                 .opacity = try self.opacityOf(node),
+                .clip_path = try self.clipOf(node),
                 .transform = own_ctm,
             } };
         }
@@ -598,8 +671,14 @@ pub const PathIterator = struct {
             // it needs a surface of its own to flatten into. One that does not
             // ask for that is invisible here, as it always was.
             const opacity = try self.opacityOf(node);
-            try self.push(node, effective, own_ctm, opacity < 1.0);
-            if (opacity < 1.0) return .{ .open_group = .{ .opacity = opacity } };
+            const clip = try self.clipOf(node);
+            const needs_layer = opacity < 1.0 or clip != null;
+            try self.push(node, effective, own_ctm, needs_layer);
+            if (needs_layer) return .{ .open_group = .{
+                .opacity = opacity,
+                .clip_path = clip,
+                .transform = own_ctm,
+            } };
             return null;
         }
 
@@ -704,6 +783,7 @@ pub const PathIterator = struct {
             .fill = if (self.attr(node, "fill")) |v| try color.parsePaint(v) else null,
             .fill_opacity = if (self.attr(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
             .fill_rule = if (self.attr(node, "fill-rule")) |v| try parseFillRule(v) else null,
+            .clip_rule = if (self.attr(node, "clip-rule")) |v| try parseFillRule(v) else null,
             .current_color = if (self.attr(node, "color")) |v| try color.parseColor(v) else null,
             .stroke = if (self.attr(node, "stroke")) |v| try color.parsePaint(v) else null,
             .stroke_width = try self.optionalLengthOf(node, "stroke-width", .other),
@@ -783,6 +863,22 @@ pub const PathIterator = struct {
     }
 };
 
+/// Whether an attribute value names a resource rather than saying `none`.
+fn namesSomething(raw: ?[]const u8) bool {
+    const t = std.mem.trim(u8, raw orelse return false, " \t\r\n");
+    return t.len != 0 and !std.mem.eql(u8, t, "none");
+}
+
+/// The id inside a `url(#id)`, or null when the value is not one.
+fn referenceId(t: []const u8) ?[]const u8 {
+    if (t.len < 7) return null;
+    if (!std.ascii.eqlIgnoreCase(t[0..4], "url(")) return null;
+    if (t[t.len - 1] != ')') return null;
+    const inner = std.mem.trim(u8, t[4 .. t.len - 1], " \t\r\n'\"");
+    if (inner.len < 2 or inner[0] != '#') return null;
+    return inner[1..];
+}
+
 /// The elements that hold other elements and pass their own attributes down.
 ///
 /// The root is one of these, which is what lets `<svg>` and `<g>` share a code
@@ -792,16 +888,32 @@ fn isContainer(name: []const u8) bool {
     return std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "g");
 }
 
-/// The elements that carry no geometry and so may be passed over.
+/// The elements that are not drawn where they stand.
 ///
-/// What is inside `<defs>` is not drawn where it stands -- that is what
-/// `<defs>` is for -- but it is still in the tree and still indexed, so a
-/// `<use>` can name it.
+/// Two kinds, and they are passed over for two different reasons.
+///
+/// `<title>`, `<desc>` and `<metadata>` carry no geometry at all. `<defs>`
+/// carries plenty and says not to draw it, which is what `<defs>` is for.
+///
+/// The rest are *definitions*: a gradient, a clip path, a mask, a pattern, a
+/// symbol, a marker, a filter. §5.5 says none of them is rendered directly --
+/// each exists to be named by something else -- and that is true wherever they
+/// are written. Putting them in `<defs>` is a convention rather than a
+/// requirement, and a document that writes a `<linearGradient>` straight into
+/// the body used to be refused for it.
+///
+/// Every one of them stays in the tree and stays indexed, so a reference still
+/// finds it.
 fn isIgnorable(name: []const u8) bool {
-    return std.mem.eql(u8, name, "title") or
-        std.mem.eql(u8, name, "desc") or
-        std.mem.eql(u8, name, "metadata") or
-        std.mem.eql(u8, name, "defs");
+    const names = [_][]const u8{
+        "title",          "desc",           "metadata", "defs",
+        "linearGradient", "radialGradient", "pattern",  "clipPath",
+        "mask",           "symbol",         "marker",   "filter",
+    };
+    for (names) |n| {
+        if (std.mem.eql(u8, name, n)) return true;
+    }
+    return false;
 }
 
 fn localIs(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) bool {

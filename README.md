@@ -92,6 +92,24 @@ are composited in float rather than integer precision, because each nested one
 is another multiply rounded back into a byte and two of them put every pixel
 about two levels off.
 
+`clip-path` cuts an element — a shape or a whole group — to the union of a
+`<clipPath>`'s shapes, using the same layer as group opacity with an alpha mask
+in place of a uniform alpha. `clip-rule` is read as a property of its own
+rather than as `fill-rule`: a document can fill nonzero and clip even-odd, and
+reading one for the other cuts the wrong hole.
+
+**`mask` and `filter` are refused, not ignored.** Every other attribute this
+library does not implement is passed over, because an attribute is usually
+decoration — but drawing an element *without* the mask or filter it asked for
+is a picture that looks finished and is not. `clip-path` was the third of those
+until now.
+
+A **definition** is never drawn where it stands. A `<linearGradient>` or a
+`<clipPath>` written straight into the document body rather than into `<defs>`
+is passed over and still indexed, which §5.5 requires and which this used to
+refuse — every gradient fixture had put them in `<defs>`, so the oracle never
+saw it.
+
 `fill` and `stroke` default differently, and deliberately. A shape naming no
 `fill` gets the caller's colour; a shape naming no `stroke` is **not stroked**,
 because SVG's initial `stroke` is `none` and a shape stroked without asking
@@ -166,7 +184,9 @@ short of the specification.
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
-| `clip-path`, `mask` | **no** |
+| `clip-path`, `clip-rule` | yes, with `<clipPath>` in `userSpaceOnUse` |
+| `mask`, `filter` | **no** — refused, not ignored |
+| Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>`, `style`, text, CSS | **no** |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
@@ -409,12 +429,13 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Clipping and masking.** `<clipPath>`, `clip-rule` and `<mask>`. The layer
-machinery they need is now here — group opacity built it, and a clip is the
-same two-step composite with an alpha mask in place of a uniform alpha, so
-`Layers.close` is most of the work already. A `<mask>` needs one thing more:
-its content is converted to *luminance* rather than taken as coverage, which is
-a pass over the layer that nothing here does yet.
+**1. `<mask>`, and `clipPathUnits="objectBoundingBox"`.** A mask is the same
+layer a clip uses, with one thing more: its content is converted to
+*luminance* rather than taken as coverage, which is a pass over the layer that
+nothing here does yet. `objectBoundingBox` clip units need the bounding box of
+the clipped element, which for a *group* is the union of everything in it —
+not known until the group has been drawn, and the clip has to exist before
+that.
 
 **2. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in

@@ -115,7 +115,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "preserveAspctRioMdnlx%emptcin" ++
     "&#;xampltqsogu09AZ" ++
     "usehrfid#defxlink:" ++
-    "linearGradstopfetURuns%BoxpM";
+    "linearGradstopfetURuns%BoxpM" ++
+    "clip-pathruevnodmaskfilter";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -675,6 +676,25 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><g opacity=\"bogus\"><rect width=\"8\" height=\"8\"/></g></svg>",
     "<svg viewBox=\"0 0 8 8\"><g opacity=\"0.5\" transform=\"rotate(20)\"><rect width=\"8\" height=\"8\"/></g></svg>",
     "<svg viewBox=\"0 0 8 8\"><defs><g id=\"g\" opacity=\"0.5\"><rect width=\"4\" height=\"4\"/></g></defs><use href=\"#g\"/><use href=\"#g\" x=\"4\"/></svg>",
+    // `clip-path`, which needs a layer and a mask built from somewhere else
+    // in the document.
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\"><circle cx=\"4\" cy=\"4\" r=\"3\"/></clipPath></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\"><rect width=\"4\" height=\"8\"/><rect x=\"4\" y=\"4\" width=\"4\" height=\"4\"/></clipPath></defs><g clip-path=\"url(#c)\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\"><path d=\"M0 0H8V8H0ZM2 2H6V6H2Z\" clip-rule=\"evenodd\"/></clipPath></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\"><rect width=\"4\" height=\"4\" transform=\"rotate(20)\"/></clipPath></defs><g clip-path=\"url(#c)\" opacity=\"0.5\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\"/></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" clip-path=\"none\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" clip-path=\"url(#missing)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#r)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\"1\" height=\"1\"/></clipPath></defs><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    // A mask or a filter, which are refused rather than quietly dropped.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",
+    // A definition written outside `<defs>`, which is not drawn where it
+    // stands and used to be refused for standing there.
+    "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><symbol id=\"s\"><rect width=\"4\" height=\"4\"/></symbol><rect width=\"8\" height=\"8\"/></svg>",
     // Elements that are still refused.
     // `<use>` naming an id the document does not have.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",

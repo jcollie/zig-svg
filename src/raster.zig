@@ -188,6 +188,13 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     /// Containers needing a layer of their own, nested more deeply than
     /// `Limits.max_layers`.
     TooManyLayers,
+    /// A `clip-path` naming something that is not a `<clipPath>`.
+    BadClipPath,
+    /// A `clipPathUnits="objectBoundingBox"`. The bounding box of a *group*
+    /// is the union of everything in it, which is not known until it has been
+    /// drawn -- and the clip has to be built before that. The default,
+    /// `userSpaceOnUse`, needs no box.
+    UnsupportedClipUnits,
 } || gradient.Error;
 
 /// Where in a surface to draw, in pixels.
@@ -279,7 +286,16 @@ fn drawDocument(
         const shape = switch (item) {
             .shape => |sh| sh,
             .open_group => |g| {
-                try layers.open(gpa, g.opacity, opts.limits.max_layers);
+                const clip = if (g.clip_path) |id| try buildClip(
+                    gpa,
+                    doc,
+                    id,
+                    view_box.mul(g.transform),
+                    destination.getWidth(),
+                    destination.getHeight(),
+                    opts,
+                ) else null;
+                try layers.open(gpa, g.opacity, clip, opts.limits.max_layers);
                 continue;
             },
             .close_group => {
@@ -287,8 +303,29 @@ fn drawDocument(
                 continue;
             },
         };
-        const surface = layers.target();
         const ctm = view_box.mul(shape.transform);
+
+        // A clip on a shape is the same layer a clip on a group gets. It costs
+        // a surface the size of the picture for one shape, which is the price
+        // of `dst_in` being a whole-surface operation -- documents clip groups
+        // far more often than single shapes.
+        var shape_layer = false;
+        if (shape.clip_path) |id| {
+            const clip = try buildClip(
+                gpa,
+                doc,
+                id,
+                ctm,
+                destination.getWidth(),
+                destination.getHeight(),
+                opts,
+            );
+            try layers.open(gpa, 1.0, clip, opts.limits.max_layers);
+            shape_layer = true;
+        }
+        defer if (shape_layer) layers.close(gpa);
+
+        const surface = layers.target();
         const fill_paint = resolveFill(shape, opts);
         const stroke = try resolveStroke(shape, opts);
 
@@ -497,6 +534,8 @@ const Layers = struct {
     const Entry = struct {
         surface: z2d.Surface,
         opacity: f64,
+        /// The alpha mask this layer is cut to, or null. Owned by the entry.
+        clip: ?z2d.Surface = null,
     };
 
     fn target(self: *Layers) *z2d.Surface {
@@ -504,8 +543,18 @@ const Layers = struct {
         return &self.stack[self.depth - 1].surface;
     }
 
-    fn open(self: *Layers, gpa: Allocator, opacity: f64, limit: usize) Error!void {
+    fn open(
+        self: *Layers,
+        gpa: Allocator,
+        opacity: f64,
+        clip: ?z2d.Surface,
+        limit: usize,
+    ) Error!void {
         if (self.depth >= @min(limit, max_stack)) return error.TooManyLayers;
+        errdefer if (clip) |c| {
+            var owned = c;
+            owned.deinit(gpa);
+        };
         const below = self.target();
         // Transparent and with an alpha channel whatever the destination is,
         // because the whole point is to know afterwards which of its pixels
@@ -516,7 +565,7 @@ const Layers = struct {
             below.getWidth(),
             below.getHeight(),
         );
-        self.stack[self.depth] = .{ .surface = sfc, .opacity = opacity };
+        self.stack[self.depth] = .{ .surface = sfc, .opacity = opacity, .clip = clip };
         self.depth += 1;
     }
 
@@ -526,7 +575,15 @@ const Layers = struct {
         var entry = self.stack[self.depth];
         defer entry.surface.deinit(gpa);
 
+        defer if (entry.clip) |*c| c.deinit(gpa);
+
         const below = self.target();
+        // A clip is the same `dst_in` as the opacity, with a mask surface in
+        // place of a uniform alpha: where the clip path covered nothing the
+        // mask is zero, and the layer's alpha goes with it.
+        if (entry.clip) |*c| {
+            entry.surface.composite(c, .dst_in, 0, 0, .{ .precision = .float });
+        }
         // `dst_in` against a uniform alpha multiplies the layer's own alpha by
         // it, which is the group opacity; then `src_over` paints the result
         // down. Two operations in one batch, so the intermediate never has to
@@ -550,9 +607,71 @@ const Layers = struct {
         while (self.depth > 0) {
             self.depth -= 1;
             self.stack[self.depth].surface.deinit(gpa);
+            if (self.stack[self.depth].clip) |*c| c.deinit(gpa);
         }
     }
 };
+
+/// Render a `<clipPath>` into an alpha mask the size of the picture.
+///
+/// The mask is opaque wherever the clip path's shapes cover and transparent
+/// everywhere else, which is what `dst_in` wants: §14.3 makes the clip the
+/// *union* of its children's fill regions, so they are simply all filled into
+/// the same surface.
+///
+/// The shapes are drawn under the matrix in force on the clipped element, not
+/// on the `<clipPath>` -- `clipPathUnits="userSpaceOnUse"` means the user space
+/// of the thing being clipped. Each may carry its own `transform`, and a
+/// `clip-rule` decides its winding.
+fn buildClip(
+    gpa: Allocator,
+    doc: *const document.Document,
+    id: []const u8,
+    ctm: z2d.Transformation,
+    width: i32,
+    height: i32,
+    opts: Options,
+) Error!z2d.Surface {
+    const node = doc.ids.get(id) orelse return error.UnknownReference;
+    if (!std.mem.eql(u8, doc.tree.node(node).name.local, "clipPath")) return error.BadClipPath;
+    if (doc.tree.attributeValue(node, "", "clipPathUnits")) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (!std.mem.eql(u8, t, "userSpaceOnUse")) return error.UnsupportedClipUnits;
+    }
+
+    var mask = try z2d.Surface.init(.image_surface_alpha8, gpa, width, height);
+    errdefer mask.deinit(gpa);
+
+    const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+    var nodes_left = opts.limits.max_path_nodes;
+
+    var it = doc.clipShapes(node, ctm);
+    while (try it.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            // A `<g>` inside a `<clipPath>` contributes its children and
+            // nothing else; there is no layer to composite inside a mask.
+            else => continue,
+        };
+        var p: z2d.Path = .empty;
+        defer p.deinit(gpa);
+        try document.buildShape(&p, gpa, shape.geometry, shape.transform, .{
+            .max_nodes = nodes_left,
+        });
+        nodes_left -= p.nodes.items.len;
+        if (p.nodes.items.len == 0) continue;
+
+        try z2d.painter.fill(gpa, &mask, &white, p.nodes.items, .{
+            // §14.3's `clip-rule`, which is a property of its own: a document
+            // can fill nonzero and clip even-odd, so reading `fill-rule` here
+            // would cut the wrong hole.
+            .fill_rule = shape.clip_rule orelse .non_zero,
+            .anti_aliasing_mode = opts.anti_aliasing_mode,
+            .tolerance = opts.tolerance,
+        });
+    }
+    return mask;
+}
 
 /// An opacity as the byte an alpha mask wants.
 fn alphaByte(opacity: f64) u8 {
@@ -1240,6 +1359,97 @@ test "opacity on the root is a group opacity too" {
         @as(f64, @floatFromInt(surface.getPixel(4, 4).?.rgba.a)),
         2,
     );
+}
+
+test "a clip cuts a shape to the union of the clip path's shapes" {
+    const gpa = testing.allocator;
+    const src = "<svg viewBox=\"0 0 16 16\"><defs><clipPath id=\"c\">" ++
+        "<rect x=\"0\" y=\"0\" width=\"8\" height=\"16\"/>" ++
+        "<rect x=\"8\" y=\"8\" width=\"8\" height=\"8\"/></clipPath></defs>" ++
+        "<rect width=\"16\" height=\"16\" fill=\"red\" clip-path=\"url(#c)\"/></svg>";
+    var surface = try render(gpa, src, .{ .width = 16, .height = 16 });
+    defer surface.deinit(gpa);
+
+    // Inside the left bar, and inside the bottom-right square.
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(4, 4).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(12, 12).?.rgba.a);
+    // And the quadrant neither covers.
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(12, 4).?.rgba.a);
+}
+
+test "clip-rule is read separately from fill-rule" {
+    const gpa = testing.allocator;
+    // The shape fills nonzero and clips even-odd, so the hole belongs to the
+    // clip and not to the fill. Reading one for the other cuts the wrong one.
+    const both = "M0 0H16V16H0ZM4 4H12V12H4Z";
+    const src = "<svg viewBox=\"0 0 16 16\"><defs><clipPath id=\"c\">" ++
+        "<path d=\"" ++ both ++ "\" clip-rule=\"evenodd\"/></clipPath></defs>" ++
+        "<rect width=\"16\" height=\"16\" fill=\"red\" clip-path=\"url(#c)\"/></svg>";
+    var surface = try render(gpa, src, .{ .width = 16, .height = 16 });
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(2, 8).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(8, 8).?.rgba.a);
+}
+
+test "a clip that names the wrong thing is refused" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.UnknownReference, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" clip-path=\"url(#nothing)\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.BadClipPath, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"4\" height=\"4\"/></defs>" ++
+            "<rect width=\"8\" height=\"8\" clip-path=\"url(#r)\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.UnsupportedClipUnits, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><defs><clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\">" ++
+            "<rect width=\"1\" height=\"1\"/></clipPath></defs>" ++
+            "<rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+        .{},
+    ));
+}
+
+test "a mask or a filter is refused rather than quietly dropped" {
+    const gpa = testing.allocator;
+    // Attributes are normally ignored, but drawing an element *without* the
+    // mask or filter it asked for is a picture that looks finished and is not.
+    try testing.expectError(error.MaskUnsupported, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.FilterUnsupported, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+        .{},
+    ));
+    // `none` asks for neither, so it is not a refusal.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+}
+
+test "a definition is not drawn where it stands" {
+    const gpa = testing.allocator;
+    // Written straight into the body rather than into `<defs>`, which §5.5
+    // allows and which used to be `error.UnsupportedElement`.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>" ++
+            "</linearGradient><clipPath id=\"c\"><rect width=\"4\" height=\"8\"/></clipPath>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#g)\" clip-path=\"url(#c)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(2, 4).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(6, 4).?.rgba.a);
 }
 
 test "groups nested past the layer limit are refused" {

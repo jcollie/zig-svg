@@ -468,6 +468,7 @@ const WireError = enum(u16) {
     image_too_large = 8,
     bad_size = 9,
     out_of_memory = 10,
+    too_many_shapes = 14,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -490,6 +491,7 @@ fn wireFromError(err: anyerror) WireError {
         error.InvalidFlag,
         => .bad_path_data,
         error.PathTooComplex => .path_too_complex,
+        error.TooManyShapes => .too_many_shapes,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -524,6 +526,7 @@ fn wireToError(status: u16) Error {
         .malformed_xml => error.UnexpectedEndOfDocument,
         .bad_path_data => error.UnknownCommand,
         .path_too_complex => error.PathTooComplex,
+        .too_many_shapes => error.TooManyShapes,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -776,6 +779,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.UnsupportedElement, .unsupported_element },
         .{ error.InvalidFlag, .bad_path_data },
         .{ error.PathTooComplex, .path_too_complex },
+        .{ error.TooManyShapes, .too_many_shapes },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },

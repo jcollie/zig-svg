@@ -187,9 +187,21 @@ fn documentTarget(input: []const u8) anyerror!void {
     try testing.expect(std.math.isFinite(doc.view_box.min_y));
     try testing.expect(doc.view_box.width > 0);
     try testing.expect(doc.view_box.height > 0);
-    // And the `d` it handed back points into the source it was given.
-    try testing.expect(@intFromPtr(doc.d.ptr) >= @intFromPtr(src.ptr));
-    try testing.expect(@intFromPtr(doc.d.ptr) + doc.d.len <= @intFromPtr(src.ptr) + src.len);
+    try testing.expect(doc.shape_count > 0);
+
+    // Reading and iterating are two walks of the same document, and a
+    // disagreement between them paints a shape that passed every check. The
+    // reader is the one that refuses, so the iterator finding more than it
+    // counted is the dangerous direction.
+    var shapes = doc.paths();
+    var seen: usize = 0;
+    while (try shapes.next()) |d| {
+        seen += 1;
+        // Every `d` points into the source the reader was given.
+        try testing.expect(@intFromPtr(d.ptr) >= @intFromPtr(src.ptr));
+        try testing.expect(@intFromPtr(d.ptr) + d.len <= @intFromPtr(src.ptr) + src.len);
+    }
+    try testing.expectEqual(doc.shape_count, seen);
 }
 
 /// The whole thing, from bytes to pixels.
@@ -345,8 +357,18 @@ const document_corpus = [_][]const u8{
     // A document with no path, and one whose path has no d.
     "<svg viewBox=\"0 0 24 24\"></svg>",
     "<svg><path/></svg>",
-    // Two paths: the first wins.
+    // Several paths, which are all painted, in the order they are written.
     "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0L1 1Z\"/><path d=\"M2 2L3 3Z\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0H8V8H0Z\"/><path d=\"M2 2V6H6V2Z\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"\"/><path d=\"M0 0H4V4H0Z\"/><path d=\"\"/></svg>",
+    // A path inside `<defs>` is not painted, and one after it is. The reader
+    // and the iterator have to agree about that, which is what `document`
+    // checks on every input.
+    "<svg viewBox=\"0 0 24 24\"><defs><path d=\"M9 9Z\"/></defs><path d=\"M0 0L2 2Z\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><defs><defs><path d=\"M9 9Z\"/></defs></defs><path d=\"M0 0Z\"/></svg>",
+    // An unsupported element after several good shapes: refused, rather than
+    // those shapes painted and then an error.
+    "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><g/></svg>",
     // XML that is not well formed, which is the reader's other job.
     "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"></svg>",
     "<svg viewBox=\"0 0 24 24\"",

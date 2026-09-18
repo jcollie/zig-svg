@@ -13,12 +13,13 @@
 //!
 //! ## What it draws, and what it does not
 //!
-//! One `<svg>` with a `viewBox`, one `<path>` with a `d`, filled in one
-//! colour. That is every Material Design Icon, most other icon sets, and a
-//! long way short of SVG: there is no `<g>`, no `transform`, no `style`, no
-//! gradient, no stroke, no text, no `<use>` and no `fill` attribute. What
-//! *is* complete is the path data grammar of SVG 1.1 §8.3, including the
-//! elliptical arc, which is the part with the arithmetic in it.
+//! One `<svg>` with a `viewBox`, any number of `<path>` elements with a `d`,
+//! painted in document order in one colour. That is every Material Design
+//! Icon, most other icon sets, and a long way short of SVG: there is no
+//! `<g>`, no `transform`, no `style`, no gradient, no stroke, no text, no
+//! `<use>` and no `fill` attribute. What *is* complete is the path data
+//! grammar of SVG 1.1 §8.3, including the elliptical arc, which is the part
+//! with the arithmetic in it.
 //!
 //! An element it cannot draw is **refused**, not skipped. A renderer that
 //! skips what it does not understand produces a picture quietly missing a
@@ -69,8 +70,10 @@ pub const render = raster.render;
 /// Render a document into a surface the caller already has.
 pub const draw = raster.draw;
 
-/// A `viewBox` and the `d` it encloses.
+/// A `viewBox` and the shapes it encloses.
 pub const Document = document.Document;
+/// Walks a document's `<path>` elements in painting order.
+pub const PathIterator = document.PathIterator;
 pub const ViewBox = document.ViewBox;
 /// Read a document without drawing it.
 pub const read = document.read;

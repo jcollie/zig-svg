@@ -44,13 +44,26 @@ pub const Limits = struct {
     /// a pixel the default is a quarter of a gigabyte.
     max_pixels: u64 = 1 << 26,
 
-    /// The most `z2d.Path` nodes the `d` attribute may produce.
+    /// The most `z2d.Path` nodes the document's shapes may produce between
+    /// them.
     ///
     /// Nodes rather than bytes of source, because the two are not
     /// proportional: `a` with a large sweep produces four cubics from a dozen
     /// characters, and repeating it is the cheapest way to write an expensive
     /// path.
+    ///
+    /// A budget for the whole document rather than for each shape. Per shape
+    /// it would bound nothing: ten thousand `<path>` elements, each just under
+    /// the limit, is the same denial of service written out longhand.
     max_path_nodes: usize = 1 << 20,
+
+    /// The most `<path>` elements to draw.
+    ///
+    /// The node budget does not cover this. An empty `d` produces no nodes and
+    /// still costs a fill, and a fill allocates its plotted polygons and a
+    /// scanline mask however little there is to plot -- so a document of a
+    /// million empty paths is bounded by this and by nothing else.
+    max_shapes: usize = 1 << 12,
 
     /// The most source to buffer, for the callers that have to buffer it --
     /// `sandbox.render` copies the document into memory before it forks,
@@ -68,6 +81,7 @@ pub const Limits = struct {
         .max_height = math.maxInt(u32),
         .max_pixels = math.maxInt(u64),
         .max_path_nodes = math.maxInt(usize),
+        .max_shapes = math.maxInt(usize),
         .max_input_bytes = math.maxInt(u64),
     };
 
@@ -130,6 +144,8 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     ImageTooLarge,
     /// A width or height of zero, whether asked for or taken from the viewBox.
     BadSize,
+    /// The document has more `<path>` elements than `Limits.max_shapes`.
+    TooManyShapes,
 };
 
 /// Where in a surface to draw, in pixels.
@@ -184,6 +200,15 @@ pub fn draw(
 
 /// The half of `draw` that has the document already, so that `render` does not
 /// parse the XML twice to find out how large to make its surface.
+///
+/// Each `<path>` is built and filled on its own, in document order, which is
+/// SVG's painting model: a shape is painted over whatever is already there.
+///
+/// Filling them separately is not the same as building them into one path and
+/// filling that once, which would be cheaper. Two overlapping subpaths wound
+/// in opposite directions leave a hole under the nonzero rule; painted as two
+/// shapes the second simply covers the first. Merging them would quietly
+/// choose the first answer for a document that means the second.
 fn drawDocument(
     gpa: Allocator,
     surface: *z2d.Surface,
@@ -191,29 +216,33 @@ fn drawDocument(
     box: Box,
     opts: Options,
 ) Error!void {
-    var p: z2d.Path = .empty;
-    defer p.deinit(gpa);
+    if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
 
-    try document.buildDocumentIn(
-        &p,
-        gpa,
-        doc,
-        box.x,
-        box.y,
-        box.width,
-        box.height,
-        .{ .max_nodes = opts.limits.max_path_nodes },
-    );
-    // An empty `d` is a document that draws nothing, which is not an error;
-    // `painter.fill` would take it too, but this says so on purpose.
-    if (p.nodes.items.len == 0) return;
-
+    const transform = doc.transformFor(box.x, box.y, box.width, box.height);
     const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = opts.fill } };
-    try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-        .fill_rule = opts.fill_rule,
-        .anti_aliasing_mode = opts.anti_aliasing_mode,
-        .tolerance = opts.tolerance,
-    });
+
+    // Spent down across the whole document rather than reset per shape. See
+    // `Limits.max_path_nodes`.
+    var nodes_left = opts.limits.max_path_nodes;
+
+    var shapes = doc.paths();
+    while (try shapes.next()) |d| {
+        var p: z2d.Path = .empty;
+        defer p.deinit(gpa);
+
+        try document.buildShape(&p, gpa, d, transform, .{ .max_nodes = nodes_left });
+        nodes_left -= p.nodes.items.len;
+
+        // An empty `d` is a shape that draws nothing, which is not an error;
+        // `painter.fill` would take it too, but this says so on purpose.
+        if (p.nodes.items.len == 0) continue;
+
+        try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
+            .fill_rule = opts.fill_rule,
+            .anti_aliasing_mode = opts.anti_aliasing_mode,
+            .tolerance = opts.tolerance,
+        });
+    }
 }
 
 /// A viewBox dimension as a pixel count.
@@ -274,6 +303,99 @@ test "a picture larger than the limits allow is refused" {
 
 test "a zero dimension is refused rather than made into a surface" {
     try testing.expectError(error.BadSize, render(testing.allocator, icon, .{ .width = 0 }));
+}
+
+test "every shape in the document is painted" {
+    const gpa = testing.allocator;
+    // Two squares side by side, neither covering the other.
+    const src =
+        \\<svg viewBox="0 0 4 2"><path d="M0 0H2V2H0Z"/><path d="M2 0H4V2H2Z"/></svg>
+    ;
+    var surface = try render(gpa, src, .{
+        .width = 40,
+        .height = 20,
+        .fill = .{ .rgba = .{ .r = 255, .g = 0, .b = 0, .a = 255 } },
+    });
+    defer surface.deinit(gpa);
+
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(10, 10).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(30, 10).?.rgba.a);
+}
+
+test "shapes are painted in document order, the later over the earlier" {
+    const gpa = testing.allocator;
+    // A big square, then a smaller one on top of it. With `src_over` and an
+    // opaque fill the picture is the same either way -- what this pins is that
+    // both were drawn at all, and that the second did not erase the first.
+    const src =
+        \\<svg viewBox="0 0 8 8"><path d="M0 0H8V8H0Z"/><path d="M2 2H6V6H2Z"/></svg>
+    ;
+    var surface = try render(gpa, src, .{
+        .width = 80,
+        .height = 80,
+        .fill = .{ .rgba = .{ .r = 0, .g = 0, .b = 255, .a = 255 } },
+    });
+    defer surface.deinit(gpa);
+
+    // Inside the inner square, and inside the outer one but outside the inner.
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(40, 40).?.rgba.b);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(5, 40).?.rgba.b);
+}
+
+test "overlapping shapes are not merged into one fill" {
+    const gpa = testing.allocator;
+    // One subpath clockwise, the next counterclockwise, overlapping. Built
+    // into a single path and filled once under the nonzero rule, the second
+    // would punch a hole in the first. Painted as two shapes it does not --
+    // which is what SVG means and what resvg draws.
+    const merged =
+        \\<svg viewBox="0 0 8 8"><path d="M0 0H8V8H0ZM2 2V6H6V2Z"/></svg>
+    ;
+    const separate =
+        \\<svg viewBox="0 0 8 8"><path d="M0 0H8V8H0Z"/><path d="M2 2V6H6V2Z"/></svg>
+    ;
+
+    var holed = try render(gpa, merged, .{ .width = 80, .height = 80 });
+    defer holed.deinit(gpa);
+    var solid = try render(gpa, separate, .{ .width = 80, .height = 80 });
+    defer solid.deinit(gpa);
+
+    // The middle of the merged one is a hole; the middle of the other is not.
+    try testing.expectEqual(@as(u8, 0), holed.getPixel(40, 40).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), solid.getPixel(40, 40).?.rgba.a);
+}
+
+test "the node budget is spent across the document, not per shape" {
+    const gpa = testing.allocator;
+    // Three shapes of five nodes each. A per-shape budget of eight would take
+    // all three; a document-wide one runs out during the second.
+    const src =
+        \\<svg viewBox="0 0 8 8"><path d="M0 0H2V2H0Z"/><path d="M3 3H5V5H3Z"/><path d="M6 6H8V8H6Z"/></svg>
+    ;
+    try testing.expectError(error.PathTooComplex, render(gpa, src, .{
+        .width = 16,
+        .height = 16,
+        .limits = .{ .max_path_nodes = 8 },
+    }));
+    // And with room for all three it draws.
+    var surface = try render(gpa, src, .{
+        .width = 16,
+        .height = 16,
+        .limits = .{ .max_path_nodes = 64 },
+    });
+    defer surface.deinit(gpa);
+}
+
+test "a document with more shapes than the limit allows is refused" {
+    const gpa = testing.allocator;
+    const src =
+        \\<svg viewBox="0 0 8 8"><path d="M0 0H2V2H0Z"/><path d="M3 3H5V5H3Z"/><path d="M6 6H8V8H6Z"/></svg>
+    ;
+    try testing.expectError(error.TooManyShapes, render(gpa, src, .{
+        .width = 16,
+        .height = 16,
+        .limits = .{ .max_shapes = 2 },
+    }));
 }
 
 test "a path past the node limit is refused" {

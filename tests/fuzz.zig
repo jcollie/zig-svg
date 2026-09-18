@@ -111,7 +111,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "fill-opacityrulenonzeevdcurColor#%()," ++
     "transformatrixlscewXYkyop" ++
     "rectcirclepsoygnlinwdthxy12points" ++
-    "strokewidthcapjonmielmtdasharyofst";
+    "strokewidthcapjonmielmtdasharyofst" ++
+    "preserveAspctRioMdnlx%emptcin";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -205,10 +206,15 @@ fn documentTarget(input: []const u8) anyerror!void {
     const doc = svg.read(src) catch return;
     // A viewBox that got past the reader is four finite numbers with a
     // positive extent, which is what every scale computed from it assumes.
-    try testing.expect(std.math.isFinite(doc.view_box.min_x));
-    try testing.expect(std.math.isFinite(doc.view_box.min_y));
-    try testing.expect(doc.view_box.width > 0);
-    try testing.expect(doc.view_box.height > 0);
+    if (doc.view_box) |vb| {
+        try testing.expect(std.math.isFinite(vb.min_x));
+        try testing.expect(std.math.isFinite(vb.min_y));
+        try testing.expect(vb.width > 0);
+        try testing.expect(vb.height > 0);
+    }
+    // And the size it reports is one a surface can be made at.
+    try testing.expect(std.math.isFinite(doc.width) and doc.width > 0);
+    try testing.expect(std.math.isFinite(doc.height) and doc.height > 0);
     try testing.expect(doc.shape_count > 0);
 
     // Reading and iterating are two walks of the same document, and a
@@ -557,6 +563,26 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-linecap=\"ROUND\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-linejoin=\"bogus\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-miterlimit=\"wide\"/></svg>",
+    // The document's own size, and the units a length is written in.
+    "<svg width=\"64\" height=\"32\" viewBox=\"0 0 16 16\"><rect x=\"2\" y=\"2\" width=\"4\" height=\"4\"/></svg>",
+    "<svg width=\"48\" height=\"24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\"/></svg>",
+    "<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 24 24\"><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg width=\"4cm\" height=\"2cm\" viewBox=\"0 0 16 8\"><rect width=\"8\" height=\"4\"/></svg>",
+    "<svg width=\"96pt\" height=\"1in\" viewBox=\"0 0 16 8\"><rect width=\"8\" height=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 200 100\"><rect width=\"1in\" height=\"6pc\"/><rect x=\"2.54cm\" width=\"25.4mm\" height=\"72pt\"/></svg>",
+    "<svg viewBox=\"0 0 200 100\"><rect width=\"50%\" height=\"10%\"/><circle cx=\"50%\" cy=\"70%\" r=\"10%\"/></svg>",
+    // Units this reader refuses, and sizes it cannot work out.
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"10em\" height=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"10ex\" height=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect width=\"10 px\" height=\"4\"/></svg>",
+    "<svg><rect width=\"4\" height=\"4\"/></svg>",
+    "<svg width=\"0\" height=\"0\"><rect width=\"4\" height=\"4\"/></svg>",
+    // preserveAspectRatio, in every shape it comes in.
+    "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"none\"><rect width=\"10\" height=\"5\"/></svg>",
+    "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"xMinYMax slice\"><rect width=\"10\" height=\"5\"/></svg>",
+    "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"defer xMaxYMin meet\"><rect width=\"10\" height=\"5\"/></svg>",
+    "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"XMidYMid\"><rect width=\"10\" height=\"5\"/></svg>",
+    "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"bogus\"><rect width=\"10\" height=\"5\"/></svg>",
     // Elements that are still refused.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",

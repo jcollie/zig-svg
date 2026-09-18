@@ -62,6 +62,8 @@ pub const color = @import("color.zig");
 pub const transform = @import("transform.zig");
 /// SVG's basic shapes, as path operations.
 pub const shapes = @import("shapes.zig");
+/// The lengths an attribute is written in, and their units.
+pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
 pub const path = @import("path.zig");
 /// SVG's elliptical arc command, as cubic Béziers.
@@ -89,6 +91,8 @@ pub const Color = color.Color;
 /// What a `fill` attribute can say.
 pub const Paint = color.Paint;
 pub const ViewBox = document.ViewBox;
+/// How a `viewBox` is fitted into the box it is drawn in.
+pub const PreserveAspectRatio = document.PreserveAspectRatio;
 /// Read a document without drawing it.
 pub const read = document.read;
 
@@ -107,6 +111,7 @@ test {
     _ = color;
     _ = transform;
     _ = shapes;
+    _ = length;
     _ = path;
     _ = arc;
     _ = raster;

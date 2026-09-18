@@ -184,11 +184,10 @@ pub const Box = struct {
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface {
     const doc = try document.read(src);
 
-    // The viewBox is the default size, which is the one thing about the
-    // picture the document does say. Rounded up, because half a pixel of a
-    // drawing is still a pixel of the drawing.
-    const width = opts.width orelse fitDimension(doc.view_box.width);
-    const height = opts.height orelse fitDimension(doc.view_box.height);
+    // The document's own size, which is what `width` and `height` say when it
+    // has them and the `viewBox`'s extent when it does not.
+    const width = opts.width orelse fitDimension(doc.width);
+    const height = opts.height orelse fitDimension(doc.height);
     try opts.limits.check(width, height);
 
     var surface = if (opts.background) |px|
@@ -543,13 +542,15 @@ fn fadePixel(px: z2d.Pixel, alpha: f64) ?z2d.Pixel {
     ) };
 }
 
-/// A viewBox dimension as a pixel count.
+/// The document's own size as a pixel count.
 ///
-/// Rounded up and clamped: the viewBox has already been checked to be positive
-/// and finite, and anything past `u32` is refused by `Limits.check` a moment
-/// later with an error that says which limit it broke.
+/// Rounded to nearest, which is what resvg does with an explicit `width`: a
+/// `4cm` document comes out 151 pixels rather than 152, and `1.4` comes out 1.
+/// Clamped as well -- the size has already been checked to be positive and
+/// finite, and anything past `u32` is refused by `Limits.check` a moment later
+/// with an error that says which limit it broke.
 fn fitDimension(v: f64) u32 {
-    const rounded = @ceil(v);
+    const rounded = @round(v);
     if (rounded >= @as(f64, math.maxInt(u32))) return math.maxInt(u32);
     return @intFromFloat(rounded);
 }

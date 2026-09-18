@@ -78,18 +78,23 @@ pub fn main(init: std.process.Init) !void {
         const src = try in_dir.readFileAlloc(io, entry.name, gpa, .limited(1 << 22));
         defer gpa.free(src);
 
-        // The size comes from the viewBox, so that the box handed to the
-        // renderer already has the document's proportions and the letterboxing
-        // is a no-op. See the manifest note above for why that matters.
+        // The size comes from the *document*: its own `width` and `height`
+        // when it names them, and its viewBox's extent when it does not. That
+        // is what resvg draws at when it is given no size of its own, so both
+        // renderers are working to the same box -- and it is what makes
+        // `preserveAspectRatio` testable at all, since a fixture can now ask
+        // for a box its viewBox does not fit.
+        //
+        // Scaled up so the longer side is `long_edge`, because a 16-unit
+        // document compared at 16 pixels is comparing antialiasing.
         const doc = svg.read(src) catch |err| {
             try log.print("{s}: {t}\n", .{ entry.name, err });
             refused += 1;
             continue;
         };
-        const scale = @as(f64, @floatFromInt(long_edge)) /
-            @max(doc.view_box.width, doc.view_box.height);
-        const width = atLeastOne(doc.view_box.width * scale);
-        const height = atLeastOne(doc.view_box.height * scale);
+        const scale = @as(f64, @floatFromInt(long_edge)) / @max(doc.width, doc.height);
+        const width = atLeastOne(doc.width * scale);
+        const height = atLeastOne(doc.height * scale);
 
         var surface = svg.render(gpa, src, .{
             .width = width,

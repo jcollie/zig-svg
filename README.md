@@ -33,6 +33,25 @@ A zero or negative width, height or radius draws nothing and is not an error —
 `<rect/>` and `<circle r="-2"/>` are both simply empty, which is what resvg
 does. A `stroke-width` of zero or less disables the stroke the same way.
 
+A document is drawn at the size it says it is — its `width` and `height` if it
+names them, its `viewBox`'s extent if not — unless the caller asks for
+something else. `preserveAspectRatio` then decides how the one is fitted into
+the other. A document with no `viewBox` at all behaves as though it had
+`viewBox="0 0 width height"`: its user units *are* pixels at the size it claims
+to be, so drawing it larger scales it.
+
+Percentages are of the viewport the `viewBox` establishes, not of the size the
+picture is drawn at, and which measure depends on what the attribute measures —
+`width` and `cx` of its width, `height` and `cy` of its height, and `r` and
+`stroke-width` of §7.10's normalized diagonal.
+
+**`em` and `ex` are refused.** Both are a multiple of a font size, and there is
+no font here and no right answer for what it would be: CSS's initial
+`font-size` is `medium`, which browsers make 16 pixels and resvg makes 12, so
+`10em` is 160 pixels in a browser and 120 in the oracle this library is checked
+against. Either choice draws a picture the wrong size somewhere. They arrive
+with text.
+
 `fill` and `stroke` default differently, and deliberately. A shape naming no
 `fill` gets the caller's colour; a shape naming no `stroke` is **not stroked**,
 because SVG's initial `stroke` is `none` and a shape stroked without asking
@@ -94,11 +113,12 @@ short of the specification.
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
 | `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
-| `viewBox` and `preserveAspectRatio` | the viewBox; aspect ratio always `xMidYMid meet` |
+| `viewBox`, `width`, `height` | yes — the document's own size is what it is drawn at |
+| `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
-| Lengths | a bare number, or `px`, which is the same thing |
+| Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | `<g>` up to `document.max_container_depth` (64), then refused |
-| `pt`, `mm`, `em`, `%` lengths | **no** — refused, not guessed at |
+| `em`, `ex` lengths | **no** — refused; they need a font size |
 | `style`, gradients, text, `<use>`, CSS | **no** |
 | `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
 
@@ -235,8 +255,15 @@ $ zig build oracle
 $ python3 tools/check_oracle.py tests/oracle zig-out/oracle
 ok   arc-rotated-ellipse     mean  0.033  outliers  0.008%  worst  64
 ...
-26 compared against resvg, 0 beyond tolerance
+86 compared against resvg, 0 beyond tolerance
 ```
+
+Each fixture is rendered at the size the **document** says it is — its own
+`width` and `height`, or its `viewBox`'s extent — scaled so the longer side is
+256, and that size is written to `manifest.txt` beside the PNGs for resvg to be
+given verbatim. Driving it from the document is what makes `preserveAspectRatio`
+testable at all: a fixture can ask for a box its `viewBox` does not fit, and
+both renderers work to the same one.
 
 Not pixel for pixel: two correct rasterizers disagree along every antialiased
 edge, since resvg's tiny-skia computes exact analytic coverage where z2d
@@ -314,27 +341,20 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Lengths with units, and `width`/`height`/`preserveAspectRatio` on `<svg>`.**
-`document.optionalLength` reads a bare number and `px` and refuses everything
-else; `pt` and `mm` are a fixed ratio away, but `em` needs a font size and `%`
-needs a viewport to be a percentage of — which is the same thing the document's
-own `width` and `height` supply. So the two arrive together, and with them
-`preserveAspectRatio` instead of a hardcoded `xMidYMid meet`.
-
-**2. Entity references in attribute values.** The XML reader hands back raw
+**1. Entity references in attribute values.** The XML reader hands back raw
 attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
 entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
 is a parse error rather than a `Z`.
 
-**3. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+**2. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
 a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
 the classic denial of service.
 
-**4. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+**3. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
 `gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
 systems.
 
-**5. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**4. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -343,7 +363,9 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**6. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
+**5. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
+`font-family`, `font-size`, `text-anchor` — and with a font size finally in
+hand, the `em` and `ex` that are refused today. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
 a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and

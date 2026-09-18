@@ -480,6 +480,8 @@ const WireError = enum(u16) {
     bad_length = 23,
     bad_stroke_style = 24,
     too_many_dashes = 25,
+    bad_preserve_aspect_ratio = 26,
+    no_size = 27,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -514,6 +516,8 @@ fn wireFromError(err: anyerror) WireError {
         error.BadLength => .bad_length,
         error.BadStrokeStyle => .bad_stroke_style,
         error.TooManyDashes => .too_many_dashes,
+        error.BadPreserveAspectRatio => .bad_preserve_aspect_ratio,
+        error.NoSize => .no_size,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -560,6 +564,8 @@ fn wireToError(status: u16) Error {
         .bad_length => error.BadLength,
         .bad_stroke_style => error.BadStrokeStyle,
         .too_many_dashes => error.TooManyDashes,
+        .bad_preserve_aspect_ratio => error.BadPreserveAspectRatio,
+        .no_size => error.NoSize,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -774,7 +780,7 @@ test "a document the reader refuses comes back as that refusal" {
         "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
-    try testing.expectError(error.BadViewBox, render(
+    try testing.expectError(error.NoSize, render(
         testing.allocator,
         "<svg><path d=\"M0 0Z\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
@@ -824,6 +830,8 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadLength, .bad_length },
         .{ error.BadStrokeStyle, .bad_stroke_style },
         .{ error.TooManyDashes, .too_many_dashes },
+        .{ error.BadPreserveAspectRatio, .bad_preserve_aspect_ratio },
+        .{ error.NoSize, .no_size },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },

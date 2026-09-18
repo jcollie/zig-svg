@@ -73,6 +73,7 @@ const xml = @import("zxml");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
+const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
@@ -101,6 +102,13 @@ pub const Error = error{
     GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
+    /// A `preserveAspectRatio` that is not `none` or one of the nine
+    /// alignments, optionally followed by `meet` or `slice`.
+    BadPreserveAspectRatio,
+    /// A document that says neither how large it is nor what its `viewBox` is,
+    /// so there is nothing to say how big to draw it or what its coordinates
+    /// mean.
+    NoSize,
     /// A `stroke-linecap`, `stroke-linejoin` or `stroke-miterlimit` this
     /// reader does not recognise. Like `fill-rule`, these are XML attribute
     /// values rather than CSS keywords, so they are matched with regard to
@@ -119,7 +127,7 @@ pub const Error = error{
     /// the transforms and the viewBox mapping were applied. See
     /// `max_coordinate`.
     CoordinateOutOfRange,
-} || transform.Error || color.Error || xml.Error;
+} || transform.Error || color.Error || length.Error || xml.Error;
 
 /// The furthest from the origin a transformed point may land, in pixels.
 ///
@@ -247,15 +255,101 @@ pub const ViewBox = struct {
     height: f64,
 };
 
+/// How a `viewBox` is fitted into the box it is drawn in -- SVG 1.1 §7.8.
+pub const PreserveAspectRatio = struct {
+    /// Where the extra space goes along each axis when the two do not have the
+    /// same proportions.
+    align_x: Align = .mid,
+    align_y: Align = .mid,
+    /// `meet` fits the whole viewBox inside the box and leaves space; `slice`
+    /// covers the box and lets the viewBox overflow it.
+    slice: bool = false,
+    /// `preserveAspectRatio="none"`, which scales each axis independently and
+    /// so distorts. The alignment means nothing then, because there is no
+    /// space left over to put anywhere.
+    stretch: bool = false,
+
+    pub const Align = enum { min, mid, max };
+
+    /// The default, which is what a document that says nothing gets.
+    pub const meet_centred: PreserveAspectRatio = .{};
+
+    /// The fraction of the leftover space that goes *before* the viewBox.
+    fn fraction(a: Align) f64 {
+        return switch (a) {
+            .min => 0.0,
+            .mid => 0.5,
+            .max => 1.0,
+        };
+    }
+
+    /// `[defer] <align> [meet|slice]`.
+    ///
+    /// The `defer` keyword is read and ignored, which is what it is for: it
+    /// applies to a `<use>` of an image and means nothing on a root `<svg>`.
+    pub fn parse(text: []const u8) Error!PreserveAspectRatio {
+        var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
+        var word = it.next() orelse return error.BadPreserveAspectRatio;
+        if (std.mem.eql(u8, word, "defer")) {
+            word = it.next() orelse return error.BadPreserveAspectRatio;
+        }
+
+        var result: PreserveAspectRatio = .{};
+        if (std.mem.eql(u8, word, "none")) {
+            result.stretch = true;
+        } else {
+            // `xMidYMid` and its eight siblings, matched with regard to case
+            // like every other keyword that is an XML attribute value.
+            if (word.len != 8) return error.BadPreserveAspectRatio;
+            if (word[0] != 'x' or word[4] != 'Y') return error.BadPreserveAspectRatio;
+            result.align_x = parseAlign(word[1..4]) orelse return error.BadPreserveAspectRatio;
+            result.align_y = parseAlign(word[5..8]) orelse return error.BadPreserveAspectRatio;
+        }
+
+        if (it.next()) |mode| {
+            if (std.mem.eql(u8, mode, "slice")) {
+                result.slice = true;
+            } else if (!std.mem.eql(u8, mode, "meet")) {
+                return error.BadPreserveAspectRatio;
+            }
+        }
+        if (it.next() != null) return error.BadPreserveAspectRatio;
+        return result;
+    }
+
+    fn parseAlign(word: []const u8) ?Align {
+        if (std.mem.eql(u8, word, "Min")) return .min;
+        if (std.mem.eql(u8, word, "Mid")) return .mid;
+        if (std.mem.eql(u8, word, "Max")) return .max;
+        return null;
+    }
+};
+
 /// A document that has been read and found drawable.
 ///
 /// Borrows `src`, which must outlive it, and allocates nothing.
 pub const Document = struct {
-    view_box: ViewBox,
+    /// The coordinate system the shapes are written in, as the document wrote
+    /// it, or null when it has no `viewBox`.
+    ///
+    /// Null does not mean there is no mapping: `transformFor` then behaves as
+    /// though the document had said `viewBox="0 0 width height"`, since its
+    /// user units are pixels at the size it claims to be. The field stays
+    /// optional so that a caller can tell what the document actually said.
+    view_box: ?ViewBox,
+    /// How large the document says it is, in pixels. From `width` and `height`
+    /// when it names them, and from the `viewBox`'s extent when it does not.
+    ///
+    /// This is what `render` draws at when the caller names no size. It is not
+    /// what a percentage is measured against -- see `viewport`.
+    width: f64,
+    height: f64,
+    /// How the `viewBox` is fitted into the box it is drawn in.
+    preserve_aspect_ratio: PreserveAspectRatio,
     /// The source this was read from. `paths` walks it again.
     src: []const u8,
-    /// How many `<path>` elements `read` found, so that a caller can bound the
-    /// work before starting it.
+    /// How many shapes `read` found, so that a caller can bound the work
+    /// before starting it.
     shape_count: usize,
     /// What the root `<svg>` named, which every shape inherits unless a `<g>`
     /// or the shape itself overrides it. Informational: `paths` walks the
@@ -263,30 +357,68 @@ pub const Document = struct {
     /// with it, so that the root and a `<g>` go through one code path.
     root: Inherited,
 
-    /// Each `<path>`, in document order.
+    /// What a percentage inside this document is measured against.
+    ///
+    /// The `viewBox` establishes a new viewport, so it is that rather than the
+    /// size the picture is drawn at: a document 100 by 50 pixels with a
+    /// `viewBox` of `0 0 100 200` resolves `50%` of a height as 100 user
+    /// units. resvg agrees, and it is what §7.10 says.
+    pub fn viewport(self: Document) length.Viewport {
+        if (self.view_box) |vb| return .{ .width = vb.width, .height = vb.height };
+        return .{ .width = self.width, .height = self.height };
+    }
+
+    /// Each shape, in document order.
     ///
     /// Order is the painting order: SVG paints shapes in the order they are
     /// written, each over the last.
     pub fn paths(self: Document) PathIterator {
-        return .{ .reader = .init(self.src) };
+        return .{ .reader = .init(self.src), .viewport = self.viewport() };
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
     ///
-    /// The scale is uniform and takes the smaller of the two ratios, so a box
-    /// of a different shape from the viewBox letterboxes rather than
-    /// distorting -- which is what `preserveAspectRatio`'s default,
-    /// `xMidYMid meet`, says to do. That attribute is not read; this is its
-    /// default behaviour and the only behaviour available.
+    /// SVG 1.1 §7.8's algorithm, with `preserveAspectRatio` as the document
+    /// wrote it. `meet` takes the smaller of the two ratios so the whole
+    /// viewBox fits and space is left over; `slice` takes the larger so the
+    /// box is covered and the viewBox runs off it; `none` takes both and
+    /// distorts. The alignment says where any leftover space goes -- and under
+    /// `slice` the leftover is negative, which is the same arithmetic saying
+    /// which part of the viewBox is kept.
     pub fn transformFor(self: Document, x: f64, y: f64, width: f64, height: f64) z2d.Transformation {
-        const scale = @min(width / self.view_box.width, height / self.view_box.height);
+        // A document with no `viewBox` behaves as though it had one covering
+        // its own size: its user units *are* pixels at the size it says it is,
+        // so drawing it larger scales it, exactly as drawing a document with a
+        // `viewBox` larger scales that. Leaving the mapping at the identity
+        // instead would draw such a document at 1:1 in the corner of whatever
+        // box it was given, which is what it used to do and what one oracle
+        // fixture noticed.
+        const vb = self.view_box orelse ViewBox{
+            .min_x = 0,
+            .min_y = 0,
+            .width = self.width,
+            .height = self.height,
+        };
+
+        const par = self.preserve_aspect_ratio;
+        const ratio_x = width / vb.width;
+        const ratio_y = height / vb.height;
+        const scale_x, const scale_y = if (par.stretch)
+            .{ ratio_x, ratio_y }
+        else if (par.slice)
+            .{ @max(ratio_x, ratio_y), @max(ratio_x, ratio_y) }
+        else
+            .{ @min(ratio_x, ratio_y), @min(ratio_x, ratio_y) };
+
+        const spare_x = width - vb.width * scale_x;
+        const spare_y = height - vb.height * scale_y;
         return .{
-            .ax = scale,
+            .ax = scale_x,
             .by = 0,
             .cx = 0,
-            .dy = scale,
-            .tx = x + (width - self.view_box.width * scale) / 2.0 - self.view_box.min_x * scale,
-            .ty = y + (height - self.view_box.height * scale) / 2.0 - self.view_box.min_y * scale,
+            .dy = scale_y,
+            .tx = x + spare_x * PreserveAspectRatio.fraction(par.align_x) - vb.min_x * scale_x,
+            .ty = y + spare_y * PreserveAspectRatio.fraction(par.align_y) - vb.min_y * scale_y,
         };
     }
 };
@@ -300,6 +432,8 @@ pub const Document = struct {
 /// paper over.
 pub const PathIterator = struct {
     reader: xml.Reader,
+    /// What a percentage in this document is measured against.
+    viewport: length.Viewport,
     /// What each open container contributes, innermost last. Level zero is
     /// what applies before any container has been entered, which is what a
     /// shape outside the root would see -- there is no such shape in a
@@ -340,8 +474,8 @@ pub const PathIterator = struct {
                 if (self.depth_ignored > 0) continue;
                 const top = self.stack[self.depth];
 
-                if (try readGeometry(e)) |geometry| {
-                    const effective = top.inherited.with(try readInherited(e));
+                if (try readGeometry(e, self.viewport)) |geometry| {
+                    const effective = top.inherited.with(try readInherited(e, self.viewport));
                     const ctm = top.transform.mul(try readTransform(e));
                     if (!transform.isFinite(ctm)) return error.NonFiniteTransform;
                     return .{
@@ -378,7 +512,7 @@ pub const PathIterator = struct {
                     if (self.depth == max_container_depth) return error.TooDeeplyNested;
                     self.depth += 1;
                     self.stack[self.depth] = .{
-                        .inherited = top.inherited.with(try readInherited(e)),
+                        .inherited = top.inherited.with(try readInherited(e, self.viewport)),
                         .transform = top.transform.mul(try readTransform(e)),
                     };
                     continue;
@@ -420,48 +554,48 @@ fn isContainer(name: []const u8) bool {
 /// has, and spelling them out as text to read back would allocate and would
 /// put a number formatter and a second number parser in the way of the
 /// picture. See `shapes.zig`.
-fn readGeometry(e: xml.Element) Error!?shapes.Geometry {
+fn readGeometry(e: xml.Element, viewport: length.Viewport) Error!?shapes.Geometry {
     if (xml.nameIs(e.name, "path")) {
         return .{ .path = e.attr("d") orelse return error.NoPath };
     }
     if (xml.nameIs(e.name, "rect")) {
         return .{
             .rect = .{
-                .x = try length(e, "x", 0),
-                .y = try length(e, "y", 0),
-                .width = try length(e, "width", 0),
-                .height = try length(e, "height", 0),
+                .x = try lengthOf(e, "x", .x, viewport, 0),
+                .y = try lengthOf(e, "y", .y, viewport, 0),
+                .width = try lengthOf(e, "width", .x, viewport, 0),
+                .height = try lengthOf(e, "height", .y, viewport, 0),
                 // Null rather than zero: §9.2 makes one specified radius supply
                 // the other, which "not specified" has to be distinguishable from
                 // zero to express.
-                .rx = try optionalLength(e, "rx"),
-                .ry = try optionalLength(e, "ry"),
+                .rx = try optionalLengthOf(e, "rx", .x, viewport),
+                .ry = try optionalLengthOf(e, "ry", .y, viewport),
             },
         };
     }
     if (xml.nameIs(e.name, "circle")) {
-        const r = try length(e, "r", 0);
+        const r = try lengthOf(e, "r", .other, viewport, 0);
         return .{ .ellipse = .{
-            .cx = try length(e, "cx", 0),
-            .cy = try length(e, "cy", 0),
+            .cx = try lengthOf(e, "cx", .x, viewport, 0),
+            .cy = try lengthOf(e, "cy", .y, viewport, 0),
             .rx = r,
             .ry = r,
         } };
     }
     if (xml.nameIs(e.name, "ellipse")) {
         return .{ .ellipse = .{
-            .cx = try length(e, "cx", 0),
-            .cy = try length(e, "cy", 0),
-            .rx = try length(e, "rx", 0),
-            .ry = try length(e, "ry", 0),
+            .cx = try lengthOf(e, "cx", .x, viewport, 0),
+            .cy = try lengthOf(e, "cy", .y, viewport, 0),
+            .rx = try lengthOf(e, "rx", .x, viewport, 0),
+            .ry = try lengthOf(e, "ry", .y, viewport, 0),
         } };
     }
     if (xml.nameIs(e.name, "line")) {
         return .{ .line = .{
-            .x1 = try length(e, "x1", 0),
-            .y1 = try length(e, "y1", 0),
-            .x2 = try length(e, "x2", 0),
-            .y2 = try length(e, "y2", 0),
+            .x1 = try lengthOf(e, "x1", .x, viewport, 0),
+            .y1 = try lengthOf(e, "y1", .y, viewport, 0),
+            .x2 = try lengthOf(e, "x2", .x, viewport, 0),
+            .y2 = try lengthOf(e, "y2", .y, viewport, 0),
         } };
     }
     if (xml.nameIs(e.name, "polyline")) {
@@ -475,25 +609,32 @@ fn readGeometry(e: xml.Element) Error!?shapes.Geometry {
 
 /// One length-valued attribute, or `default` when the element does not carry
 /// it.
-fn length(e: xml.Element, name: []const u8, default: f64) Error!f64 {
-    return (try optionalLength(e, name)) orelse default;
+fn lengthOf(
+    e: xml.Element,
+    name: []const u8,
+    axis: length.Axis,
+    viewport: length.Viewport,
+    default: f64,
+) Error!f64 {
+    return (try optionalLengthOf(e, name, axis, viewport)) orelse default;
 }
 
 /// A length, or null when the attribute is absent.
 ///
-/// A bare number, or one suffixed `px`, which is the same thing: the user unit
-/// *is* the CSS pixel. Every other unit -- `pt`, `mm`, `em`, `%` -- is refused
-/// rather than guessed at, because each needs something this reader has not
-/// got yet: a document size, a font size, or a viewport to be a percentage of.
-fn optionalLength(e: xml.Element, name: []const u8) Error!?f64 {
+/// `axis` is which measure of the viewport a percentage is of, and is a
+/// property of the attribute rather than of its value: `width` and `cx` are
+/// horizontal, `height` and `cy` vertical, and `r` and `stroke-width` are
+/// neither, so they take §7.10's normalized diagonal. Getting one wrong is a
+/// shape the right size in one direction and the wrong size in the other, on
+/// documents that use percentages and nowhere else.
+fn optionalLengthOf(
+    e: xml.Element,
+    name: []const u8,
+    axis: length.Axis,
+    viewport: length.Viewport,
+) Error!?f64 {
     const raw = e.attr(name) orelse return null;
-    var text = std.mem.trim(u8, raw, " \t\r\n");
-    if (std.mem.endsWith(u8, text, "px")) text = text[0 .. text.len - 2];
-    const value = std.fmt.parseFloat(f64, text) catch return error.BadLength;
-    // An infinity or a NaN reaching the rasterizer is a hang or a panic rather
-    // than a wrong picture, which is the same rule the path parser follows.
-    if (!std.math.isFinite(value)) return error.BadLength;
-    return value;
+    return try length.parse(raw, axis, viewport);
 }
 
 /// An element's own `transform`, or the identity when it has none.
@@ -507,21 +648,21 @@ fn readTransform(e: xml.Element) Error!z2d.Transformation {
 /// Every one of them is refused rather than defaulted when it cannot be read.
 /// resvg, and every browser, falls back to the initial value and paints on;
 /// see `color.zig` for why this does not.
-fn readInherited(e: xml.Element) Error!Inherited {
+fn readInherited(e: xml.Element, viewport: length.Viewport) Error!Inherited {
     return .{
         .fill = if (e.attr("fill")) |v| try color.parsePaint(v) else null,
         .fill_opacity = if (e.attr("fill-opacity")) |v| try color.parseOpacity(v) else null,
         .fill_rule = if (e.attr("fill-rule")) |v| try parseFillRule(v) else null,
         .current_color = if (e.attr("color")) |v| try color.parseColor(v) else null,
         .stroke = if (e.attr("stroke")) |v| try color.parsePaint(v) else null,
-        .stroke_width = try optionalLength(e, "stroke-width"),
+        .stroke_width = try optionalLengthOf(e, "stroke-width", .other, viewport),
         .stroke_opacity = if (e.attr("stroke-opacity")) |v| try color.parseOpacity(v) else null,
         .stroke_linecap = if (e.attr("stroke-linecap")) |v| try parseLineCap(v) else null,
         .stroke_linejoin = if (e.attr("stroke-linejoin")) |v| try parseLineJoin(v) else null,
         .stroke_miterlimit = if (e.attr("stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
         // Borrowed rather than parsed: see `Inherited.stroke_dasharray`.
         .stroke_dasharray = e.attr("stroke-dasharray"),
-        .stroke_dashoffset = try optionalLength(e, "stroke-dashoffset"),
+        .stroke_dashoffset = try optionalLengthOf(e, "stroke-dashoffset", .other, viewport),
     };
 }
 
@@ -603,18 +744,14 @@ fn isIgnorable(name: []const u8) bool {
 pub fn read(src: []const u8) Error!Document {
     var reader: xml.Reader = .init(src);
 
-    // The root, for its `viewBox` -- the one thing the iterator has no use for
-    // and so does not collect. The first element of an SVG document is its
-    // `<svg>`; anything else is not one.
+    // The root, for the three things the iterator has no use for: how large
+    // the document says it is, what coordinate system its shapes are in, and
+    // how the one is fitted into the other. The first element of an SVG
+    // document is its `<svg>`; anything else is not one.
     var doc: Document = while (true) switch (try reader.next()) {
         .start_element => |e| {
             if (!xml.nameIs(e.name, "svg")) return error.NotAnSvg;
-            break .{
-                .view_box = try parseViewBox(e.attr("viewBox") orelse return error.BadViewBox),
-                .src = src,
-                .shape_count = 0,
-                .root = try readInherited(e),
-            };
+            break try readRoot(e, src);
         },
         .eof => return error.NotAnSvg,
         else => {},
@@ -626,6 +763,59 @@ pub fn read(src: []const u8) Error!Document {
     if (count == 0) return error.NoPath;
     doc.shape_count = count;
     return doc;
+}
+
+/// The root `<svg>`'s own attributes.
+///
+/// `width` and `height` are read against a viewport that is not known yet,
+/// which is not the circularity it looks like: a percentage there would be of
+/// the *parent* viewport, and a standalone document has none. So a percentage
+/// resolves to zero and the `viewBox` supplies the size instead, which is what
+/// resvg does with the `width="100%" height="100%"` that drawing programs like
+/// to write.
+fn readRoot(e: xml.Element, src: []const u8) Error!Document {
+    const view_box: ?ViewBox = if (e.attr("viewBox")) |raw|
+        try parseViewBox(raw)
+    else
+        null;
+
+    const named_width = if (e.attr("width")) |raw|
+        try length.parse(raw, .x, .unknown)
+    else
+        null;
+    const named_height = if (e.attr("height")) |raw|
+        try length.parse(raw, .y, .unknown)
+    else
+        null;
+
+    // A named size wins, unless it came out as nothing -- which is what a
+    // percentage of an unknown viewport does, and what `width="0"` means as
+    // well. The viewBox is the fallback, and with neither there is nothing to
+    // say how big the picture is.
+    const width = pick(named_width, if (view_box) |vb| vb.width else null) orelse
+        return error.NoSize;
+    const height = pick(named_height, if (view_box) |vb| vb.height else null) orelse
+        return error.NoSize;
+
+    return .{
+        .view_box = view_box,
+        .width = width,
+        .height = height,
+        .preserve_aspect_ratio = if (e.attr("preserveAspectRatio")) |raw|
+            try PreserveAspectRatio.parse(raw)
+        else
+            .meet_centred,
+        .src = src,
+        .shape_count = 0,
+        .root = try readInherited(e, .unknown),
+    };
+}
+
+/// The first of the two that is a usable extent.
+fn pick(named: ?f64, fallback: ?f64) ?f64 {
+    if (named) |v| if (v > 0) return v;
+    if (fallback) |v| if (v > 0) return v;
+    return null;
 }
 
 /// `min-x min-y width height`, separated by whitespace or commas.
@@ -721,8 +911,11 @@ fn collect(gpa: std.mem.Allocator, src: []const u8) ![][]const u8 {
 
 test "a well formed icon reads" {
     const doc = try read(icon);
-    try testing.expectEqual(@as(f64, 0), doc.view_box.min_x);
-    try testing.expectEqual(@as(f64, 24), doc.view_box.width);
+    try testing.expectEqual(@as(f64, 0), doc.view_box.?.min_x);
+    try testing.expectEqual(@as(f64, 24), doc.view_box.?.width);
+    // With no `width` or `height`, the viewBox's extent is the size.
+    try testing.expectEqual(@as(f64, 24), doc.width);
+    try testing.expectEqual(@as(f64, 24), doc.height);
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
 
     var it = doc.paths();
@@ -857,7 +1050,10 @@ test "a viewBox that is not four positive numbers is refused" {
     try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0\"><path d=\"M0 0Z\"/></svg>"));
     try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0 0 0\"><path d=\"M0 0Z\"/></svg>"));
     try testing.expectError(error.BadViewBox, read("<svg viewBox=\"0 0 1 1 1\"><path d=\"M0 0Z\"/></svg>"));
-    try testing.expectError(error.BadViewBox, read("<svg><path d=\"M0 0Z\"/></svg>"));
+    // A document with no `viewBox` at all is not a bad viewBox -- it is a
+    // document whose user units are pixels, and which has to say how large it
+    // is some other way.
+    try testing.expectError(error.NoSize, read("<svg><path d=\"M0 0Z\"/></svg>"));
 }
 
 test "a document with no path is refused" {
@@ -885,6 +1081,121 @@ test "a box of a different shape letterboxes rather than distorting" {
     try testing.expectApproxEqAbs(@as(f64, 1), t.dy, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 12), t.tx, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0), t.ty, 1e-12);
+}
+
+test "preserveAspectRatio is read in all its spellings" {
+    try testing.expectEqual(PreserveAspectRatio{}, try PreserveAspectRatio.parse("xMidYMid meet"));
+    try testing.expectEqual(PreserveAspectRatio{}, try PreserveAspectRatio.parse("xMidYMid"));
+    try testing.expectEqual(
+        PreserveAspectRatio{ .align_x = .min, .align_y = .max, .slice = true },
+        try PreserveAspectRatio.parse("xMinYMax slice"),
+    );
+    try testing.expectEqual(
+        PreserveAspectRatio{ .stretch = true },
+        try PreserveAspectRatio.parse("none"),
+    );
+    // `defer` applies to a `<use>` of an image and means nothing here, so it
+    // is read and dropped rather than refused.
+    try testing.expectEqual(
+        PreserveAspectRatio{ .align_x = .max, .align_y = .min },
+        try PreserveAspectRatio.parse("defer xMaxYMin meet"),
+    );
+    try testing.expectEqual(
+        PreserveAspectRatio{},
+        try PreserveAspectRatio.parse("  xMidYMid   meet  "),
+    );
+}
+
+test "a preserveAspectRatio that is not one is refused" {
+    for ([_][]const u8{
+        "",
+        "bogus",
+        "XMidYMid",
+        "xmidymid",
+        "xMidYMid MEET",
+        "xMidYMid meet slice",
+        "xMidYMi",
+        "xQidYMid",
+        "none meet extra",
+    }) |t| {
+        try testing.expectError(error.BadPreserveAspectRatio, PreserveAspectRatio.parse(t));
+    }
+}
+
+test "a document says how large it is" {
+    // `width` and `height` win.
+    const sized = try read("<svg width=\"64\" height=\"32\" viewBox=\"0 0 16 16\"><path d=\"M0 0Z\"/></svg>");
+    try testing.expectEqual(@as(f64, 64), sized.width);
+    try testing.expectEqual(@as(f64, 32), sized.height);
+    // The viewBox's extent is the fallback.
+    const boxed = try read("<svg viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    try testing.expectEqual(@as(f64, 16), boxed.width);
+    try testing.expectEqual(@as(f64, 8), boxed.height);
+    // A percentage of a viewport that does not exist is not a size, so the
+    // viewBox supplies it -- which is what drawing programs' `100%` needs.
+    const percent = try read("<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    try testing.expectEqual(@as(f64, 16), percent.width);
+    // Units are resolved: 96pt is 128 pixels.
+    const units = try read("<svg width=\"96pt\" height=\"48pt\" viewBox=\"0 0 16 8\"><path d=\"M0 0Z\"/></svg>");
+    try testing.expectApproxEqAbs(@as(f64, 128), units.width, 1e-9);
+    // And with neither there is nothing to go on.
+    try testing.expectError(error.NoSize, read("<svg><path d=\"M0 0Z\"/></svg>"));
+    try testing.expectError(error.NoSize, read("<svg width=\"0\" height=\"0\"><path d=\"M0 0Z\"/></svg>"));
+}
+
+test "a percentage is measured against the viewBox, not the drawn size" {
+    // 50% of a viewBox height of 200 is 100 user units, whatever the document
+    // says it is in pixels.
+    const doc = try read(
+        "<svg width=\"100\" height=\"50\" viewBox=\"0 0 100 200\">" ++
+            "<rect width=\"10\" height=\"50%\"/></svg>",
+    );
+    try testing.expectEqual(@as(f64, 100), doc.viewport().width);
+    try testing.expectEqual(@as(f64, 200), doc.viewport().height);
+    var it = doc.paths();
+    const shape = (try it.next()).?;
+    try testing.expectApproxEqAbs(@as(f64, 100), shape.geometry.rect.height, 1e-9);
+}
+
+test "the fitting algorithm places the viewBox in the box" {
+    // A 10x10 viewBox into an 80x40 box: meet scales by 4, slice by 8.
+    const src = "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"";
+    const tail = "\"><path d=\"M0 0Z\"/></svg>";
+
+    const mid = (try read(src ++ "xMidYMid meet" ++ tail)).transformFor(0, 0, 80, 40);
+    try testing.expectApproxEqAbs(@as(f64, 4), mid.ax, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 4), mid.dy, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 20), mid.tx, 1e-12); // (80 - 40) / 2
+    try testing.expectApproxEqAbs(@as(f64, 0), mid.ty, 1e-12);
+
+    const min = (try read(src ++ "xMinYMin meet" ++ tail)).transformFor(0, 0, 80, 40);
+    try testing.expectApproxEqAbs(@as(f64, 0), min.tx, 1e-12);
+
+    const max = (try read(src ++ "xMaxYMax meet" ++ tail)).transformFor(0, 0, 80, 40);
+    try testing.expectApproxEqAbs(@as(f64, 40), max.tx, 1e-12);
+
+    // Slice takes the larger ratio, so the viewBox overflows and the leftover
+    // is negative -- the same arithmetic saying which part is kept.
+    const slice = (try read(src ++ "xMidYMid slice" ++ tail)).transformFor(0, 0, 80, 40);
+    try testing.expectApproxEqAbs(@as(f64, 8), slice.ax, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), slice.tx, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -20), slice.ty, 1e-12); // (40 - 80) / 2
+
+    // And `none` scales each axis on its own.
+    const stretch = (try read(src ++ "none" ++ tail)).transformFor(0, 0, 80, 40);
+    try testing.expectApproxEqAbs(@as(f64, 8), stretch.ax, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 4), stretch.dy, 1e-12);
+}
+
+test "a document with no viewBox is scaled from its own size" {
+    // Its user units are pixels at the size it claims, so drawing it larger
+    // scales it rather than leaving it 1:1 in the corner.
+    const doc = try read("<svg width=\"48\" height=\"24\"><path d=\"M0 0Z\"/></svg>");
+    try testing.expectEqual(@as(?ViewBox, null), doc.view_box);
+    const t = doc.transformFor(0, 0, 96, 48);
+    try testing.expectApproxEqAbs(@as(f64, 2), t.ax, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 2), t.dy, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0), t.tx, 1e-12);
 }
 
 test "a viewBox with an offset is translated away" {

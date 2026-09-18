@@ -70,6 +70,18 @@ pub const Options = struct {
     /// keep a rasterizer busy for minutes.
     max_nodes: usize = 1 << 20,
 
+    /// Whether to close a subpath the data left open.
+    ///
+    /// SVG fills as though every subpath were closed and z2d refuses to fill
+    /// one that is not, so filling wants this on. **Stroking wants it off**:
+    /// a stroked open subpath is capped at its two ends, and closing it would
+    /// draw a line back to the start that the document never asked for. It is
+    /// the one place where the same `d` has to become two different node sets,
+    /// which is why it is a decision here rather than an invariant.
+    ///
+    /// An explicit `Z` closes either way -- that is the data saying so.
+    close_subpaths: bool = true,
+
     /// Nothing is refused. For a program drawing files it produced itself.
     pub const unlimited: Options = .{ .max_nodes = std.math.maxInt(usize) };
 };
@@ -89,6 +101,7 @@ pub fn build(
     var state: State = .{
         .path = path,
         .alloc = alloc,
+        .close_subpaths = opts.close_subpaths,
         // The budget is what this call may *add*, so a caller appending a
         // second path to the same `z2d.Path` is not refused for the first
         // one's nodes.
@@ -161,6 +174,8 @@ const State = struct {
     /// remaining budget, so that an arc which appends several nodes is caught
     /// by the same check as everything else.
     node_ceiling: usize,
+    /// See `Options.close_subpaths`.
+    close_subpaths: bool,
 
     /// The current point, in user units.
     x: f64 = 0,
@@ -346,12 +361,15 @@ const State = struct {
         self.had_quad = false;
     }
 
-    /// Close a subpath the data left open. SVG fills as though every subpath
-    /// were closed; z2d refuses to fill one that is not.
+    /// Close a subpath the data left open, when the caller wants that.
+    ///
+    /// An explicit `Z` does not come through here; it closes whatever this
+    /// says, because that is the document rather than the caller speaking.
     fn finishSubpath(self: *State) BuildError!void {
         if (!self.open) return;
-        try self.path.close(self.alloc);
         self.open = false;
+        if (!self.close_subpaths) return;
+        try self.path.close(self.alloc);
     }
 };
 

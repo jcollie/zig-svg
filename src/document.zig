@@ -101,6 +101,11 @@ pub const Error = error{
     GroupOpacityUnsupported,
     /// A `fill-rule` that is neither `nonzero` nor `evenodd`.
     BadFillRule,
+    /// A `stroke-linecap`, `stroke-linejoin` or `stroke-miterlimit` this
+    /// reader does not recognise. Like `fill-rule`, these are XML attribute
+    /// values rather than CSS keywords, so they are matched with regard to
+    /// case: `stroke-linecap="ROUND"` is not `round`.
+    BadStrokeStyle,
     /// A length -- a coordinate, a radius, a width -- that is not a number,
     /// or that carries a unit this reader does not implement. Only a bare
     /// number and the `px` that means the same thing are read today; `pt`,
@@ -166,6 +171,19 @@ pub const Inherited = struct {
     /// The `color` property, which is what `fill="currentColor"` resolves to.
     current_color: ?color.Color = null,
 
+    stroke: ?color.Paint = null,
+    stroke_width: ?f64 = null,
+    stroke_opacity: ?f64 = null,
+    stroke_linecap: ?z2d.options.CapMode = null,
+    stroke_linejoin: ?z2d.options.JoinMode = null,
+    stroke_miterlimit: ?f64 = null,
+    /// `stroke-dasharray` as the document wrote it, borrowed from the source
+    /// and read when the shape is drawn. Kept as text because a dash list is
+    /// a list: parsing it here would mean either allocating for it or giving
+    /// every level of the container stack room for one.
+    stroke_dasharray: ?[]const u8 = null,
+    stroke_dashoffset: ?f64 = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -173,6 +191,14 @@ pub const Inherited = struct {
             .fill_opacity = child.fill_opacity orelse self.fill_opacity,
             .fill_rule = child.fill_rule orelse self.fill_rule,
             .current_color = child.current_color orelse self.current_color,
+            .stroke = child.stroke orelse self.stroke,
+            .stroke_width = child.stroke_width orelse self.stroke_width,
+            .stroke_opacity = child.stroke_opacity orelse self.stroke_opacity,
+            .stroke_linecap = child.stroke_linecap orelse self.stroke_linecap,
+            .stroke_linejoin = child.stroke_linejoin orelse self.stroke_linejoin,
+            .stroke_miterlimit = child.stroke_miterlimit orelse self.stroke_miterlimit,
+            .stroke_dasharray = child.stroke_dasharray orelse self.stroke_dasharray,
+            .stroke_dashoffset = child.stroke_dashoffset orelse self.stroke_dashoffset,
         };
     }
 };
@@ -188,9 +214,22 @@ pub const Shape = struct {
     fill_opacity: ?f64,
     /// `fill-rule`, or null for the caller's choice.
     fill_rule: ?z2d.options.FillRule,
-    /// The `color` in force, for a `fill` of `currentColor`. Null means the
-    /// caller's colour.
+    /// The `color` in force, for a `fill` or `stroke` of `currentColor`. Null
+    /// means the caller's colour.
     current_color: ?color.Color,
+    /// The stroke properties in force, after inheritance. A null `stroke`
+    /// means nothing named one, which -- unlike `fill` -- is *no stroke at
+    /// all* rather than the caller's colour: SVG's initial `stroke` is `none`,
+    /// and a shape that is stroked without asking to be is a picture with
+    /// lines in it that the document does not have.
+    stroke: ?color.Paint,
+    stroke_width: ?f64,
+    stroke_opacity: ?f64,
+    stroke_linecap: ?z2d.options.CapMode,
+    stroke_linejoin: ?z2d.options.JoinMode,
+    stroke_miterlimit: ?f64,
+    stroke_dasharray: ?[]const u8,
+    stroke_dashoffset: ?f64,
     /// This element's own `opacity`, which is not inherited. One when the
     /// element does not name it.
     opacity: f64,
@@ -311,6 +350,14 @@ pub const PathIterator = struct {
                         .fill_opacity = effective.fill_opacity,
                         .fill_rule = effective.fill_rule,
                         .current_color = effective.current_color,
+                        .stroke = effective.stroke,
+                        .stroke_width = effective.stroke_width,
+                        .stroke_opacity = effective.stroke_opacity,
+                        .stroke_linecap = effective.stroke_linecap,
+                        .stroke_linejoin = effective.stroke_linejoin,
+                        .stroke_miterlimit = effective.stroke_miterlimit,
+                        .stroke_dasharray = effective.stroke_dasharray,
+                        .stroke_dashoffset = effective.stroke_dashoffset,
                         .opacity = if (e.attr("opacity")) |v|
                             try color.parseOpacity(v)
                         else
@@ -466,7 +513,46 @@ fn readInherited(e: xml.Element) Error!Inherited {
         .fill_opacity = if (e.attr("fill-opacity")) |v| try color.parseOpacity(v) else null,
         .fill_rule = if (e.attr("fill-rule")) |v| try parseFillRule(v) else null,
         .current_color = if (e.attr("color")) |v| try color.parseColor(v) else null,
+        .stroke = if (e.attr("stroke")) |v| try color.parsePaint(v) else null,
+        .stroke_width = try optionalLength(e, "stroke-width"),
+        .stroke_opacity = if (e.attr("stroke-opacity")) |v| try color.parseOpacity(v) else null,
+        .stroke_linecap = if (e.attr("stroke-linecap")) |v| try parseLineCap(v) else null,
+        .stroke_linejoin = if (e.attr("stroke-linejoin")) |v| try parseLineJoin(v) else null,
+        .stroke_miterlimit = if (e.attr("stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
+        // Borrowed rather than parsed: see `Inherited.stroke_dasharray`.
+        .stroke_dasharray = e.attr("stroke-dasharray"),
+        .stroke_dashoffset = try optionalLength(e, "stroke-dashoffset"),
     };
+}
+
+/// `butt`, `round` or `square`, matched with regard to case.
+fn parseLineCap(text: []const u8) Error!z2d.options.CapMode {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.eql(u8, t, "butt")) return .butt;
+    if (std.mem.eql(u8, t, "round")) return .round;
+    if (std.mem.eql(u8, t, "square")) return .square;
+    return error.BadStrokeStyle;
+}
+
+/// `miter`, `round` or `bevel`, matched with regard to case.
+fn parseLineJoin(text: []const u8) Error!z2d.options.JoinMode {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.eql(u8, t, "miter")) return .miter;
+    if (std.mem.eql(u8, t, "round")) return .round;
+    if (std.mem.eql(u8, t, "bevel")) return .bevel;
+    return error.BadStrokeStyle;
+}
+
+/// A `stroke-miterlimit`, which §11.4 says is at least one.
+///
+/// Clamped rather than refused, because resvg clamps: `stroke-miterlimit="0.5"`
+/// draws exactly what `"1"` draws. A number below one asks for a miter shorter
+/// than the join itself, which is not a limit anyone means.
+fn parseMiterLimit(text: []const u8) Error!f64 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    const value = std.fmt.parseFloat(f64, t) catch return error.BadStrokeStyle;
+    if (std.math.isNan(value)) return error.BadStrokeStyle;
+    return @max(1.0, value);
 }
 
 /// `nonzero` or `evenodd`, and nothing else.

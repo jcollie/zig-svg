@@ -103,7 +103,7 @@ pub fn build(
         .path => |d| return path.build(p, alloc, d, opts),
         .rect => |r| return buildRect(p, alloc, r),
         .ellipse => |e| return buildEllipse(p, alloc, e),
-        .line => |l| return buildLine(p, alloc, l),
+        .line => |l| return buildLine(p, alloc, l, opts),
         .poly => |poly| return buildPoly(p, alloc, poly, opts),
     }
 }
@@ -187,11 +187,15 @@ fn buildEllipse(p: *z2d.Path, alloc: std.mem.Allocator, e: Ellipse) BuildError!v
     try p.close(alloc);
 }
 
-/// §9.5's equivalent path for `<line>`, which covers no pixels when filled.
-fn buildLine(p: *z2d.Path, alloc: std.mem.Allocator, l: Line) BuildError!void {
+/// §9.5's equivalent path for `<line>`, which covers no pixels when filled
+/// and is the whole of the picture when stroked.
+fn buildLine(p: *z2d.Path, alloc: std.mem.Allocator, l: Line, opts: path.Options) BuildError!void {
     try p.moveTo(alloc, l.x1, l.y1);
     try p.lineTo(alloc, l.x2, l.y2);
-    try p.close(alloc);
+    // Closed for filling, because z2d refuses to fill an open subpath; left
+    // open for stroking, because a closed line would be drawn up and back
+    // again with a join at each end rather than a cap.
+    if (opts.close_subpaths) try p.close(alloc);
 }
 
 /// §9.6 and §9.7: a run of points, joined and closed.
@@ -238,7 +242,11 @@ fn buildPoly(
         }
         if (p.nodes.items.len > ceiling) return error.PathTooComplex;
     }
-    if (started) try p.close(alloc);
+    // `<polygon>` closes and `<polyline>` does not -- the one place the two
+    // differ, and the reason `Poly.closed` has been carried since they were
+    // added. For filling it makes no difference, since §11.4 fills every
+    // subpath as though it were closed.
+    if (started and (poly.closed or opts.close_subpaths)) try p.close(alloc);
 }
 
 // -- tests -------------------------------------------------------------------

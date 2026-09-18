@@ -24,6 +24,7 @@ const z2d = @import("z2d");
 const color = @import("color.zig");
 const document = @import("document.zig");
 const path = @import("path.zig");
+const transform = @import("transform.zig");
 
 /// How much a caller is willing to spend on a picture somebody else wrote.
 ///
@@ -141,6 +142,16 @@ pub const Options = struct {
     /// `fill-rule` is `nonzero`, and so is this.
     fill_rule: z2d.options.FillRule = .non_zero,
 
+    /// What `stroke="currentColor"` resolves to when nothing named a `color`,
+    /// which is the same colour a fill would use.
+    ///
+    /// There is deliberately no "default stroke": SVG's initial `stroke` is
+    /// `none`, so a shape whose document says nothing about stroking is not
+    /// stroked. Doing otherwise would put lines in a picture that the document
+    /// does not have -- which is the opposite of the `fill` case, where the
+    /// document saying nothing is the *normal* case for an icon.
+    stroke_width: f64 = 1.0,
+
     anti_aliasing_mode: z2d.options.AntiAliasMode = .default,
     tolerance: f64 = z2d.options.default_tolerance,
 
@@ -155,6 +166,8 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     BadSize,
     /// The document has more `<path>` elements than `Limits.max_shapes`.
     TooManyShapes,
+    /// A `stroke-dasharray` naming more than `max_dashes` lengths.
+    TooManyDashes,
 };
 
 /// Where in a surface to draw, in pixels.
@@ -235,33 +248,88 @@ fn drawDocument(
 
     var shapes = doc.paths();
     while (try shapes.next()) |shape| {
-        const paint = resolve(shape, opts) orelse continue;
+        const ctm = view_box.mul(shape.transform);
+        const fill_paint = resolveFill(shape, opts);
+        const stroke = try resolveStroke(shape, opts);
 
-        var p: z2d.Path = .empty;
-        defer p.deinit(gpa);
+        // §11.3: fill first, then stroke over it, per element.
+        if (fill_paint) |paint| {
+            var p: z2d.Path = .empty;
+            defer p.deinit(gpa);
 
-        // The viewBox mapping outside, the shape's own `transform` chain
-        // inside, so that a `transform` is in user units like the path data
-        // it applies to.
-        try document.buildShape(
-            &p,
-            gpa,
-            shape.geometry,
-            view_box.mul(shape.transform),
-            .{ .max_nodes = nodes_left },
-        );
-        nodes_left -= p.nodes.items.len;
+            // The viewBox mapping outside, the shape's own `transform` chain
+            // inside, so that a `transform` is in user units like the path
+            // data it applies to.
+            try document.buildShape(&p, gpa, shape.geometry, ctm, .{
+                .max_nodes = nodes_left,
+            });
+            nodes_left -= p.nodes.items.len;
 
-        // An empty `d` is a shape that draws nothing, which is not an error;
-        // `painter.fill` would take it too, but this says so on purpose.
-        if (p.nodes.items.len == 0) continue;
+            // A shape with no geometry draws nothing, which is not an error;
+            // `painter.fill` would take it too, but this says so on purpose.
+            if (p.nodes.items.len != 0) {
+                const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = paint } };
+                try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
+                    .fill_rule = shape.fill_rule orelse opts.fill_rule,
+                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .tolerance = opts.tolerance,
+                });
+            }
+        }
 
-        const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = paint } };
-        try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-            .fill_rule = shape.fill_rule orelse opts.fill_rule,
-            .anti_aliasing_mode = opts.anti_aliasing_mode,
-            .tolerance = opts.tolerance,
-        });
+        if (stroke) |*s| {
+            // Built a second time, because the subpaths have to be left as
+            // the document wrote them: a stroked open subpath is capped at its
+            // ends rather than joined back to its start.
+            //
+            // The points are transformed exactly as the fill's are. z2d takes
+            // the matrix *as well*, and uses it only to shape the pen -- which
+            // is Cairo's model, and is what makes the pen warp under a
+            // non-uniform scale as SVG says it must. Passing untransformed
+            // points and relying on the matrix to place them draws the whole
+            // document in the top-left corner at user-space coordinates.
+            var p: z2d.Path = .empty;
+            defer p.deinit(gpa);
+
+            try document.buildShape(&p, gpa, shape.geometry, ctm, .{
+                .max_nodes = nodes_left,
+                .close_subpaths = false,
+            });
+            nodes_left -= p.nodes.items.len;
+
+            if (p.nodes.items.len != 0) {
+                // Where the matrix is a similarity, the pen is scaled here and
+                // z2d is handed the identity; where it is not, z2d is handed
+                // the matrix and shapes the pen itself. `uniformScale` says
+                // why the two are not interchangeable in practice even though
+                // they are in geometry.
+                var pen = s.*;
+                var pen_ctm: z2d.Transformation = ctm;
+                if (uniformScale(ctm)) |factor| {
+                    pen.scaleBy(factor);
+                    pen_ctm = .identity;
+                }
+
+                const source: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = pen.paint } };
+                z2d.painter.stroke(gpa, surface, &source, p.nodes.items, .{
+                    .line_width = pen.width,
+                    .line_cap_mode = pen.cap,
+                    .line_join_mode = pen.join,
+                    .miter_limit = pen.miter_limit,
+                    .dashes = pen.dashes(),
+                    .dash_offset = pen.dash_offset,
+                    .transformation = pen_ctm,
+                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .tolerance = opts.tolerance,
+                }) catch |err| switch (err) {
+                    // A `transform` that collapses the plane -- `scale(0)` --
+                    // has nothing to stroke through. Filling it draws nothing
+                    // and stroking it should too, rather than failing.
+                    error.InvalidMatrix => {},
+                    else => |e| return e,
+                };
+            }
+        }
     }
 }
 
@@ -273,7 +341,7 @@ fn drawDocument(
 /// compositing the shape as its own layer would produce -- which is why
 /// `opacity` on a `<path>` is implemented and `opacity` on the root `<svg>`,
 /// where shapes could overlap, is refused by the reader instead.
-fn resolve(shape: document.Shape, opts: Options) ?z2d.Pixel {
+fn resolveFill(shape: document.Shape, opts: Options) ?z2d.Pixel {
     const alpha = (shape.fill_opacity orelse 1.0) * shape.opacity;
     if (alpha <= 0) return null;
 
@@ -301,6 +369,161 @@ fn fadeColor(c: color.Color, alpha: f64) ?z2d.Pixel {
         @as(f64, @floatFromInt(c.b)) / 255.0,
         a,
     ) };
+}
+
+/// The most dashes a `stroke-dasharray` may name.
+///
+/// The list is read into the caller's frame rather than allocated, so it needs
+/// a ceiling; and a dash pattern with more than this many phases in it is a
+/// pattern nobody can see. A longer list is refused rather than truncated,
+/// because truncating one would change where every dash after it falls.
+pub const max_dashes = 64;
+
+/// Everything `z2d.painter.stroke` needs, resolved from a shape.
+///
+/// The dash lengths are held as an array and a count rather than as a slice,
+/// and `dashes()` makes the slice from whichever copy you are holding. A
+/// `dashes: []const f64` field pointing into a `storage` field beside it would
+/// be a slice into *this* struct -- and this struct is returned by value, so
+/// every copy's slice would point at the dead frame of the function that built
+/// it. It would read the right numbers for a while, too.
+const Stroke = struct {
+    paint: z2d.Pixel,
+    width: f64,
+    cap: z2d.options.CapMode,
+    join: z2d.options.JoinMode,
+    miter_limit: f64,
+    dash_offset: f64,
+    dash_count: usize = 0,
+    dash_storage: [max_dashes]f64 = undefined,
+
+    fn dashes(self: *const Stroke) []const f64 {
+        return self.dash_storage[0..self.dash_count];
+    }
+
+    /// Rescales the pen for stroking in device space. See `uniformScale`.
+    fn scaleBy(self: *Stroke, s: f64) void {
+        self.width *= s;
+        self.dash_offset *= s;
+        for (self.dash_storage[0..self.dash_count]) |*d| d.* *= s;
+    }
+};
+
+/// The scale factor of `t` if it is a similarity, and null otherwise.
+///
+/// A similarity -- a uniform scale, with any rotation and translation -- maps
+/// a circle to a circle, so a round pen of radius `r` under it is exactly a
+/// round pen of radius `r * s`. That makes two ways of stroking *equivalent*
+/// rather than merely close, and the choice between them matters for a reason
+/// that has nothing to do with geometry:
+///
+/// z2d reverts `line_cap_mode`, `line_join_mode` and `miter_limit` to their
+/// defaults whenever `line_width` is below 2, to keep thin lines from showing
+/// artifacts. Handing it the *user-space* width means a `stroke-width="1"` --
+/// the initial value, so much the commonest one -- silently loses its round
+/// caps however large the picture is drawn. Handing it the device-space width
+/// instead, which for any ordinary viewBox mapping is several pixels, keeps
+/// them.
+///
+/// So where the matrix is a similarity this strokes in device space, and
+/// everywhere else it hands z2d the matrix and accepts that a thin stroke
+/// under a genuinely warped transform may lose its caps. The alternative is a
+/// round pen where the specification asks for an elliptical one, which is
+/// wrong in a way that does not announce itself.
+///
+/// The columns of the linear part have to be the same length and at right
+/// angles, which is the definition, tested proportionally so that it holds for
+/// a matrix scaled by a millionth as well as by a million.
+fn uniformScale(t: z2d.Transformation) ?f64 {
+    const len_x = @sqrt(t.ax * t.ax + t.cx * t.cx);
+    const len_y = @sqrt(t.by * t.by + t.dy * t.dy);
+    if (!(len_x > 0) or !(len_y > 0)) return null;
+
+    const tolerance = 1e-9;
+    if (@abs(len_x - len_y) > tolerance * @max(len_x, len_y)) return null;
+    const dot = t.ax * t.by + t.cx * t.dy;
+    if (@abs(dot) > tolerance * len_x * len_y) return null;
+    return len_x;
+}
+
+/// How to stroke one shape, or null when it is not stroked.
+///
+/// SVG's initial `stroke` is `none`, so a shape whose document says nothing
+/// about stroking is not stroked. That is the opposite of `fill`, where saying
+/// nothing means the caller's colour -- and deliberately so: an icon with no
+/// `fill` is the normal case, while a shape stroked without asking would put
+/// lines in a picture the document does not have.
+fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
+    const paint = shape.stroke orelse return null;
+
+    // §11.4: a width of zero, or less, disables the stroke.
+    const width = shape.stroke_width orelse opts.stroke_width;
+    if (!(width > 0)) return null;
+
+    const alpha = (shape.stroke_opacity orelse 1.0) * shape.opacity;
+    const named: ?color.Color = switch (paint) {
+        .none => return null,
+        .color => |c| c,
+        .current => shape.current_color,
+    };
+    const pixel = (if (named) |c| fadeColor(c, alpha) else fadePixel(opts.fill, alpha)) orelse
+        return null;
+
+    var result: Stroke = .{
+        .paint = pixel,
+        .width = width,
+        .cap = shape.stroke_linecap orelse .butt,
+        .join = shape.stroke_linejoin orelse .miter,
+        // SVG's initial `stroke-miterlimit` is **4**. z2d's is 10, which would
+        // miter every corner sharper than about 11 degrees that should have
+        // been bevelled -- a difference that shows on any spike and on nothing
+        // else, so it is exactly the kind of wrong nobody notices. resvg was
+        // asked, and it is 4.
+        .miter_limit = shape.stroke_miterlimit orelse 4.0,
+        .dash_offset = shape.stroke_dashoffset orelse 0,
+    };
+    if (shape.stroke_dasharray) |raw| {
+        result.dash_count = try readDashes(raw, &result.dash_storage);
+    }
+    return result;
+}
+
+/// Reads a `stroke-dasharray` into `out`, and says how much of it was used.
+///
+/// §11.4, and what resvg actually does, which is not quite the same: reading
+/// stops at the first value that is not a length and the lengths before it are
+/// used, the way a `points` list truncates. A list that is empty, says `none`,
+/// is all zeroes, or holds a negative number is not a dash pattern at all and
+/// leaves the stroke solid -- the negative case because §11.4 calls it an
+/// error, and an erroneous value falls back to the initial one.
+///
+/// An odd count is repeated, so `4` dashes four on and four off. That is the
+/// specification rather than a convenience, and z2d does not do it for us.
+fn readDashes(raw: []const u8, out: *[max_dashes]f64) Error!usize {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "none")) return 0;
+
+    var s: path.Scanner = .{ .src = trimmed };
+    var n: usize = 0;
+    var total: f64 = 0;
+    while (true) {
+        s.skipWsAndCommas();
+        if (s.done()) break;
+        const v = s.number() catch break;
+        if (v < 0) return 0; // §11.4: an error, so the initial value stands
+        // Doubling below needs room for two of everything.
+        if (n >= max_dashes / 2) return error.TooManyDashes;
+        out[n] = v;
+        n += 1;
+        total += v;
+    }
+    if (n == 0 or total <= 0) return 0;
+
+    if (n % 2 == 1) {
+        @memcpy(out[n..][0..n], out[0..n]);
+        n *= 2;
+    }
+    return n;
 }
 
 /// The caller's own pixel, faded by `alpha`.
@@ -828,6 +1051,143 @@ test "a transform that overflows to infinity is refused" {
             "<path d=\"M0 0H8V8H0Z\" transform=\"scale(1e300)\"/></g></svg>",
         .{},
     ));
+}
+
+test "a similarity transform is recognised, and a warped one is not" {
+    try testing.expect(uniformScale(.identity).? == 1.0);
+    try testing.expectApproxEqAbs(@as(f64, 3), uniformScale(try transform.parse("scale(3)")).?, 1e-12);
+    // Rotation and translation do not change the scale.
+    try testing.expectApproxEqAbs(
+        @as(f64, 2),
+        uniformScale(try transform.parse("translate(5,7) rotate(37) scale(2)")).?,
+        1e-9,
+    );
+    // A reflection is still a similarity: it maps a circle to a circle.
+    try testing.expectApproxEqAbs(@as(f64, 2), uniformScale(try transform.parse("scale(2,-2)")).?, 1e-12);
+    // These are not.
+    try testing.expectEqual(@as(?f64, null), uniformScale(try transform.parse("scale(3,1)")));
+    try testing.expectEqual(@as(?f64, null), uniformScale(try transform.parse("skewX(20)")));
+    try testing.expectEqual(@as(?f64, null), uniformScale(try transform.parse("scale(0)")));
+}
+
+fn dashesOf(raw: []const u8) ![]const f64 {
+    const S = struct {
+        var storage: [max_dashes]f64 = undefined;
+    };
+    const n = try readDashes(raw, &S.storage);
+    return S.storage[0..n];
+}
+
+test "a dash array is read, and an odd one is repeated" {
+    try testing.expectEqualSlices(f64, &.{ 4, 2 }, try dashesOf("4 2"));
+    try testing.expectEqualSlices(f64, &.{ 4, 2 }, try dashesOf("4,2"));
+    // §11.4: an odd count is repeated, so `4` is four on and four off.
+    try testing.expectEqualSlices(f64, &.{ 4, 4 }, try dashesOf("4"));
+    try testing.expectEqualSlices(f64, &.{ 4, 2, 1, 4, 2, 1 }, try dashesOf("4,2,1"));
+}
+
+test "a dash array that is not one leaves the stroke solid" {
+    for ([_][]const u8{ "", "   ", "none", "0", "0 0", "0,0,0", "-4 2", "abc" }) |raw| {
+        try testing.expectEqual(@as(usize, 0), (try dashesOf(raw)).len);
+    }
+}
+
+test "a dash array stops at the first value that is not a length" {
+    // The same leniency a `points` list gets, and for the same reason: resvg
+    // and every browser draw the dashes they managed to read.
+    try testing.expectEqualSlices(f64, &.{ 4, 2 }, try dashesOf("4 2 bogus"));
+}
+
+test "a dash array longer than the ceiling is refused" {
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(testing.allocator);
+    for (0..max_dashes) |_| try long.appendSlice(testing.allocator, "1 ");
+    var storage: [max_dashes]f64 = undefined;
+    try testing.expectError(error.TooManyDashes, readDashes(long.items, &storage));
+}
+
+test "a shape with no stroke named is not stroked" {
+    const gpa = testing.allocator;
+    // SVG's initial `stroke` is `none`, so unlike `fill` the caller's colour
+    // is *not* the default here -- a shape stroked without asking would put
+    // lines in a picture the document does not have.
+    var surface = try render(gpa, square(""), .{ .width = 20, .height = 20 });
+    defer surface.deinit(gpa);
+    const shape = try document.read(square(""));
+    var it = shape.paths();
+    const only = (try it.next()).?;
+    try testing.expectEqual(@as(?color.Paint, null), only.stroke);
+    try testing.expectEqual(@as(?Stroke, null), try resolveStroke(only, .{}));
+}
+
+test "a stroke of zero or negative width is not drawn" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" stroke-width=\"0\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" stroke-width=\"-3\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"none\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" stroke-opacity=\"0\"/></svg>",
+    }) |src| {
+        var surface = try render(gpa, src, .{ .width = 16, .height = 16 });
+        defer surface.deinit(gpa);
+        for (0..16) |y| for (0..16) |x| {
+            try testing.expectEqual(
+                @as(u8, 0),
+                surface.getPixel(@intCast(x), @intCast(y)).?.rgba.a,
+            );
+        };
+    }
+}
+
+test "a stroked line finally draws something" {
+    const gpa = testing.allocator;
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" stroke-width=\"2\"/></svg>",
+        .{ .width = 16, .height = 16 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(8, 8).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), surface.getPixel(8, 1).?.rgba.a);
+}
+
+test "fill is painted first and the stroke over it" {
+    const gpa = testing.allocator;
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 16 16\"><rect x=\"4\" y=\"4\" width=\"8\" height=\"8\" " ++
+            "fill=\"blue\" stroke=\"red\" stroke-width=\"4\"/></svg>",
+        .{ .width = 16, .height = 16 },
+    );
+    defer surface.deinit(gpa);
+    const middle = z2d.pixel.RGBA.fromPixel(surface.getPixel(8, 8).?).demultiply();
+    const edge = z2d.pixel.RGBA.fromPixel(surface.getPixel(4, 8).?).demultiply();
+    try testing.expectEqual(@as(u8, 255), middle.b);
+    try testing.expectEqual(@as(u8, 255), edge.r);
+}
+
+test "a stroke style this reader does not know is refused" {
+    const gpa = testing.allocator;
+    const line = "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" ";
+    try testing.expectError(error.BadStrokeStyle, render(
+        gpa,
+        line ++ "stroke-linecap=\"ROUND\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.BadStrokeStyle, render(
+        gpa,
+        line ++ "stroke-linejoin=\"bogus\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.BadStrokeStyle, render(
+        gpa,
+        line ++ "stroke-miterlimit=\"wide\"/></svg>",
+        .{},
+    ));
+    // A miter limit below one is clamped rather than refused, which is what
+    // resvg does: `0.5` draws exactly what `1` draws.
+    var surface = try render(gpa, line ++ "stroke-miterlimit=\"0.5\"/></svg>", .{});
+    defer surface.deinit(gpa);
 }
 
 test "a path past the node limit is refused" {

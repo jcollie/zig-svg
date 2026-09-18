@@ -82,6 +82,21 @@ pub const Target = struct {
     /// character the grammar defines* reaches a different branch; mutating it
     /// into noise mostly reaches the same refusal again.
     interesting: []const u8 = path_interesting,
+    /// Whether `--alloc-fail` may run this target.
+    ///
+    /// Off for the one target that can reach z2d's stroke plotter, which
+    /// **leaks** when an allocation fails part way through it:
+    /// `internal/tess/Polygon.zig`'s `plot` does `alloc.create(Corner)` and
+    /// the partially built corner list is not released when a later allocation
+    /// in the same plot fails. The trace runs entirely through z2d, so there
+    /// is nothing this library can do about it but say so.
+    ///
+    /// The mode is for *this* library's error paths, and the other four
+    /// targets still exercise them -- `path-fill` covers the fill side of the
+    /// same rasterizer. Turn this back on for `render` when z2d is fixed; the
+    /// leak is easy to see again with
+    /// `zig build fuzz-run -- --alloc-fail --target render`.
+    alloc_fail: bool = true,
 };
 
 /// The path data grammar's own alphabet: every command letter in both
@@ -95,7 +110,8 @@ pub const path_interesting = "MmLlHhVvCcSsQqTtAaZz0123456789.-+, eE";
 pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;" ++
     "fill-opacityrulenonzeevdcurColor#%()," ++
     "transformatrixlscewXYkyop" ++
-    "rectcirclepsoygnlinwdthxy12points";
+    "rectcirclepsoygnlinwdthxy12points" ++
+    "strokewidthcapjonmielmtdasharyofst";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -113,6 +129,9 @@ pub const all = [_]Target{
         .corpus = &document_corpus,
         .content_max = 4096,
         .interesting = xml_interesting,
+        // See `Target.alloc_fail`: z2d's stroke plotter leaks under a failed
+        // allocation, and this is the only target that reaches it.
+        .alloc_fail = false,
     },
     .{ .name = "arc", .run = arcTarget, .corpus = &.{}, .content_max = 64 },
 };
@@ -215,6 +234,19 @@ fn documentTarget(input: []const u8) anyerror!void {
             try testing.expect(@intFromPtr(b.ptr) >= @intFromPtr(src.ptr));
             try testing.expect(@intFromPtr(b.ptr) + b.len <= @intFromPtr(src.ptr) + src.len);
         };
+        if (shape.stroke_width) |w| try expectUsable(w);
+        if (shape.stroke_opacity) |o| try testing.expect(o >= 0.0 and o <= 1.0);
+        if (shape.stroke_miterlimit) |m| {
+            try expectUsable(m);
+            // §11.4 says at least one, and `parseMiterLimit` clamps to it.
+            try testing.expect(m >= 1.0);
+        }
+        if (shape.stroke_dashoffset) |o| try expectUsable(o);
+        if (shape.stroke_dasharray) |raw| if (raw.len != 0) {
+            try testing.expect(@intFromPtr(raw.ptr) >= @intFromPtr(src.ptr));
+            try testing.expect(@intFromPtr(raw.ptr) + raw.len <= @intFromPtr(src.ptr) + src.len);
+        };
+
         // And every number a shape carries is one the rasterizer can use.
         switch (shape.geometry) {
             .rect => |r| {
@@ -503,6 +535,28 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 24 24\"><circle cx=\"8\" cy=\"8\" r=\"50%\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><rect width=\"abc\" height=\"8\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><rect width=\"1e400\" height=\"8\"/></svg>",
+    // Strokes, which is the other half of painting a shape.
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"2\" x2=\"22\" y2=\"22\" stroke=\"red\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"2\" x2=\"22\" y2=\"22\" stroke=\"red\" stroke-width=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"8\" height=\"8\" fill=\"gold\" stroke=\"navy\" stroke-width=\"2\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" stroke=\"red\" stroke-width=\"2\"><g stroke-width=\"4\"><line x1=\"2\" y1=\"2\" x2=\"22\" y2=\"2\"/></g></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polyline points=\"2,2 12,2 12,12\" fill=\"none\" stroke=\"red\" stroke-width=\"2\" stroke-linejoin=\"round\" stroke-linecap=\"square\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><polyline points=\"2,22 12,2 22,22\" fill=\"none\" stroke=\"red\" stroke-width=\"2\" stroke-miterlimit=\"1\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"red\" stroke-width=\"2\" stroke-dasharray=\"4 2\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"red\" stroke-width=\"2\" stroke-dasharray=\"4\" stroke-dashoffset=\"2\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"red\" stroke-dasharray=\"-4 2\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"red\" stroke-dasharray=\"0 0\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"red\" stroke-dasharray=\"none\"/></svg>",
+    // A stroke under a transform, which takes a different route through the
+    // rasterizer depending on whether the matrix is a similarity.
+    "<svg viewBox=\"0 0 24 24\"><g transform=\"scale(2)\"><line x1=\"1\" y1=\"1\" x2=\"9\" y2=\"9\" stroke=\"red\"/></g></svg>",
+    "<svg viewBox=\"0 0 24 24\"><g transform=\"scale(3,1)\"><line x1=\"1\" y1=\"1\" x2=\"7\" y2=\"9\" stroke=\"red\" stroke-width=\"2\"/></g></svg>",
+    "<svg viewBox=\"0 0 24 24\"><g transform=\"skewX(20)\"><line x1=\"1\" y1=\"1\" x2=\"7\" y2=\"9\" stroke=\"red\" stroke-width=\"2\"/></g></svg>",
+    "<svg viewBox=\"0 0 24 24\"><g transform=\"scale(0)\"><line x1=\"1\" y1=\"1\" x2=\"7\" y2=\"9\" stroke=\"red\" stroke-width=\"2\"/></g></svg>",
+    // Stroke styles that have to be refused.
+    "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-linecap=\"ROUND\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-linejoin=\"bogus\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\"><line stroke=\"red\" stroke-miterlimit=\"wide\"/></svg>",
     // Elements that are still refused.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",

@@ -210,6 +210,13 @@ pub fn main(init: std.process.Init) !void {
     var failures: usize = 0;
     for (targets.all) |target| {
         if (only) |name| if (!std.mem.eql(u8, name, target.name)) continue;
+        // A target that opts out of `--alloc-fail` is still run, just without
+        // allocations being failed -- skipping it outright would quietly stop
+        // fuzzing it at all in that mode. `Target.alloc_fail` says why any
+        // target would.
+        if (alloc_fail and !target.alloc_fail and only == null) {
+            std.debug.print("{s}: allocations not failed (see Target.alloc_fail)\n", .{target.name});
+        }
 
         var runs: u64 = 0;
         const deadline = nowMs(io) + @as(i64, seconds) * 1000;
@@ -218,7 +225,7 @@ pub fn main(init: std.process.Init) !void {
             watch.input = buffer.items;
             watch.target = target.name;
             watch.started_ms.store(nowMs(io), .release);
-            const result = if (alloc_fail)
+            const result = if (alloc_fail and target.alloc_fail)
                 runWithFailingAllocations(checked.allocator(), target, buffer.items)
             else
                 target.run(buffer.items);

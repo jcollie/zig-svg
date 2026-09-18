@@ -31,11 +31,12 @@ try svg.draw(gpa, &surface, source, .{ .x = 0, .y = 0, .width = 72, .height = 56
 
 A zero or negative width, height or radius draws nothing and is not an error —
 `<rect/>` and `<circle r="-2"/>` are both simply empty, which is what resvg
-does. **`<line>` never draws anything**, because a line encloses no area and
-this library fills without stroking; it is implemented rather than refused
-because that is the honest answer, and because stroking is the next feature.
-The same caveat applies to a `<path stroke="…" fill="none">`: the `stroke` is
-ignored today, so such a document renders blank. See item 2 below.
+does. A `stroke-width` of zero or less disables the stroke the same way.
+
+`fill` and `stroke` default differently, and deliberately. A shape naming no
+`fill` gets the caller's colour; a shape naming no `stroke` is **not stroked**,
+because SVG's initial `stroke` is `none` and a shape stroked without asking
+would put lines in a picture the document does not have.
 
 Groups nest, and carry both presentation attributes and a transform:
 
@@ -71,8 +72,8 @@ seeds it. Any of the three is the whole project.
 ## What it draws
 
 One `<svg>` carrying a `viewBox`, and any number of shapes inside it — `<path>`
-and the five basic shapes — each with its own colour and transform, painted in
-document order. That is every one of the 7,447
+and the five basic shapes — each filled and stroked in its own colours, under
+its own transform, painted in document order. That is every one of the 7,447
 [Material Design Icons](https://pictogrammers.com/library/mdi/), most other
 icon sets, a good deal of hand-written and exported SVG, and still a long way
 short of the specification.
@@ -84,18 +85,21 @@ short of the specification.
 | Several shapes | yes, painted in document order |
 | `<rect>` | yes, including `rx`/`ry` rounded corners |
 | `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>` | yes |
-| `<line>` | read, and draws nothing — a line has no area to fill |
+| `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
 | `transform` | all six functions, on `<svg>`, `<g>` and any shape |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape |
+| `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
+| `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
+| `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
 | `viewBox` and `preserveAspectRatio` | the viewBox; aspect ratio always `xMidYMid meet` |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
 | Lengths | a bare number, or `px`, which is the same thing |
 | Nesting depth | `<g>` up to `document.max_container_depth` (64), then refused |
 | `pt`, `mm`, `em`, `%` lengths | **no** — refused, not guessed at |
-| `style`, gradients, strokes, text, `<use>`, CSS | **no** |
+| `style`, gradients, text, `<use>`, CSS | **no** |
 | `opacity` on `<svg>` or `<g>` | **no** — refused; it needs a composited layer |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
@@ -137,6 +141,35 @@ answer for a document that means the second — `tests/oracle/multi-overlapping-
 is that document, and resvg agrees.
 
 See [Features to come](#features-to-come) for what is next.
+
+Strokes are painted after the fill, per shape, and warp correctly under a
+transform:
+
+```xml
+<svg viewBox="0 0 32 32">
+  <rect x="4" y="4" width="10" height="10" fill="gold" stroke="crimson" stroke-width="3"/>
+  <polyline points="4,28 14,18 24,28" fill="none" stroke="indigo"
+            stroke-width="2" stroke-linejoin="round" stroke-dasharray="4 2"/>
+</svg>
+```
+
+A stroke is drawn twice over in a sense the code makes precise. The path is
+built a second time with its subpaths left **open**, because a stroked open
+subpath is capped at its ends rather than joined back to its start — that is
+the one place the same `d` has to become two different node sets, and it is why
+`path.Options.close_subpaths` is a decision rather than an invariant.
+
+And the pen is scaled here rather than by z2d wherever the transform is a
+*similarity* — a uniform scale with any rotation and translation. Such a matrix
+maps a circle to a circle, so the two are equivalent in geometry; what is not
+equivalent is that z2d silently reverts the cap, join and miter limit to their
+defaults whenever `line_width` is below 2. Handing it the user-space width
+means `stroke-width="1"` — the initial value, so much the commonest one — loses
+its round caps however large the picture is drawn. Handing it the device-space
+width keeps them. Under a genuinely warped transform there is no equivalent
+scalar, so the matrix goes to z2d and a thin stroke there may lose its caps;
+the alternative would be a round pen where the specification asks for an
+elliptical one, which is wrong in a way that does not announce itself.
 
 ## Limits
 
@@ -256,6 +289,18 @@ $ zig build fuzz-run -- --target render --seed 12345
 $ zig build fuzz-run -- --alloc-fail --seconds 60
 ```
 
+`--alloc-fail` runs each input repeatedly with a different allocation failing
+each time, which is the only way to reach the `errdefer` on the way out of a
+path that never otherwise unwinds. It is **off for the `render` target**, and
+for a reason worth stating rather than burying: z2d leaks when an allocation
+fails part way through its stroke plotter —
+`internal/tess/Polygon.zig`'s `plot` creates a `Corner` and the corners already
+linked are not released when a later allocation in the same plot fails. The
+trace runs entirely through z2d, so there is nothing this library can do about
+it but say so. The other four targets still fail allocations, and `path-fill`
+covers the fill side of the same rasterizer. `Target.alloc_fail` in
+`tests/fuzz.zig` is the flag to turn back on when z2d is fixed.
+
 ## Looking at a picture
 
 ```console
@@ -269,36 +314,27 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
-`stroke-miterlimit`, `stroke-dasharray`. Now the largest gap by some way: a
-stroke-only document renders blank today, and `<line>` and `<polyline>` exist
-mostly to be stroked. z2d has `painter.stroke` with all of it, so much of this
-is plumbing — but a stroked open subpath must *not* be closed, which is the
-opposite of what filling needs, so the "close every subpath" rule has to become
-a decision rather than an invariant, and `Poly.closed` is already carried for
-exactly that.
-
-**2. Lengths with units, and `width`/`height`/`preserveAspectRatio` on `<svg>`.**
+**1. Lengths with units, and `width`/`height`/`preserveAspectRatio` on `<svg>`.**
 `document.optionalLength` reads a bare number and `px` and refuses everything
 else; `pt` and `mm` are a fixed ratio away, but `em` needs a font size and `%`
 needs a viewport to be a percentage of — which is the same thing the document's
 own `width` and `height` supply. So the two arrive together, and with them
 `preserveAspectRatio` instead of a hardcoded `xMidYMid meet`.
 
-**3. Entity references in attribute values.** The XML reader hands back raw
+**2. Entity references in attribute values.** The XML reader hands back raw
 attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
 entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
 is a parse error rather than a `Z`.
 
-**4. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+**3. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
 a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
 the classic denial of service.
 
-**5. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+**4. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
 `gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
 systems.
 
-**6. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**5. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -307,7 +343,7 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**7. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
+**6. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
 out a font, but choosing one from a family name means a font database, which is
 a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and

@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+# SPDX-License-Identifier: MIT
+
+# Runs the tests on every push and publishes the API documentation to
+# https://jeff.jcollie.page/zig-svg/ when the push was to main.
+#
+# Everything goes through `nix develop`, so the toolchain is the one in
+# flake.nix rather than whatever the runner happens to carry, and the two Zig
+# cache directories point at persistent storage on the runner so that a rebuild
+# does not start from nothing every time.
+
+name: test
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  ZIG_LOCAL_CACHE_DIR: /zig/local-cache
+  ZIG_GLOBAL_CACHE_DIR: /zig/global-cache
+
+jobs:
+  test:
+    runs-on: nixos-do-s
+    steps:
+      - name: Check out
+        # Pinned to a commit rather than a tag, in the format pinact writes, so
+        # that what runs here cannot change under a moved tag.
+        uses: https://code.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check formatting
+        # zig-pkg is where fetched dependencies land when the Zig cache is
+        # inside the tree, and none of it is ours to format.
+        run: nix develop .#default -c zig fmt --check . --exclude zig-pkg
+
+      - name: Check REUSE compliance
+        run: nix develop .#default -c reuse lint
+
+      - name: Run tests
+        # The unit tests and the fuzz targets against their corpus. The
+        # sandbox's tests fork and install a seccomp filter, which is why this
+        # is a job on a runner that can do that rather than anything more
+        # exotic.
+        run: nix develop .#default -c zig build test --summary all
+
+      - name: Check the renderer against resvg
+        # The one claim a Zig test cannot make: those check this parser against
+        # this rasterizer, which would agree with a mistake they shared. resvg
+        # is an independent implementation of the same specification, so it
+        # disagrees exactly where the specification was misread.
+        run: |
+          nix develop .#default -c zig build oracle
+          nix develop .#default -c python3 tools/check_oracle.py tests/oracle zig-out/oracle
+
+      - name: Compile the tools that are not run here
+        # The fuzz driver and the documentation server are part of this project
+        # and share its modules; without this they could stop compiling and
+        # `zig build test` would not notice.
+        run: nix develop .#default -c zig build check
+
+      - name: Fuzz for a minute a target
+        # Not a substitute for a long run by hand, and not nothing either: a
+        # minute of mutation against the corpus is enough to catch a parser
+        # that has started reading past the end of its input. `--seed` is left
+        # to the clock on purpose, so that each run is a different minute.
+        run: nix develop .#default -c zig build fuzz-run -- --seconds 60
+
+      - name: Fuzz with allocations failing
+        # A different kind of failure, and one the step above cannot reach:
+        # each input is run repeatedly with a different allocation failing each
+        # time, which exercises the error paths. Every `try` on an allocation
+        # is a branch that unwinds and every `errdefer` on the way out is a
+        # line that otherwise never runs, so a leak there is invisible to
+        # ordinary fuzzing -- allocation never fails, so the path is never
+        # taken.
+        run: nix develop .#default -c zig build fuzz-run -- --alloc-fail --seconds 30
+
+  nix:
+    runs-on: nixos-do-s
+    steps:
+      - name: Check out
+        uses: https://code.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the package
+        # The other way of building this, which fetches its dependencies with
+        # Nix rather than with Zig and so goes wrong in its own ways.
+        run: nix build .#zig-svg
+
+  docs:
+    needs: test
+    if: ${{ forge.ref == 'refs/heads/main' }}
+    runs-on: nixos-do-s
+    steps:
+      - name: Check out
+        uses: https://code.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build API docs
+        # `--system` hands Zig the dependency set Nix realised, and forbids
+        # fetching outright, so a dependency missing from it is a build error
+        # naming the package rather than a silent reach for the network. The
+        # `zig-deps` output exists for this job: it is the same `linkFarm` the
+        # package build uses, without building the package to get at it.
+        run: >
+          nix develop .#default -c zig build docs
+          --system "$(nix build --print-out-paths .#zig-deps)"
+
+      - name: Publish docs
+        run: >
+          nix develop .#default -c git-pages-cli https://jeff.jcollie.page/zig-svg/
+          --server jcollie.page
+          --token ${{ forge.token }}
+          --upload-dir zig-out/docs

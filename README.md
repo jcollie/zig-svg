@@ -1,0 +1,283 @@
+<!--
+SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+SPDX-License-Identifier: MIT
+-->
+
+# zig-svg
+
+SVG rendering onto [z2d](https://github.com/vancluever/z2d) surfaces, for Zig
+0.16. A document arrives as a byte slice and pixels come back as memory; the
+library performs no I/O of its own — and because rendering is therefore a pure
+function over memory, it can be run in a forked process that seccomp has
+reduced to four system calls.
+
+The API documentation is generated from the doc comments and published at
+**<https://jeff.jcollie.page/zig-svg/>**.
+
+```zig
+const svg = @import("svg");
+
+var surface = try svg.render(gpa, source, .{ .width = 64, .height = 64 });
+defer surface.deinit(gpa);
+```
+
+or onto a surface you already have, inside a box you choose:
+
+```zig
+try svg.draw(gpa, &surface, source, .{ .x = 0, .y = 0, .width = 72, .height = 56 }, .{
+    .fill = .{ .rgb = .{ .r = 255, .g = 255, .b = 0 } },
+});
+```
+
+## What it draws
+
+One `<svg>` carrying a `viewBox`, one `<path>` carrying a `d`, filled in one
+colour. That is every one of the 7,447 [Material Design
+Icons](https://pictogrammers.com/library/mdi/), most other icon sets, and a
+long way short of SVG.
+
+| | |
+| --- | --- |
+| Path data — SVG 1.1 §8.3 | complete, every command in both spellings |
+| Elliptical arcs — appendix F.6 | complete, including the degenerate cases |
+| `viewBox` and `preserveAspectRatio` | the viewBox; aspect ratio always `xMidYMid meet` |
+| Fill rule | `nonzero` and `evenodd`, chosen by the caller, not read from the document |
+| `<g>`, `transform`, `style`, `fill` | **no** |
+| Gradients, strokes, text, `<use>`, CSS | **no** |
+
+An element it cannot draw is **refused**, not skipped. A renderer that skips
+what it does not understand produces a picture quietly missing a piece, which
+is the failure nobody notices; `error.UnsupportedElement` is the failure
+somebody does. See [Features to come](#features-to-come) for what is next.
+
+## Limits
+
+Every number in a document is a number somebody else chose, and two of them —
+the output size and the path length — decide what the render costs. `Limits`
+bounds both, and the defaults are sized for a program drawing pictures for a
+person to look at:
+
+```zig
+var surface = try svg.render(gpa, source, .{
+    .limits = .{ .max_pixels = 1 << 20, .max_path_nodes = 4096 },
+});
+```
+
+`max_path_nodes` is the one worth thinking about: a single `a` command with a
+large sweep produces four cubic curves from a dozen characters, so a `d`
+attribute is not proportional to the work it asks for.
+
+## Sandboxing
+
+`svg.sandbox.render` runs the renderer in a forked process that seccomp has
+reduced to `write`, `exit_group`, `exit` and `rt_sigreturn`, and passes the
+pixels back through a shared `memfd`:
+
+```zig
+var image = try svg.sandbox.render(gpa, source, .{
+    .render = .{ .width = 256, .height = 256 },
+});
+defer image.deinit();          // not surface.deinit — the pixels are a mapping
+```
+
+This matters more for SVG than for most formats. The full specification
+*includes* fetching documents, running scripts and reading fonts, so a renderer
+growing towards it grows towards exactly the capabilities the sandbox takes
+away. A renderer subverted into opening a file, reaching the network or
+spawning a program dies at the attempt, and a renderer that segfaults comes
+back as `error.RendererCrashed` rather than as a dead program.
+
+It does not make the pixels *trustworthy* — writing into the shared mapping is
+the child's job. What the parent validates is the shape of the reply: that the
+buffer is inside the mapping, correctly aligned, and exactly the length the
+stated dimensions require.
+
+Linux and 64-bit only. `svg.sandbox.available` says so at compile time, and
+`render` returns `error.SandboxUnavailable` at run time rather than silently
+rendering unsandboxed — a security feature that quietly turns itself off is
+worse than one that was never there.
+
+## resvg as the oracle
+
+A library's own tests can only check it against itself: they would agree with a
+mistake the parser and the rasterizer shared. So the corpus in `tests/oracle`
+is rendered both by this library and by [resvg](https://github.com/linebender/resvg),
+an independent implementation of the same specification, and the two pictures
+are compared.
+
+```console
+$ zig build oracle
+$ python3 tools/check_oracle.py tests/oracle zig-out/oracle
+ok   arc-rotated-ellipse     mean  0.033  outliers  0.008%  worst  64
+...
+26 compared against resvg, 0 beyond tolerance
+```
+
+Not pixel for pixel: two correct rasterizers disagree along every antialiased
+edge, since resvg's tiny-skia computes exact analytic coverage where z2d
+multisamples at 4×. The comparison is of the shape — the mean difference and
+the fraction of pixels more than a little apart — with thresholds set from what
+the corpus measures, so a regression moves a number somebody can see rather
+than flipping a boolean. A fixture this library refuses produces no PNG and is
+reported as *not implemented*, which is how the feature list stays honest.
+
+## Fuzzing
+
+`tests/fuzz.zig` holds five targets — the path grammar, the same path
+rasterized, the document reader, the whole renderer, and the arc conversion —
+and the properties they hold to: it comes back, every coordinate is finite,
+every subpath is closed, and a document the reader accepted can be drawn.
+
+Zig 0.16.0 leaves the fuzzer's coverage table empty however the modules are
+built, so `tools/fuzz.zig` is a loop of our own: it mutates the corpus, hands
+the result to a target, and reports what comes back. It found an infinite loop
+in the path parser within eight seconds — a bare number after `Z`, which has no
+argument sequence to repeat, so the implicit-command rule ran a command that
+consumed nothing.
+
+```console
+$ zig build fuzz-run -- --seconds 300
+$ zig build fuzz-run -- --target render --seed 12345
+$ zig build fuzz-run -- --alloc-fail --seconds 60
+```
+
+## Looking at a picture
+
+```console
+$ zig build svgdump -- icon.svg out.png --size 256
+$ zig build svgdump -- icon.svg out.png --size 256 --sandbox
+```
+
+## Features to come
+
+Roughly in the order they are worth having. Each is a document that errors
+today, and each should arrive with a fixture in `tests/oracle` that resvg
+already renders.
+
+**1. Several shapes in one document.** `<path>` after `<path>` — only the first
+is drawn now, which is the single largest gap: it is the difference between an
+icon set and an illustration. Needs a painting model, because shapes composite
+in document order.
+
+**2. Per-shape presentation attributes.** `fill`, `fill-opacity`,
+`fill-rule` and `opacity` read from the document rather than chosen by the
+caller, with CSS colour names and `#rgb`/`#rrggbb`. The caller's `fill` becomes
+the default for a shape that names none.
+
+**3. `<g>` and `transform`.** Grouping with inherited presentation attributes,
+and the six `transform` functions. z2d applies its transformation when a point
+is added rather than when the path is filled, so a transform stack is a
+multiply before each subpath rather than a wrapper around the fill.
+
+**4. The basic shapes.** `<rect>` (with `rx`/`ry`), `<circle>`, `<ellipse>`,
+`<line>`, `<polyline>`, `<polygon>` — each a short conversion to path data, and
+together most of what hand-written SVG contains.
+
+**5. Strokes.** `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
+`stroke-miterlimit`, `stroke-dasharray`. z2d has `painter.stroke` with all of
+it, so this is mostly plumbing — but a stroked open subpath must *not* be
+closed, which is the opposite of what filling needs, so the "close every
+subpath" rule has to become a decision rather than an invariant.
+
+**6. `width`, `height` and `preserveAspectRatio` on `<svg>`.** The document's
+own idea of how large it is and how to fit it, instead of the viewBox and a
+hardcoded `xMidYMid meet`. Needs a length parser — `px`, `pt`, `mm`, `%` and a
+bare number are all legal.
+
+**7. Entity references in attribute values.** The XML reader hands back raw
+attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
+entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
+is a parse error rather than a `Z`.
+
+**8. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
+the classic denial of service.
+
+**9. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+`gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
+systems.
+
+**10. Clipping and masking.** `<clipPath>`, `<mask>`, `clip-rule`. Needs
+composited layers rather than one surface.
+
+**11. Text.** `<text>`, `<tspan>`, `font-family`, `text-anchor`. z2d can lay
+out a font, but choosing one from a family name means a font database, which is
+a dependency and a filesystem — and the filesystem is exactly what the sandbox
+exists to take away, so this needs the fonts resolved by the *caller* and
+handed in.
+
+Deliberately not on the list: scripting, `<foreignObject>`, animation, and
+external document references. Those are the parts of SVG that make it a
+programming language rather than a picture format.
+
+## Building
+
+```console
+$ nix develop
+$ zig build test          # unit tests and the fuzz corpus
+$ zig build oracle        # render tests/oracle, then check_oracle.py
+$ zig build check         # compile everything, run nothing
+$ zig build docs-serve    # read the API documentation
+```
+
+The devshell's Zig carries a one-line patch to its own standard library, without
+which no project holding a fuzz test can build a test executable at all;
+`flake.nix` says what and why.
+
+## Dependencies
+
+| | |
+| --- | --- |
+| [z2d](https://github.com/vancluever/z2d) | the rasterizer, and the surfaces this draws onto |
+| [zxml](https://git.jcollie.dev/jeff/zxml) | the XML pull parser, which allocates nothing for a document with no DTD |
+
+Both are fetched by the Zig package manager. Nix builds fetch them through
+`build.zig.zon.nix`, generated by [zon2nix](https://git.jcollie.dev/jeff/zon2nix):
+
+```console
+$ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+```
+
+## Licence
+
+MIT. The project follows the [REUSE](https://reuse.software/) standard and
+passes `reuse lint`.
+
+## References cited
+
+Kept in the Zotero collection **zig-svg**.
+
+- World Wide Web Consortium (W3C). (2011, August). *Scalable Vector Graphics
+  (SVG) 1.1 (Second Edition)* (W3C Recommendation).
+  <https://www.w3.org/TR/SVG11/> — §8.3 is the path data grammar implemented
+  in `src/path.zig`, and appendix F.6 the endpoint-to-centre arc conversion in
+  `src/arc.zig`.
+- Reizner, Y. *resvg*. Linebender. <https://github.com/linebender/resvg> — the
+  independent implementation of that specification this renderer is held
+  against, and the reason `tools/check_oracle.py` exists.
+- Marchesi, C. *z2d*. <https://github.com/vancluever/z2d> — the rasterizer, and
+  the surfaces this draws onto. Its transformation is applied when a point is
+  added rather than when the path is filled, which is why the viewBox scale
+  goes on `Path.transformation` before the first `moveTo`.
+- Ollie, J. C. *zxml*. <https://git.jcollie.dev/jeff/zxml> — the XML pull
+  parser, which allocates nothing for a document with no DTD.
+- Pictogrammers. *Material Design Icons*. <https://pictogrammers.com/library/mdi/>
+  — the 7,447-icon set that decided what this reader had to implement: every
+  path command, and no other element.
+- Herold, S. *glycin*. GNOME. <https://gitlab.gnome.org/GNOME/glycin> — the
+  design `src/sandbox.zig` follows: a confined process per picture, with the
+  pixels returned through shared memory.
+- *Seccomp BPF (SEcure COMPuting with filters)*. The Linux Kernel
+  documentation.
+  <https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html>
+- Kerrisk, M. *seccomp(2)*. Linux man-pages.
+  <https://man7.org/linux/man-pages/man2/seccomp.2.html>
+- Kerrisk, M. *memfd_create(2)*. Linux man-pages.
+  <https://man7.org/linux/man-pages/man2/memfd_create.2.html>
+- Kerrisk, M. *prctl(2)*. Linux man-pages.
+  <https://man7.org/linux/man-pages/man2/prctl.2.html>
+- McCanne, S., & Jacobson, V. (1993, January). The BSD Packet Filter: A New
+  Architecture for User-level Packet Capture. In *Proceedings of the USENIX
+  Winter 1993 Conference* (pp. 259–269). USENIX Association.
+  <https://www.tcpdump.org/papers/bpf-usenix93.pdf> — the classic BPF machine a
+  seccomp filter is a program for.

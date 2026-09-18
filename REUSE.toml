@@ -1,0 +1,22 @@
+version = 1
+SPDX-PackageName = "zig-svg"
+SPDX-PackageSupplier = "Jeffrey C. Ollie <jeff@ocjtech.us>"
+SPDX-PackageDownloadLocation = "https://git.jcollie.dev/jeff/zig-svg"
+
+# Files that cannot carry a header of their own: two are generated, and the
+# Zig manifest has no comment syntax that survives `zig fetch --save`
+# rewriting it.
+[[annotations]]
+path = ["flake.lock", "build.zig.zon", "build.zig.zon.nix"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© 2026 Jeffrey C. Ollie <jeff@ocjtech.us>"
+SPDX-License-Identifier = "MIT"
+
+# The oracle fixtures. An SVG could carry an XML comment, but a comment ahead
+# of the root element is one more thing for the reader under test to step over
+# on every run, and these files exist to be exactly the document named in them.
+[[annotations]]
+path = "tests/oracle/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© 2026 Jeffrey C. Ollie <jeff@ocjtech.us>"
+SPDX-License-Identifier = "MIT"

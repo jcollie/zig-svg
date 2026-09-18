@@ -23,6 +23,7 @@ const z2d = @import("z2d");
 
 const color = @import("color.zig");
 const document = @import("document.zig");
+const entities = @import("entities.zig");
 const path = @import("path.zig");
 const transform = @import("transform.zig");
 
@@ -499,7 +500,13 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
 /// An odd count is repeated, so `4` dashes four on and four off. That is the
 /// specification rather than a convenience, and z2d does not do it for us.
 fn readDashes(raw: []const u8, out: *[max_dashes]f64) Error!usize {
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    // The third of the three values the reader borrows rather than parses, so
+    // this is where its entity references are resolved. A dash list is short
+    // by its nature -- `max_dashes` lengths at most -- so a buffer on the
+    // stack is enough and no allocator is needed. See `entities.zig`.
+    var scratch: [entities.max_short_value]u8 = undefined;
+    const decoded = try entities.decodeShort(raw, &scratch);
+    const trimmed = std.mem.trim(u8, decoded, " \t\r\n");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "none")) return 0;
 
     var s: path.Scanner = .{ .src = trimmed };
@@ -1189,6 +1196,71 @@ test "a stroke style this reader does not know is refused" {
     // resvg does: `0.5` draws exactly what `1` draws.
     var surface = try render(gpa, line ++ "stroke-miterlimit=\"0.5\"/></svg>", .{});
     defer surface.deinit(gpa);
+}
+
+test "an entity reference in an attribute value is resolved" {
+    const gpa = testing.allocator;
+    // `&#90;` is `Z`, so this closes the subpath and fills a square. Without
+    // decoding it reaches the path parser as five literal characters and is
+    // `error.UnknownCommand`.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&#90;\" fill=\"red\"/></svg>",
+        .{ .width = 16, .height = 16 },
+    );
+    defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(8, 8).?.rgba.a);
+}
+
+test "a reference is resolved in every kind of attribute value" {
+    const gpa = testing.allocator;
+    // A colour, a number, a length, a transform, a `points` list and a dash
+    // array -- the parsed ones through the reader's buffer and the borrowed
+    // ones where they are drawn.
+    const cases = [_][]const u8{
+        // `&#114;ed` is `red`.
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"&#114;ed\"/></svg>",
+        // `&#56;` is `8`.
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"&#56;\" height=\"8\" fill=\"red\"/></svg>",
+        // A transform list.
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"red\" transform=\"translate(&#48;,0)\"/></svg>",
+        // A `points` list, decoded with an allocator rather than a buffer.
+        "<svg viewBox=\"0 0 8 8\"><polygon points=\"0,0 8,0 8,&#56; 0,8\" fill=\"red\"/></svg>",
+    };
+    for (cases) |src| {
+        var surface = try render(gpa, src, .{ .width = 16, .height = 16 });
+        defer surface.deinit(gpa);
+        try testing.expectEqual(@as(u8, 255), surface.getPixel(8, 8).?.rgba.a);
+    }
+
+    // And a dash array, which is read where the stroke is resolved.
+    var dashed = try render(
+        gpa,
+        "<svg viewBox=\"0 0 16 16\"><line x1=\"0\" y1=\"8\" x2=\"16\" y2=\"8\" " ++
+            "stroke=\"red\" stroke-width=\"4\" stroke-dasharray=\"&#52; 2\"/></svg>",
+        .{ .width = 16, .height = 16 },
+    );
+    defer dashed.deinit(gpa);
+    // Dashed rather than solid: something along the line is unpainted.
+    var gaps: usize = 0;
+    for (0..16) |x| {
+        if (dashed.getPixel(@intCast(x), 8).?.rgba.a == 0) gaps += 1;
+    }
+    try testing.expect(gaps > 0);
+}
+
+test "an entity nobody declared is refused rather than drawn as text" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.UnknownEntity, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"&nosuch;\"/></svg>",
+        .{},
+    ));
+    try testing.expectError(error.UnknownEntity, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&nosuch;\"/></svg>",
+        .{},
+    ));
 }
 
 test "a path past the node limit is refused" {

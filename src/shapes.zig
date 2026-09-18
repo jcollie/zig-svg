@@ -38,10 +38,11 @@ const testing = std.testing;
 const z2d = @import("z2d");
 
 const arc = @import("arc.zig");
+const entities = @import("entities.zig");
 const path = @import("path.zig");
 
-pub const Error = path.Error;
-pub const BuildError = path.BuildError;
+pub const Error = path.Error || entities.Error;
+pub const BuildError = path.BuildError || entities.Error;
 
 /// An axis-aligned rectangle, with optionally rounded corners.
 pub const Rect = struct {
@@ -100,11 +101,25 @@ pub fn build(
     opts: path.Options,
 ) BuildError!void {
     switch (geometry) {
-        .path => |d| return path.build(p, alloc, d, opts),
+        // A `d` and a `points` are borrowed from the source with their entity
+        // references still in them, because they are the two attribute values
+        // whose length nothing bounds. This is where there is an allocator to
+        // resolve one with, and where the overwhelmingly common case -- no
+        // reference at all -- costs nothing: `decodeLong` answers null and the
+        // original slice is parsed in place.
+        .path => |d| {
+            const decoded = try entities.decodeLong(alloc, d);
+            defer if (decoded) |owned| alloc.free(owned);
+            return path.build(p, alloc, decoded orelse d, opts);
+        },
         .rect => |r| return buildRect(p, alloc, r),
         .ellipse => |e| return buildEllipse(p, alloc, e),
         .line => |l| return buildLine(p, alloc, l, opts),
-        .poly => |poly| return buildPoly(p, alloc, poly, opts),
+        .poly => |poly| {
+            const decoded = try entities.decodeLong(alloc, poly.points);
+            defer if (decoded) |owned| alloc.free(owned);
+            return buildPoly(p, alloc, decoded orelse poly.points, poly.closed, opts);
+        },
     }
 }
 
@@ -215,13 +230,14 @@ fn buildLine(p: *z2d.Path, alloc: std.mem.Allocator, l: Line, opts: path.Options
 fn buildPoly(
     p: *z2d.Path,
     alloc: std.mem.Allocator,
-    poly: Poly,
+    points: []const u8,
+    closed: bool,
     opts: path.Options,
 ) BuildError!void {
     // The same scanner the path data uses, because `points` is written in the
     // same number syntax down to abutting signs: `2-2 14-2` is two points, and
     // resvg reads it that way too.
-    var s: path.Scanner = .{ .src = poly.points };
+    var s: path.Scanner = .{ .src = points };
     const ceiling = std.math.add(usize, p.nodes.items.len, opts.max_nodes) catch
         std.math.maxInt(usize);
 
@@ -246,7 +262,7 @@ fn buildPoly(
     // differ, and the reason `Poly.closed` has been carried since they were
     // added. For filling it makes no difference, since §11.4 fills every
     // subpath as though it were closed.
-    if (started and (poly.closed or opts.close_subpaths)) try p.close(alloc);
+    if (started and (closed or opts.close_subpaths)) try p.close(alloc);
 }
 
 // -- tests -------------------------------------------------------------------

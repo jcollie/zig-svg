@@ -482,6 +482,7 @@ const WireError = enum(u16) {
     too_many_dashes = 25,
     bad_preserve_aspect_ratio = 26,
     no_size = 27,
+    attribute_too_long = 28,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -518,6 +519,7 @@ fn wireFromError(err: anyerror) WireError {
         error.TooManyDashes => .too_many_dashes,
         error.BadPreserveAspectRatio => .bad_preserve_aspect_ratio,
         error.NoSize => .no_size,
+        error.AttributeTooLong => .attribute_too_long,
         error.ImageTooLarge => .image_too_large,
         error.BadSize => .bad_size,
         error.OutOfMemory => .out_of_memory,
@@ -566,6 +568,7 @@ fn wireToError(status: u16) Error {
         .too_many_dashes => error.TooManyDashes,
         .bad_preserve_aspect_ratio => error.BadPreserveAspectRatio,
         .no_size => error.NoSize,
+        .attribute_too_long => error.AttributeTooLong,
         .image_too_large => error.ImageTooLarge,
         .bad_size => error.BadSize,
         .out_of_memory => error.OutOfMemory,
@@ -832,6 +835,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.TooManyDashes, .too_many_dashes },
         .{ error.BadPreserveAspectRatio, .bad_preserve_aspect_ratio },
         .{ error.NoSize, .no_size },
+        .{ error.AttributeTooLong, .attribute_too_long },
         .{ error.ImageTooLarge, .image_too_large },
         .{ error.BadSize, .bad_size },
         .{ error.OutOfMemory, .out_of_memory },

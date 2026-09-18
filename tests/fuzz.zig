@@ -112,7 +112,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "transformatrixlscewXYkyop" ++
     "rectcirclepsoygnlinwdthxy12points" ++
     "strokewidthcapjonmielmtdasharyofst" ++
-    "preserveAspctRioMdnlx%emptcin";
+    "preserveAspctRioMdnlx%emptcin" ++
+    "&#;xampltqsogu09AZ";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -583,6 +584,20 @@ const document_corpus = [_][]const u8{
     "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"defer xMaxYMin meet\"><rect width=\"10\" height=\"5\"/></svg>",
     "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"XMidYMid\"><rect width=\"10\" height=\"5\"/></svg>",
     "<svg width=\"80\" height=\"40\" viewBox=\"0 0 10 10\" preserveAspectRatio=\"bogus\"><rect width=\"10\" height=\"5\"/></svg>",
+    // Entity references in an attribute value, which the XML reader hands
+    // back raw. The parsed values go through a buffer and the borrowed ones
+    // through an allocator, so both routes want exercising.
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&#90;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&#x5A;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"&#56;\" height=\"8\" fill=\"&#114;ed\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><polygon points=\"0,0 8,0 8,&#56;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><line x1=\"0\" y1=\"4\" x2=\"8\" y2=\"4\" stroke=\"red\" stroke-dasharray=\"&#52; 2\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" transform=\"translate(&#48;,0)\"/></svg>",
+    // References that have to be refused rather than drawn as text.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"&nosuch;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&nosuch;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0&#\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0&amp;&lt;&gt;&apos;&quot;\"/></svg>",
     // Elements that are still refused.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",

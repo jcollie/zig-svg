@@ -73,6 +73,7 @@ const xml = @import("zxml");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
+const entities = @import("entities.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
@@ -127,7 +128,7 @@ pub const Error = error{
     /// the transforms and the viewBox mapping were applied. See
     /// `max_coordinate`.
     CoordinateOutOfRange,
-} || transform.Error || color.Error || length.Error || xml.Error;
+} || transform.Error || color.Error || length.Error || entities.Error || xml.Error;
 
 /// The furthest from the origin a transformed point may land, in pixels.
 ///
@@ -189,6 +190,9 @@ pub const Inherited = struct {
     /// and read when the shape is drawn. Kept as text because a dash list is
     /// a list: parsing it here would mean either allocating for it or giving
     /// every level of the container stack room for one.
+    ///
+    /// Undecoded, like `d` and `points` and for the same reason -- it is one
+    /// of the three values this reader borrows rather than parses.
     stroke_dasharray: ?[]const u8 = null,
     stroke_dashoffset: ?f64 = null,
 
@@ -434,6 +438,11 @@ pub const PathIterator = struct {
     reader: xml.Reader,
     /// What a percentage in this document is measured against.
     viewport: length.Viewport,
+    /// Where an attribute value carrying an entity reference is decoded. One
+    /// buffer for the whole walk, which is enough because every value that
+    /// comes through it is parsed into a number, a colour or a matrix before
+    /// the next is read. See `entities.zig`.
+    scratch: [entities.max_short_value]u8 = undefined,
     /// What each open container contributes, innermost last. Level zero is
     /// what applies before any container has been entered, which is what a
     /// shape outside the root would see -- there is no such shape in a
@@ -474,9 +483,9 @@ pub const PathIterator = struct {
                 if (self.depth_ignored > 0) continue;
                 const top = self.stack[self.depth];
 
-                if (try readGeometry(e, self.viewport)) |geometry| {
-                    const effective = top.inherited.with(try readInherited(e, self.viewport));
-                    const ctm = top.transform.mul(try readTransform(e));
+                if (try readGeometry(e, self.viewport, &self.scratch)) |geometry| {
+                    const effective = top.inherited.with(try readInherited(e, self.viewport, &self.scratch));
+                    const ctm = top.transform.mul(try readTransform(e, &self.scratch));
                     if (!transform.isFinite(ctm)) return error.NonFiniteTransform;
                     return .{
                         .geometry = geometry,
@@ -492,7 +501,7 @@ pub const PathIterator = struct {
                         .stroke_miterlimit = effective.stroke_miterlimit,
                         .stroke_dasharray = effective.stroke_dasharray,
                         .stroke_dashoffset = effective.stroke_dashoffset,
-                        .opacity = if (e.attr("opacity")) |v|
+                        .opacity = if (try attr(e, "opacity", &self.scratch)) |v|
                             try color.parseOpacity(v)
                         else
                             1.0,
@@ -512,8 +521,8 @@ pub const PathIterator = struct {
                     if (self.depth == max_container_depth) return error.TooDeeplyNested;
                     self.depth += 1;
                     self.stack[self.depth] = .{
-                        .inherited = top.inherited.with(try readInherited(e, self.viewport)),
-                        .transform = top.transform.mul(try readTransform(e)),
+                        .inherited = top.inherited.with(try readInherited(e, self.viewport, &self.scratch)),
+                        .transform = top.transform.mul(try readTransform(e, &self.scratch)),
                     };
                     continue;
                 }
@@ -554,48 +563,54 @@ fn isContainer(name: []const u8) bool {
 /// has, and spelling them out as text to read back would allocate and would
 /// put a number formatter and a second number parser in the way of the
 /// picture. See `shapes.zig`.
-fn readGeometry(e: xml.Element, viewport: length.Viewport) Error!?shapes.Geometry {
+fn readGeometry(
+    e: xml.Element,
+    viewport: length.Viewport,
+    scratch: *[entities.max_short_value]u8,
+) Error!?shapes.Geometry {
     if (xml.nameIs(e.name, "path")) {
+        // Raw: a `d` is unbounded in length, so it is decoded where there is
+        // an allocator rather than into a buffer. See `entities.zig`.
         return .{ .path = e.attr("d") orelse return error.NoPath };
     }
     if (xml.nameIs(e.name, "rect")) {
         return .{
             .rect = .{
-                .x = try lengthOf(e, "x", .x, viewport, 0),
-                .y = try lengthOf(e, "y", .y, viewport, 0),
-                .width = try lengthOf(e, "width", .x, viewport, 0),
-                .height = try lengthOf(e, "height", .y, viewport, 0),
+                .x = try lengthOf(e, "x", .x, viewport, 0, scratch),
+                .y = try lengthOf(e, "y", .y, viewport, 0, scratch),
+                .width = try lengthOf(e, "width", .x, viewport, 0, scratch),
+                .height = try lengthOf(e, "height", .y, viewport, 0, scratch),
                 // Null rather than zero: §9.2 makes one specified radius supply
                 // the other, which "not specified" has to be distinguishable from
                 // zero to express.
-                .rx = try optionalLengthOf(e, "rx", .x, viewport),
-                .ry = try optionalLengthOf(e, "ry", .y, viewport),
+                .rx = try optionalLengthOf(e, "rx", .x, viewport, scratch),
+                .ry = try optionalLengthOf(e, "ry", .y, viewport, scratch),
             },
         };
     }
     if (xml.nameIs(e.name, "circle")) {
-        const r = try lengthOf(e, "r", .other, viewport, 0);
+        const r = try lengthOf(e, "r", .other, viewport, 0, scratch);
         return .{ .ellipse = .{
-            .cx = try lengthOf(e, "cx", .x, viewport, 0),
-            .cy = try lengthOf(e, "cy", .y, viewport, 0),
+            .cx = try lengthOf(e, "cx", .x, viewport, 0, scratch),
+            .cy = try lengthOf(e, "cy", .y, viewport, 0, scratch),
             .rx = r,
             .ry = r,
         } };
     }
     if (xml.nameIs(e.name, "ellipse")) {
         return .{ .ellipse = .{
-            .cx = try lengthOf(e, "cx", .x, viewport, 0),
-            .cy = try lengthOf(e, "cy", .y, viewport, 0),
-            .rx = try lengthOf(e, "rx", .x, viewport, 0),
-            .ry = try lengthOf(e, "ry", .y, viewport, 0),
+            .cx = try lengthOf(e, "cx", .x, viewport, 0, scratch),
+            .cy = try lengthOf(e, "cy", .y, viewport, 0, scratch),
+            .rx = try lengthOf(e, "rx", .x, viewport, 0, scratch),
+            .ry = try lengthOf(e, "ry", .y, viewport, 0, scratch),
         } };
     }
     if (xml.nameIs(e.name, "line")) {
         return .{ .line = .{
-            .x1 = try lengthOf(e, "x1", .x, viewport, 0),
-            .y1 = try lengthOf(e, "y1", .y, viewport, 0),
-            .x2 = try lengthOf(e, "x2", .x, viewport, 0),
-            .y2 = try lengthOf(e, "y2", .y, viewport, 0),
+            .x1 = try lengthOf(e, "x1", .x, viewport, 0, scratch),
+            .y1 = try lengthOf(e, "y1", .y, viewport, 0, scratch),
+            .x2 = try lengthOf(e, "x2", .x, viewport, 0, scratch),
+            .y2 = try lengthOf(e, "y2", .y, viewport, 0, scratch),
         } };
     }
     if (xml.nameIs(e.name, "polyline")) {
@@ -607,6 +622,24 @@ fn readGeometry(e: xml.Element, viewport: length.Viewport) Error!?shapes.Geometr
     return null;
 }
 
+/// One decoded attribute value, or null when the element does not carry it.
+///
+/// The result borrows from the source when nothing needed resolving, which is
+/// every attribute of every document anybody has, and from `scratch` when
+/// something did. It therefore lives only until the next call sharing that
+/// buffer -- which is safe because every caller here parses the value into a
+/// number, a colour or a matrix before asking for another. The three values
+/// that are *borrowed* rather than parsed do not come through here; see
+/// `entities.zig`.
+fn attr(
+    e: xml.Element,
+    name: []const u8,
+    scratch: *[entities.max_short_value]u8,
+) Error!?[]const u8 {
+    const raw = e.attr(name) orelse return null;
+    return try entities.decodeShort(raw, scratch);
+}
+
 /// One length-valued attribute, or `default` when the element does not carry
 /// it.
 fn lengthOf(
@@ -615,8 +648,9 @@ fn lengthOf(
     axis: length.Axis,
     viewport: length.Viewport,
     default: f64,
+    scratch: *[entities.max_short_value]u8,
 ) Error!f64 {
-    return (try optionalLengthOf(e, name, axis, viewport)) orelse default;
+    return (try optionalLengthOf(e, name, axis, viewport, scratch)) orelse default;
 }
 
 /// A length, or null when the attribute is absent.
@@ -632,15 +666,19 @@ fn optionalLengthOf(
     name: []const u8,
     axis: length.Axis,
     viewport: length.Viewport,
+    scratch: *[entities.max_short_value]u8,
 ) Error!?f64 {
-    const raw = e.attr(name) orelse return null;
-    return try length.parse(raw, axis, viewport);
+    const text = (try attr(e, name, scratch)) orelse return null;
+    return try length.parse(text, axis, viewport);
 }
 
 /// An element's own `transform`, or the identity when it has none.
-fn readTransform(e: xml.Element) Error!z2d.Transformation {
-    const raw = e.attr("transform") orelse return .identity;
-    return transform.parse(raw);
+fn readTransform(
+    e: xml.Element,
+    scratch: *[entities.max_short_value]u8,
+) Error!z2d.Transformation {
+    const text = (try attr(e, "transform", scratch)) orelse return .identity;
+    return transform.parse(text);
 }
 
 /// The four inherited presentation attributes, where an element names them.
@@ -648,21 +686,25 @@ fn readTransform(e: xml.Element) Error!z2d.Transformation {
 /// Every one of them is refused rather than defaulted when it cannot be read.
 /// resvg, and every browser, falls back to the initial value and paints on;
 /// see `color.zig` for why this does not.
-fn readInherited(e: xml.Element, viewport: length.Viewport) Error!Inherited {
+fn readInherited(
+    e: xml.Element,
+    viewport: length.Viewport,
+    scratch: *[entities.max_short_value]u8,
+) Error!Inherited {
     return .{
-        .fill = if (e.attr("fill")) |v| try color.parsePaint(v) else null,
-        .fill_opacity = if (e.attr("fill-opacity")) |v| try color.parseOpacity(v) else null,
-        .fill_rule = if (e.attr("fill-rule")) |v| try parseFillRule(v) else null,
-        .current_color = if (e.attr("color")) |v| try color.parseColor(v) else null,
-        .stroke = if (e.attr("stroke")) |v| try color.parsePaint(v) else null,
-        .stroke_width = try optionalLengthOf(e, "stroke-width", .other, viewport),
-        .stroke_opacity = if (e.attr("stroke-opacity")) |v| try color.parseOpacity(v) else null,
-        .stroke_linecap = if (e.attr("stroke-linecap")) |v| try parseLineCap(v) else null,
-        .stroke_linejoin = if (e.attr("stroke-linejoin")) |v| try parseLineJoin(v) else null,
-        .stroke_miterlimit = if (e.attr("stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
+        .fill = if (try attr(e, "fill", scratch)) |v| try color.parsePaint(v) else null,
+        .fill_opacity = if (try attr(e, "fill-opacity", scratch)) |v| try color.parseOpacity(v) else null,
+        .fill_rule = if (try attr(e, "fill-rule", scratch)) |v| try parseFillRule(v) else null,
+        .current_color = if (try attr(e, "color", scratch)) |v| try color.parseColor(v) else null,
+        .stroke = if (try attr(e, "stroke", scratch)) |v| try color.parsePaint(v) else null,
+        .stroke_width = try optionalLengthOf(e, "stroke-width", .other, viewport, scratch),
+        .stroke_opacity = if (try attr(e, "stroke-opacity", scratch)) |v| try color.parseOpacity(v) else null,
+        .stroke_linecap = if (try attr(e, "stroke-linecap", scratch)) |v| try parseLineCap(v) else null,
+        .stroke_linejoin = if (try attr(e, "stroke-linejoin", scratch)) |v| try parseLineJoin(v) else null,
+        .stroke_miterlimit = if (try attr(e, "stroke-miterlimit", scratch)) |v| try parseMiterLimit(v) else null,
         // Borrowed rather than parsed: see `Inherited.stroke_dasharray`.
         .stroke_dasharray = e.attr("stroke-dasharray"),
-        .stroke_dashoffset = try optionalLengthOf(e, "stroke-dashoffset", .other, viewport),
+        .stroke_dashoffset = try optionalLengthOf(e, "stroke-dashoffset", .other, viewport, scratch),
     };
 }
 
@@ -774,17 +816,19 @@ pub fn read(src: []const u8) Error!Document {
 /// resvg does with the `width="100%" height="100%"` that drawing programs like
 /// to write.
 fn readRoot(e: xml.Element, src: []const u8) Error!Document {
-    const view_box: ?ViewBox = if (e.attr("viewBox")) |raw|
-        try parseViewBox(raw)
+    var scratch: [entities.max_short_value]u8 = undefined;
+
+    const view_box: ?ViewBox = if (try attr(e, "viewBox", &scratch)) |text|
+        try parseViewBox(text)
     else
         null;
 
-    const named_width = if (e.attr("width")) |raw|
-        try length.parse(raw, .x, .unknown)
+    const named_width = if (try attr(e, "width", &scratch)) |text|
+        try length.parse(text, .x, .unknown)
     else
         null;
-    const named_height = if (e.attr("height")) |raw|
-        try length.parse(raw, .y, .unknown)
+    const named_height = if (try attr(e, "height", &scratch)) |text|
+        try length.parse(text, .y, .unknown)
     else
         null;
 
@@ -801,13 +845,13 @@ fn readRoot(e: xml.Element, src: []const u8) Error!Document {
         .view_box = view_box,
         .width = width,
         .height = height,
-        .preserve_aspect_ratio = if (e.attr("preserveAspectRatio")) |raw|
-            try PreserveAspectRatio.parse(raw)
+        .preserve_aspect_ratio = if (try attr(e, "preserveAspectRatio", &scratch)) |text|
+            try PreserveAspectRatio.parse(text)
         else
             .meet_centred,
         .src = src,
         .shape_count = 0,
-        .root = try readInherited(e, .unknown),
+        .root = try readInherited(e, .unknown, &scratch),
     };
 }
 

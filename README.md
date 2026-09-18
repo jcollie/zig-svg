@@ -33,6 +33,15 @@ A zero or negative width, height or radius draws nothing and is not an error —
 `<rect/>` and `<circle r="-2"/>` are both simply empty, which is what resvg
 does. A `stroke-width` of zero or less disables the stroke the same way.
 
+An entity reference in an attribute value is resolved, so `d="M0 0L1 1&#90;"`
+closes its subpath rather than reaching the path parser as five literal
+characters. Only `&` triggers a decode: XML's attribute normalization would
+also turn a literal tab or newline into a space, and every grammar here already
+treats those as whitespace — so the multi-line `d` that most real documents
+carry is still parsed in place, with nothing copied. A reference the document
+never declared is `error.UnknownEntity` rather than text that survives into a
+parser which will call it something less helpful.
+
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
 something else. `preserveAspectRatio` then decides how the one is fitted into
@@ -115,6 +124,7 @@ short of the specification.
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
 | `viewBox`, `width`, `height` | yes — the document's own size is what it is drawn at |
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
+| Entity references in attribute values | yes — `&#90;`, `&#x5A;`, and the five predefined names |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | `<g>` up to `document.max_container_depth` (64), then refused |
@@ -341,20 +351,15 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Entity references in attribute values.** The XML reader hands back raw
-attribute values, so `d="M0 0L1 1&#90;"` reaches the path parser with the
-entity unexpanded. Rare in generated SVG and legal in every SVG, and today it
-is a parse error rather than a `Z`.
-
-**2. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
+**1. `<defs>` and `<use>`.** Referencing a shape defined elsewhere, which means
 a symbol table and a recursion limit — `<use>` pointing at its own ancestor is
 the classic denial of service.
 
-**3. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
+**2. Gradients and patterns.** `<linearGradient>`, `<radialGradient>`,
 `gradientUnits`, `spreadMethod`. z2d has gradients; the work is the coordinate
 systems.
 
-**4. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
+**3. Clipping and masking, and group opacity.** `<clipPath>`, `<mask>`,
 `clip-rule`, and `opacity` on a container. All four need a composited layer
 rather than one surface: a group's opacity applies to the group once it is
 flattened, so multiplying it into each shape shows every shape through every
@@ -363,7 +368,7 @@ other where the group would have shown only the upper one. That is why
 than an approximation — on a `<path>`, where there is nothing to overlap, it is
 implemented and exact.
 
-**5. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
+**4. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
 `font-family`, `font-size`, `text-anchor` — and with a font size finally in
 hand, the `em` and `ex` that are refused today. z2d can lay
 out a font, but choosing one from a family name means a font database, which is

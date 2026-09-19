@@ -24,7 +24,9 @@ const ztree = @import("ztree");
 
 const color = @import("color.zig");
 const document = @import("document.zig");
+const filter = @import("filter.zig");
 const gradient = @import("gradient.zig");
+const image = @import("image.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const pattern = @import("pattern.zig");
@@ -307,7 +309,7 @@ pub const Error = document.Error || document.BuildError || path.BuildError || z2
     /// `<mask>` whose content is itself masked, or a `<clipPath>` carrying a
     /// `clip-path` of its own, repeated past any sense.
     TooManyMaskHops,
-} || gradient.Error || pattern.Error;
+} || gradient.Error || pattern.Error || filter.Error || image.Error;
 
 /// Where in a surface to draw, in pixels.
 pub const Box = struct {
@@ -460,22 +462,38 @@ fn drawItems(
         const shape = switch (item) {
             .shape => |sh| sh,
             .open_group => |g| {
+                const group_ctm = view_box.mul(g.transform);
                 const cut = try buildCut(
                     gpa,
                     doc,
                     .{ .clip_path = g.clip_path, .mask = g.mask },
-                    view_box.mul(g.transform),
+                    group_ctm,
                     .{ .container = g.node },
                     pass,
                     width,
                     height,
                     opts,
                 );
-                try layers.open(gpa, g.opacity, cut, opts.limits.max_layers);
+                errdefer if (cut) |c| {
+                    var owned = c;
+                    owned.deinit(gpa);
+                };
+                const filtered = try buildFilter(
+                    gpa,
+                    doc,
+                    g.filter,
+                    group_ctm,
+                    .{ .container = g.node },
+                    g.current_color orelse callerColor(opts),
+                    width,
+                    height,
+                    opts,
+                );
+                try layers.open(gpa, g.opacity, cut, filtered, opts.limits.max_layers);
                 continue;
             },
             .close_group => {
-                layers.close(gpa);
+                try layers.close(gpa);
                 continue;
             },
         };
@@ -486,21 +504,38 @@ fn drawItems(
         // which is the price of `dst_in` being a whole-surface operation --
         // documents clip groups far more often than single shapes.
         var shape_layer = false;
-        if (try buildCut(
-            gpa,
-            doc,
-            .{ .clip_path = shape.clip_path, .mask = shape.mask },
-            ctm,
-            .{ .shape = shape },
-            pass,
-            width,
-            height,
-            opts,
-        )) |cut| {
-            try layers.open(gpa, 1.0, cut, opts.limits.max_layers);
-            shape_layer = true;
+        {
+            const cut = try buildCut(
+                gpa,
+                doc,
+                .{ .clip_path = shape.clip_path, .mask = shape.mask },
+                ctm,
+                .{ .shape = shape },
+                pass,
+                width,
+                height,
+                opts,
+            );
+            errdefer if (cut) |c| {
+                var owned = c;
+                owned.deinit(gpa);
+            };
+            const filtered = try buildFilter(
+                gpa,
+                doc,
+                shape.filter,
+                ctm,
+                .{ .shape = shape },
+                shape.current_color orelse callerColor(opts),
+                width,
+                height,
+                opts,
+            );
+            if (cut != null or filtered != null) {
+                try layers.open(gpa, 1.0, cut, filtered, opts.limits.max_layers);
+                shape_layer = true;
+            }
         }
-        defer if (shape_layer) layers.close(gpa);
 
         const surface = layers.target();
         // Kept so the stroke can start from the same place the fill did: both
@@ -646,7 +681,475 @@ fn drawItems(
                 };
             }
         }
+
+        // Closed here rather than from a `defer`, because closing a layer can
+        // now fail: a filter allocates. The failure path does not need it --
+        // `drawDocument` unwinds the whole stack when a draw gives up.
+        if (shape_layer) try layers.close(gpa);
     }
+}
+
+// -- filters -----------------------------------------------------------------
+
+/// A `<filter>` read, measured and reduced to canvas pixels, waiting for the
+/// layer it applies to to be finished.
+///
+/// Prepared when the layer is *opened* rather than when it is closed, because
+/// everything it needs -- the element's bounding box, the matrix in force, the
+/// `color` for a `currentColor` -- is known there and gone by the time the
+/// layer comes off the stack.
+const Filtered = struct {
+    spec: filter.Filter,
+    /// §15.7.5's region, in whole canvas pixels and already cut to the canvas.
+    /// Everything the filter produces is confined to it.
+    region: image.PixelBox,
+    /// How much of a device pixel one user unit is, per axis. A filter runs on
+    /// the canvas, so this is what turns a `stdDeviation` into a number of
+    /// pixels. Rotation is deliberately not carried: see `filter.zig`.
+    scale_x: f64,
+    scale_y: f64,
+    /// The matrix in force on the filtered element, for mapping a primitive's
+    /// own subregion.
+    ctm: z2d.Transformation,
+    /// §7.11's bounding box of the filtered element, in its user space. Only
+    /// meaningful when some units in the filter are `objectBoundingBox`.
+    bbox: Box,
+    /// What a `currentColor` in an `feFlood` resolves to.
+    current: color.Color,
+
+    fn deinit(self: *Filtered, gpa: Allocator) void {
+        self.spec.deinit(gpa);
+    }
+};
+
+/// Read the `<filter>` an element names and work out what it comes to on this
+/// canvas, or null when the element names none.
+///
+/// §15.7.1: a `filter` naming something that is not a `<filter>`, or naming
+/// nothing at all, means the element **is not rendered** -- not that the
+/// filter is skipped. That is one of the few places in SVG where a dangling
+/// reference is defined rather than an error, and resvg agrees. It arrives
+/// here as a filter with no primitives, which produces transparent black,
+/// which is the same answer by a shorter road.
+fn buildFilter(
+    gpa: Allocator,
+    doc: *const document.Document,
+    id: ?[]const u8,
+    ctm: z2d.Transformation,
+    subject: Subject,
+    current: color.Color,
+    width: i32,
+    height: i32,
+    opts: Options,
+) Error!?Filtered {
+    const name = id orelse return null;
+
+    var spec: filter.Filter = blk: {
+        const node = doc.ids.get(name) orelse break :blk .{};
+        break :blk try filter.read(gpa, doc.tree, &doc.ids, node, doc.viewport()) orelse .{};
+    };
+    errdefer spec.deinit(gpa);
+
+    // Measured only when something actually asks in bounding-box units, which
+    // is the common case for the region and the rare one for the primitives.
+    var measure: Measure = .{ .subject = subject };
+    const bbox: Box = if (spec.units == .object_bounding_box or
+        spec.primitive_units == .object_bounding_box)
+        try measure.get(gpa, doc, opts)
+    else
+        .{ .width = 0, .height = 0 };
+
+    const canvas: image.PixelBox = .{ .x0 = 0, .y0 = 0, .x1 = width, .y1 = height };
+    const region_user: Box = switch (spec.units) {
+        .user_space => .{ .x = spec.x, .y = spec.y, .width = spec.width, .height = spec.height },
+        .object_bounding_box => .{
+            .x = bbox.x + spec.x * bbox.width,
+            .y = bbox.y + spec.y * bbox.height,
+            .width = spec.width * bbox.width,
+            .height = spec.height * bbox.height,
+        },
+    };
+
+    return .{
+        .spec = spec,
+        .region = pixelBoxOf(mappedBounds(ctm, region_user)).intersect(canvas),
+        .scale_x = std.math.hypot(ctm.ax, ctm.cx),
+        .scale_y = std.math.hypot(ctm.by, ctm.dy),
+        .ctm = ctm,
+        .bbox = bbox,
+        .current = current,
+    };
+}
+
+/// A device-space box, rounded outwards to whole pixels.
+///
+/// Outwards rather than to nearest, so that a region is never narrower than
+/// the document asked for: losing the outermost row of a blur is visible and
+/// gaining a transparent one is not.
+fn pixelBoxOf(b: Box) image.PixelBox {
+    const lo_x = @floor(b.x);
+    const lo_y = @floor(b.y);
+    const hi_x = @ceil(b.x + b.width);
+    const hi_y = @ceil(b.y + b.height);
+    const limit = @as(f64, @floatFromInt(std.math.maxInt(i32)));
+    return .{
+        .x0 = @intFromFloat(std.math.clamp(lo_x, -limit, limit)),
+        .y0 = @intFromFloat(std.math.clamp(lo_y, -limit, limit)),
+        .x1 = @intFromFloat(std.math.clamp(hi_x, -limit, limit)),
+        .y1 = @intFromFloat(std.math.clamp(hi_y, -limit, limit)),
+    };
+}
+
+fn pixelBoxToUser(b: image.PixelBox) Box {
+    return .{
+        .x = @floatFromInt(b.x0),
+        .y = @floatFromInt(b.y0),
+        .width = @floatFromInt(b.x1 - b.x0),
+        .height = @floatFromInt(b.y1 - b.y0),
+    };
+}
+
+/// Run a filter chain over the layer it applies to, replacing the layer's
+/// content with what came out.
+fn runFilter(gpa: Allocator, target: *z2d.Surface, f: Filtered) Error!void {
+    const clear: z2d.pixel.RGBA = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    const n = f.spec.primitives.len;
+
+    // §15.7.1's empty filter, and a region with no pixels in it, come to the
+    // same thing: the element draws nothing.
+    if (n == 0 or f.region.isEmpty()) {
+        @memset(target.image_surface_rgba.buf, clear);
+        return;
+    }
+
+    var chain: Chain = try .init(gpa, target, f);
+    defer chain.deinit();
+
+    for (f.spec.primitives, 0..) |p, i| {
+        try chain.step(i, p);
+        chain.release(i);
+    }
+
+    // The last primitive is the filter's output, whatever its `result` said.
+    const out = &chain.results[n - 1].?;
+    if (chain.spaces[n - 1] != .srgb) image.toSrgb(out);
+    image.clipTo(out, f.region);
+    @memcpy(target.image_surface_rgba.buf, out.image_surface_rgba.buf);
+}
+
+/// One input, resolved: a surface somebody else owns and the subregion its
+/// content is confined to.
+const Ref = struct {
+    sfc: *z2d.Surface,
+    box: image.PixelBox,
+};
+
+/// The state of one run of a filter chain.
+const Chain = struct {
+    gpa: Allocator,
+    f: Filtered,
+    width: i32,
+    height: i32,
+    /// `SourceGraphic`: the layer as the element painted it, cut to the region.
+    source: z2d.Surface,
+    source_space: filter.ColorSpace,
+    /// `SourceAlpha`, built the first time something asks for it. Black has the
+    /// same value in either colour space, so this one never needs converting.
+    source_alpha: ?z2d.Surface,
+    results: []?z2d.Surface,
+    boxes: []image.PixelBox,
+    spaces: []filter.ColorSpace,
+    /// The last primitive that reads each result, so a buffer can be given back
+    /// the moment nothing can refer to it again. Without this a chain of
+    /// thirty primitives would hold thirty copies of the canvas.
+    last_use: []usize,
+
+    fn init(gpa: Allocator, target: *z2d.Surface, f: Filtered) Error!Chain {
+        const n = f.spec.primitives.len;
+        var source = try target.clone(gpa);
+        errdefer source.deinit(gpa);
+        image.clipTo(&source, f.region);
+
+        const results = try gpa.alloc(?z2d.Surface, n);
+        errdefer gpa.free(results);
+        @memset(results, null);
+        const boxes = try gpa.alloc(image.PixelBox, n);
+        errdefer gpa.free(boxes);
+        const spaces = try gpa.alloc(filter.ColorSpace, n);
+        errdefer gpa.free(spaces);
+        const last_use = try gpa.alloc(usize, n);
+        errdefer gpa.free(last_use);
+
+        var self: Chain = .{
+            .gpa = gpa,
+            .f = f,
+            .width = target.getWidth(),
+            .height = target.getHeight(),
+            .source = source,
+            .source_space = .srgb,
+            .source_alpha = null,
+            .results = results,
+            .boxes = boxes,
+            .spaces = spaces,
+            .last_use = last_use,
+        };
+        self.planLifetimes();
+        return self;
+    }
+
+    fn deinit(self: *Chain) void {
+        self.source.deinit(self.gpa);
+        if (self.source_alpha) |*s| s.deinit(self.gpa);
+        for (self.results) |*r| {
+            if (r.*) |*s| s.deinit(self.gpa);
+        }
+        self.gpa.free(self.results);
+        self.gpa.free(self.boxes);
+        self.gpa.free(self.spaces);
+        self.gpa.free(self.last_use);
+    }
+
+    /// Which primitive last reads each earlier one's result.
+    fn planLifetimes(self: *Chain) void {
+        const prims = self.f.spec.primitives;
+        for (self.last_use, 0..) |*slot, i| slot.* = i;
+        // The last primitive is the filter's answer, so it outlives the loop.
+        self.last_use[prims.len - 1] = prims.len;
+
+        for (prims, 0..) |p, i| {
+            switch (p.kind) {
+                .gaussian_blur => |g| self.noteUse(i, g.in),
+                .offset => |o| self.noteUse(i, o.in),
+                .flood => {},
+                .merge => |m| for (self.f.spec.merge_nodes[m.first..][0..m.count]) |in| {
+                    self.noteUse(i, in);
+                },
+            }
+        }
+    }
+
+    fn noteUse(self: *Chain, reader: usize, in: filter.Input) void {
+        const j = self.slotOf(reader, in) orelse return;
+        self.last_use[j] = @max(self.last_use[j], reader);
+    }
+
+    /// The primitive whose result `in` names, as seen from `reader`, or null
+    /// when it names a source rather than a result.
+    fn slotOf(self: *const Chain, reader: usize, in: filter.Input) ?usize {
+        switch (in) {
+            .source_graphic, .source_alpha => return null,
+            // §15.7.2: at the head of a chain "the one before" means the
+            // source, and after it, it means the one before.
+            .previous => return if (reader == 0) null else reader - 1,
+            .named => |want| {
+                // Backwards, so that two primitives sharing a `result` name
+                // resolve to the nearer one -- which is what a chain written
+                // that way means.
+                var i = reader;
+                while (i > 0) {
+                    i -= 1;
+                    const r = self.f.spec.primitives[i].result orelse continue;
+                    if (std.mem.eql(u8, r, want)) return i;
+                }
+                return null;
+            },
+        }
+    }
+
+    /// Give back every buffer that nothing after `i` can refer to.
+    fn release(self: *Chain, i: usize) void {
+        for (self.results[0 .. i + 1], 0..) |*r, j| {
+            if (self.last_use[j] > i) continue;
+            if (r.*) |*s| {
+                s.deinit(self.gpa);
+                r.* = null;
+            }
+        }
+    }
+
+    /// Hand back the surface an `in` names, converted into `want` if it is not
+    /// already there.
+    ///
+    /// The conversion is in place, which is how resvg does it and is why a
+    /// chain that alternates colour spaces loses a little precision each time:
+    /// eight bits of linear light is a coarse thing to keep a picture in.
+    fn resolve(self: *Chain, reader: usize, in: filter.Input, want: filter.ColorSpace) Error!Ref {
+        // A named input nothing produced is an error rather than a silent
+        // transparent black: the document meant a buffer that is not there.
+        if (in == .named and self.slotOf(reader, in) == null) return error.BadFilterInput;
+
+        if (in == .source_alpha) {
+            if (self.source_alpha == null) {
+                var a = try self.source.clone(self.gpa);
+                image.alphaOnly(&a);
+                self.source_alpha = a;
+            }
+            return .{ .sfc = &self.source_alpha.?, .box = self.f.region };
+        }
+        if (self.slotOf(reader, in)) |j| {
+            const sfc = &self.results[j].?;
+            if (self.spaces[j] != want) {
+                convert(sfc, want);
+                self.spaces[j] = want;
+            }
+            return .{ .sfc = sfc, .box = self.boxes[j] };
+        }
+        if (self.source_space != want) {
+            convert(&self.source, want);
+            self.source_space = want;
+        }
+        return .{ .sfc = &self.source, .box = self.f.region };
+    }
+
+    /// The subregion a primitive's output is confined to. §15.7.6.
+    ///
+    /// The default is the union of what its inputs covered, which for a chain
+    /// that sets no subregions anywhere is the filter region throughout. An
+    /// attribute overrides one edge of that at a time, so a primitive may set
+    /// `x` alone and inherit the other three.
+    fn subregion(self: *Chain, reader: usize, p: filter.Primitive, default: image.PixelBox) image.PixelBox {
+        if (p.x == null and p.y == null and p.width == null and p.height == null) {
+            return default.intersect(self.f.region);
+        }
+        _ = reader;
+        // The defaults are in canvas pixels and the attributes are in user
+        // units, so the two are met in user space: the default box is taken
+        // back through the matrix, the attributes replace the edges they name,
+        // and the result comes forward again.
+        const inv = self.f.ctm.inverse() catch return default.intersect(self.f.region);
+        const du = mappedBounds(inv, pixelBoxToUser(default));
+
+        const bbox = self.f.bbox;
+        const bbox_units = self.f.spec.primitive_units == .object_bounding_box;
+        const x = if (p.x) |v| (if (bbox_units) bbox.x + v * bbox.width else v) else du.x;
+        const y = if (p.y) |v| (if (bbox_units) bbox.y + v * bbox.height else v) else du.y;
+        const w = if (p.width) |v| (if (bbox_units) v * bbox.width else v) else du.width;
+        const h = if (p.height) |v| (if (bbox_units) v * bbox.height else v) else du.height;
+
+        const dev = mappedBounds(self.f.ctm, .{ .x = x, .y = y, .width = w, .height = h });
+        return pixelBoxOf(dev).intersect(self.f.region);
+    }
+
+    /// A length written in `primitiveUnits`, in canvas pixels.
+    fn lengthX(self: *const Chain, v: f64) f64 {
+        const user = if (self.f.spec.primitive_units == .object_bounding_box)
+            v * self.f.bbox.width
+        else
+            v;
+        return user * self.f.scale_x;
+    }
+
+    fn lengthY(self: *const Chain, v: f64) f64 {
+        const user = if (self.f.spec.primitive_units == .object_bounding_box)
+            v * self.f.bbox.height
+        else
+            v;
+        return user * self.f.scale_y;
+    }
+
+    fn blank(self: *Chain) Error!z2d.Surface {
+        return z2d.Surface.init(.image_surface_rgba, self.gpa, self.width, self.height);
+    }
+
+    /// Run one primitive and leave its output in `results[i]`.
+    fn step(self: *Chain, i: usize, p: filter.Primitive) Error!void {
+        const space = p.color_space;
+        switch (p.kind) {
+            .gaussian_blur => |g| {
+                const in = try self.resolve(i, g.in, space);
+                var out = try in.sfc.clone(self.gpa);
+                errdefer out.deinit(self.gpa);
+                try image.gaussianBlur(
+                    self.gpa,
+                    &out,
+                    self.f.region,
+                    self.lengthX(g.std_dev_x),
+                    self.lengthY(g.std_dev_y),
+                );
+                self.finish(i, out, self.subregion(i, p, in.box), space);
+            },
+            .offset => |o| {
+                const in = try self.resolve(i, o.in, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const dx = roundToPixel(self.lengthX(o.dx));
+                const dy = roundToPixel(self.lengthY(o.dy));
+                image.offset(&out, in.sfc, dx, dy);
+                // §15.7.6 defaults a subregion to the union of its *inputs'*
+                // subregions, and does not move it: a shadow offset past the
+                // edge of what its input covered is cut off there, which is
+                // why a drop shadow needs a region wide enough to hold it.
+                self.finish(i, out, self.subregion(i, p, in.box), space);
+            },
+            .flood => |fl| {
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                // A flood covers its subregion and nothing else, so the
+                // subregion is worked out first and then filled.
+                const box = self.subregion(i, p, self.f.region);
+                image.flood(&out, floodPixel(fl.color orelse self.f.current, fl.opacity, space), box);
+                self.finish(i, out, box, space);
+            },
+            .merge => |m| {
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                var covered: image.PixelBox = .{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
+                for (self.f.spec.merge_nodes[m.first..][0..m.count]) |node| {
+                    const in = try self.resolve(i, node, space);
+                    // Document order, first at the bottom: §15.19.
+                    out.composite(in.sfc, .src_over, 0, 0, .{ .precision = .float });
+                    covered = covered.unite(in.box);
+                }
+                self.finish(i, out, self.subregion(i, p, covered), space);
+            },
+        }
+    }
+
+    fn finish(
+        self: *Chain,
+        i: usize,
+        out: z2d.Surface,
+        box: image.PixelBox,
+        space: filter.ColorSpace,
+    ) void {
+        var owned = out;
+        image.clipTo(&owned, box);
+        self.results[i] = owned;
+        self.boxes[i] = box;
+        self.spaces[i] = space;
+    }
+};
+
+fn convert(sfc: *z2d.Surface, want: filter.ColorSpace) void {
+    switch (want) {
+        .linear_rgb => image.toLinear(sfc),
+        .srgb => image.toSrgb(sfc),
+    }
+}
+
+/// `feOffset` moves by whole pixels. The fractional part is rounded away
+/// rather than resampled, which is what resvg does and what keeps an offset
+/// from softening the thing it moves.
+fn roundToPixel(v: f64) i32 {
+    if (!std.math.isFinite(v)) return 0;
+    const limit = @as(f64, @floatFromInt(std.math.maxInt(i32) / 2));
+    return @intFromFloat(@round(std.math.clamp(v, -limit, limit)));
+}
+
+/// `flood-color` and `flood-opacity`, premultiplied and in the space the
+/// primitive runs in.
+fn floodPixel(c: color.Color, opacity: f64, space: filter.ColorSpace) z2d.pixel.RGBA {
+    const alpha = std.math.clamp(c.alpha * opacity, 0, 1);
+    const in_space: [3]u8 = switch (space) {
+        .srgb => .{ c.r, c.g, c.b },
+        .linear_rgb => .{ image.linearize(c.r), image.linearize(c.g), image.linearize(c.b) },
+    };
+    return z2d.pixel.RGBA.fromClamped(
+        @as(f64, @floatFromInt(in_space[0])) / 255.0,
+        @as(f64, @floatFromInt(in_space[1])) / 255.0,
+        @as(f64, @floatFromInt(in_space[2])) / 255.0,
+        alpha,
+    );
 }
 
 /// What a shape is painted with: one colour, or a gradient to be built.
@@ -783,6 +1286,9 @@ const Layers = struct {
         opacity: f64,
         /// The alpha mask this layer is cut to, or null. Owned by the entry.
         clip: ?z2d.Surface = null,
+        /// The filter this layer's finished picture is put through before any
+        /// of that, or null. Owned by the entry.
+        filter: ?Filtered = null,
     };
 
     fn target(self: *Layers) *z2d.Surface {
@@ -795,13 +1301,18 @@ const Layers = struct {
         gpa: Allocator,
         opacity: f64,
         clip: ?z2d.Surface,
+        filtered: ?Filtered,
         limit: usize,
     ) Error!void {
-        if (self.depth >= @min(limit, max_stack)) return error.TooManyLayers;
         errdefer if (clip) |c| {
             var owned = c;
             owned.deinit(gpa);
         };
+        errdefer if (filtered) |f| {
+            var owned = f;
+            owned.deinit(gpa);
+        };
+        if (self.depth >= @min(limit, max_stack)) return error.TooManyLayers;
         const below = self.target();
         // Transparent and with an alpha channel whatever the destination is,
         // because the whole point is to know afterwards which of its pixels
@@ -812,17 +1323,28 @@ const Layers = struct {
             below.getWidth(),
             below.getHeight(),
         );
-        self.stack[self.depth] = .{ .surface = sfc, .opacity = opacity, .clip = clip };
+        self.stack[self.depth] = .{
+            .surface = sfc,
+            .opacity = opacity,
+            .clip = clip,
+            .filter = filtered,
+        };
         self.depth += 1;
     }
 
-    fn close(self: *Layers, gpa: Allocator) void {
+    fn close(self: *Layers, gpa: Allocator) Error!void {
         if (self.depth == 0) return;
         self.depth -= 1;
         var entry = self.stack[self.depth];
         defer entry.surface.deinit(gpa);
 
         defer if (entry.clip) |*c| c.deinit(gpa);
+        defer if (entry.filter) |*f| f.deinit(gpa);
+
+        // §15 first, and it is first for a reason: a filter reads the layer as
+        // the element painted it, and the clip, the mask and the opacity all
+        // apply to what the filter produced rather than to what it read.
+        if (entry.filter) |f| try runFilter(gpa, &entry.surface, f);
 
         const below = self.target();
         // A clip is the same `dst_in` as the opacity, with a mask surface in
@@ -855,6 +1377,7 @@ const Layers = struct {
             self.depth -= 1;
             self.stack[self.depth].surface.deinit(gpa);
             if (self.stack[self.depth].clip) |*c| c.deinit(gpa);
+            if (self.stack[self.depth].filter) |*f| f.deinit(gpa);
         }
     }
 };
@@ -3177,23 +3700,158 @@ test "the object bounding box is measured before the element's own transform" {
     try testing.expectEqual(@as(u8, 0), surface.getPixel(8, 4).?.rgba.a);
 }
 
-test "a filter is refused rather than quietly dropped" {
+test "a filter naming nothing draws nothing at all" {
     const gpa = testing.allocator;
-    // Attributes are normally ignored, but drawing an element *without* the
-    // filter it asked for is a picture that looks finished and is not. `mask`
-    // was refused here too until it was implemented.
-    try testing.expectError(error.FilterUnsupported, render(
-        gpa,
-        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
-        .{},
-    ));
-    // `none` asks for neither, so it is not a refusal.
+    // §15.7.1, and one of the few places in SVG where a dangling reference is
+    // *defined* rather than an error: the element is not rendered. resvg
+    // agrees, and a document relying on it looks completely different if the
+    // filter is merely skipped.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#nope)\"/></svg>",
+        // Names something real that is not a filter.
+        "<svg viewBox=\"0 0 8 8\"><g id=\"g\"/><rect width=\"8\" height=\"8\" filter=\"url(#g)\"/></svg>",
+        // A filter with no primitives produces transparent black.
+        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"/><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    }) |src| {
+        var surface = try render(gpa, src, .{ .width = 8, .height = 8 });
+        defer surface.deinit(gpa);
+        for (surface.image_surface_rgba.buf) |px| try testing.expectEqual(@as(u8, 0), px.a);
+    }
+
+    // `none` asks for no filter at all, which is not the same as asking for
+    // one that is not there: the element draws normally.
     var surface = try render(
         gpa,
         "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",
         .{ .width = 8, .height = 8 },
     );
     defer surface.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), surface.image_surface_rgba.buf[0].a);
+}
+
+test "a primitive this does not implement is refused" {
+    const gpa = testing.allocator;
+    // The rule the rest of the library follows: a chain with a link missing
+    // is not the picture the document asked for, so it is refused rather than
+    // run with the link left out.
+    try testing.expectError(error.UnsupportedFilterPrimitive, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feTurbulence baseFrequency=\"0.1\"/></filter>" ++
+            "<rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    ));
+    // An `in` naming a result nothing produced is the document meaning a
+    // buffer that is not there, rather than meaning transparent black.
+    try testing.expectError(error.BadFilterInput, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset in=\"absent\" dx=\"1\"/></filter>" ++
+            "<rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    ));
+    try testing.expectError(error.BadStdDeviation, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"-1\"/></filter>" ++
+            "<rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    ));
+}
+
+test "a blur spreads a shape and the filter region cuts it off" {
+    const gpa = testing.allocator;
+    // The default region is §15.7.5's -10%,-10%,120%,120% of the bounding
+    // box, which is room for a small blur and not for a large one. A document
+    // that wants more says so; one that does not gets a hard edge, and that
+    // is the document's answer rather than this renderer's mistake.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 40 40\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"2\"/></filter>" ++
+            "<rect x=\"10\" y=\"10\" width=\"20\" height=\"20\" fill=\"#000\" filter=\"url(#f)\"/></svg>",
+        .{ .width = 40, .height = 40 },
+    );
+    defer surface.deinit(gpa);
+
+    const at = struct {
+        fn f(sfc: *z2d.Surface, x: i32, y: i32) u8 {
+            return sfc.image_surface_rgba.buf[@intCast(y * sfc.getWidth() + x)].a;
+        }
+    }.f;
+
+    // Soft where the edge was, solid in the middle, and nothing at all
+    // outside the region -- which runs from 8 to 32.
+    try testing.expectEqual(@as(u8, 255), at(&surface, 20, 20));
+    try testing.expect(at(&surface, 10, 20) > 60);
+    try testing.expect(at(&surface, 10, 20) < 200);
+    try testing.expect(at(&surface, 8, 20) > 0);
+    try testing.expectEqual(@as(u8, 0), at(&surface, 7, 20));
+    try testing.expectEqual(@as(u8, 0), at(&surface, 32, 20));
+}
+
+test "a drop shadow is an offset flood cut to the blurred alpha, merged under the source" {
+    const gpa = testing.allocator;
+    // The canonical five-primitive chain, which is what `<filter>` is for in
+    // practice and what exercises `result` names, `SourceAlpha` and the merge
+    // order all at once.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 40 40\">" ++
+            "<filter id=\"f\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">" ++
+            "<feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"1\" result=\"b\"/>" ++
+            "<feOffset in=\"b\" dx=\"4\" dy=\"4\" result=\"o\"/>" ++
+            "<feMerge><feMergeNode in=\"o\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>" ++
+            "</filter>" ++
+            "<rect x=\"10\" y=\"10\" width=\"16\" height=\"16\" fill=\"red\" filter=\"url(#f)\"/></svg>",
+        .{ .width = 40, .height = 40 },
+    );
+    defer surface.deinit(gpa);
+
+    const px = struct {
+        fn f(sfc: *z2d.Surface, x: i32, y: i32) z2d.pixel.RGBA {
+            return sfc.image_surface_rgba.buf[@intCast(y * sfc.getWidth() + x)];
+        }
+    }.f;
+
+    // The rectangle itself is still red and still on top of its own shadow.
+    try testing.expectEqual(@as(u8, 255), px(&surface, 18, 18).r);
+    try testing.expectEqual(@as(u8, 255), px(&surface, 18, 18).a);
+    // Below and right of it, black with nothing red in it: the shadow came
+    // from `SourceAlpha`, which throws the colour away.
+    const shadow = px(&surface, 28, 28);
+    try testing.expect(shadow.a > 128);
+    try testing.expectEqual(@as(u8, 0), shadow.r);
+    // Above and left there is neither shape nor shadow.
+    try testing.expectEqual(@as(u8, 0), px(&surface, 6, 6).a);
+}
+
+test "a filter runs in linearRGB unless the document says otherwise" {
+    const gpa = testing.allocator;
+    // §15.3, and the surprise in the whole of `<filter>`: the midpoint of a
+    // blurred black-and-white boundary is a long way from the midpoint of the
+    // numbers, because the average is taken of the light.
+    const doc =
+        "<svg viewBox=\"0 0 32 16\"><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"{s}>" ++
+        "<feGaussianBlur stdDeviation=\"3\"/></filter>" ++
+        "<g filter=\"url(#f)\"><rect width=\"16\" height=\"16\" fill=\"#fff\"/>" ++
+        "<rect x=\"16\" width=\"16\" height=\"16\" fill=\"#000\"/></g></svg>";
+
+    var linear_src: [512]u8 = undefined;
+    var srgb_src: [512]u8 = undefined;
+    const linear = try std.fmt.bufPrint(&linear_src, doc, .{""});
+    const srgb = try std.fmt.bufPrint(&srgb_src, doc, .{" color-interpolation-filters=\"sRGB\""});
+
+    var a = try render(gpa, linear, .{ .width = 32, .height = 16 });
+    defer a.deinit(gpa);
+    var b = try render(gpa, srgb, .{ .width = 32, .height = 16 });
+    defer b.deinit(gpa);
+
+    const mid = struct {
+        fn f(sfc: *z2d.Surface) u8 {
+            return sfc.image_surface_rgba.buf[@intCast(8 * sfc.getWidth() + 16)].r;
+        }
+    }.f;
+    // In sRGB the boundary lands near half of 255; in linearRGB it lands far
+    // brighter, because half the light is about 188.
+    try testing.expect(mid(&b) < 140);
+    try testing.expect(mid(&a) > 165);
 }
 
 test "a pattern draws its tile once per cell, and refuses an absurd lattice" {

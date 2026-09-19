@@ -71,6 +71,10 @@ pub const shapes = @import("shapes.zig");
 /// `<linearGradient>` and `<radialGradient>`.
 pub const gradient = @import("gradient.zig");
 pub const pattern = @import("pattern.zig");
+/// `<filter>` and its primitives: SVG 1.1 §15.
+pub const filter = @import("filter.zig");
+/// The pixel operations those primitives are made of.
+pub const image = @import("image.zig");
 /// The `style` attribute of SVG 1.1 §6.3: one CSS declaration block, which
 /// outranks the presentation attributes beside it.
 pub const style = @import("style.zig");
@@ -125,6 +129,8 @@ test {
     _ = shapes;
     _ = gradient;
     _ = pattern;
+    _ = filter;
+    _ = image;
     _ = style;
     _ = length;
     _ = path;

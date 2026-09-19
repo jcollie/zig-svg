@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><filter id="f" filterUnits="userSpaceOnUse" x="20" y="20" width="24" height="24"><feGaussianBlur stdDeviation="5"/></filter><circle cx="32" cy="32" r="16" fill="#2e8b57" filter="url(#f)"/></svg>

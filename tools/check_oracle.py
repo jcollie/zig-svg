@@ -30,6 +30,11 @@ the picture is more than a little apart -- with the thresholds chosen from what
 the corpus actually measures and written down below, so that a regression moves
 a number somebody can see rather than flipping a boolean.
 
+A fixture named in `DIVERGENCES` is held to its own tolerance and printed as
+"diff" rather than "ok", because it is a place where the two renderers really
+do disagree and the disagreement has been argued rather than absorbed. The
+reason is written beside the entry.
+
 A fixture this renderer refuses produces no PNG. That is reported as "not
 implemented" and is not a failure: the corpus deliberately holds documents that
 are on the feature list, and a missing feature should read as a missing feature
@@ -69,6 +74,43 @@ from PIL import Image
 MEAN_TOLERANCE = 0.5
 OUTLIER_LEVEL = 32
 OUTLIER_FRACTION = 0.0025
+
+# Fixtures where this renderer and resvg are *both* doing what they meant to,
+# and the numbers above are the wrong yardstick.
+#
+# Each entry is a deliberate, argued exception with the measurement it was set
+# from, not a threshold raised until something passed. Anything not named here
+# is held to the tolerances above, so a new disagreement still shows up as a
+# failure rather than disappearing into a blanket allowance.
+#
+# All four are `<filter>`, and they are here for two separate reasons.
+#
+# **The kernel.** §15.17 defines `feGaussianBlur` as a Gaussian and then offers
+# an approximation -- "the implementation *can* approximate the Gaussian blur
+# with three successive box-blurs". This renderer convolves the Gaussian
+# itself; resvg's kernel was measured against an impulse and is an
+# infinite-impulse-response approximation, noticeably more peaked than a
+# Gaussian below about `stdDeviation` three and indistinguishable from one
+# above it. Two approximations of the same curve differ by a level or two
+# across the whole of a blurred area rather than along an edge, which is
+# exactly the shape of disagreement a mean tolerance tuned for antialiasing
+# does not fit.
+#
+# **The region edge.** §15.7.5 makes the filter region "a hard clip" on the
+# filter's input and its output. Clip the input, convolve, clip the output:
+# at the region's boundary the result is half the kernel's weight, and that is
+# what this renderer draws. resvg draws the square of that -- measured at
+# 77/255 where a convolution gives 140/255, and matching `blur(source) x
+# blur(region)` to within a level across the whole profile. That product is
+# not a linear operator, and `feGaussianBlur` is defined as a convolution,
+# which is; so this is one of the places where the oracle is the one that is
+# wrong, and the fixture is kept to record it rather than reshaped to hide it.
+DIVERGENCES = {
+    "filter-blur": (1.2, 0.0025, "region-edge clip, and the blur kernel"),
+    "filter-linear": (1.5, 0.0025, "blur kernel, in linearRGB"),
+    "filter-srgb": (1.5, 0.0025, "blur kernel, in sRGB"),
+    "filter-region": (4.0, 0.09, "region-edge clip, which this fixture exists to exercise"),
+}
 
 
 def render_reference(resvg, svg_path, png_path, width, height):
@@ -192,17 +234,26 @@ def main():
         render_reference(resvg, svg_path, theirs_path, width, height)
 
         mean, outlier_fraction, worst = compare(ours_path, theirs_path)
-        ok = mean <= MEAN_TOLERANCE and outlier_fraction <= OUTLIER_FRACTION
+        mean_limit, outlier_limit, reason = DIVERGENCES.get(
+            name, (MEAN_TOLERANCE, OUTLIER_FRACTION, None)
+        )
+        ok = mean <= mean_limit and outlier_fraction <= outlier_limit
         checked += 1
+        label = "FAIL" if not ok else ("diff" if reason else "ok  ")
         print(
-            f"{'ok  ' if ok else 'FAIL'} {name:<38} "
+            f"{label} {name:<38} "
             f"mean {mean:6.3f}  outliers {outlier_fraction * 100:6.3f}%  worst {worst:3d}"
+            + (f"   [{reason}]" if reason else "")
         )
         if not ok:
             failures.append(name)
 
     print()
-    print(f"{checked} compared against resvg, {len(failures)} beyond tolerance")
+    diverging = sum(1 for name in DIVERGENCES if name in sizes)
+    print(
+        f"{checked} compared against resvg, {len(failures)} beyond tolerance"
+        + (f", {diverging} marked as known divergences" if diverging else "")
+    )
     if skipped:
         print(f"{len(skipped)} not implemented: {', '.join(skipped)}")
 

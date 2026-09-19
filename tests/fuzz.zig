@@ -116,7 +116,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "textfon-amilysizewghtylanchormddlbup" ++
     "emx0.5" ++
     "textPathstOf%" ++
-    "style:;!importan";
+    "style:;!importan" ++
+    "filterGausinBlurOfetMrgNodFlvyUS";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -785,6 +786,32 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"1em\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><g font-size=\"0\"><rect width=\"1em\" height=\"1\"/></g></svg>",
+    // §15's `<filter>`: the region, the primitives, and the ways a chain can
+    // be wired up.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"2 0\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" filterUnits=\"userSpaceOnUse\" x=\"1\" y=\"1\" width=\"4\" height=\"4\"><feGaussianBlur stdDeviation=\"1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feGaussianBlur stdDeviation=\"0.1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"2\" dy=\"-1\"/></filter><rect width=\"4\" height=\"4\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood flood-color=\"red\" flood-opacity=\"0.5\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood flood-color=\"currentColor\"/></filter><rect width=\"8\" height=\"8\" color=\"lime\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"1\" result=\"b\"/>" ++
+        "<feOffset in=\"b\" dx=\"1\" dy=\"1\" result=\"o\"/><feMerge><feMergeNode in=\"o\"/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>" ++
+        "<rect width=\"6\" height=\"6\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"1\" color-interpolation-filters=\"sRGB\"/><feOffset dx=\"1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood x=\"1\" y=\"1\" width=\"2\" height=\"2\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"1\" x=\"2\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g filter=\"url(#f)\"><rect width=\"4\" height=\"4\"/></g><filter id=\"f\"><feGaussianBlur stdDeviation=\"1\"/></filter></svg>",
+    // The shapes a filter reference can be in, well-formed and not.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#gone)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"/><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feTurbulence/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"-1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset in=\"nothing\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"1e9\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"a\" href=\"#b\"/><filter id=\"b\" href=\"#a\"><feOffset/></filter><rect width=\"8\" height=\"8\" filter=\"url(#a)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feMerge/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
     // §6.3's `style`, which is the same properties written the other way and
     // outranking the attributes.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:red\"/></svg>",

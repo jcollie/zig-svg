@@ -134,10 +134,6 @@ pub const Error = error{
     /// `max_use_hops`. Not a cycle -- those are caught exactly -- but a chain
     /// nothing sensible produces.
     TooManyUseHops,
-    /// A `filter` attribute. Refused rather than ignored: drawing the element
-    /// without the filter it asked for is a picture that looks finished and is
-    /// not.
-    FilterUnsupported,
     /// A `text-anchor` that is not one of §10.9's three.
     BadTextAnchor,
     /// A `font-weight` that is neither a number in range nor `normal` or
@@ -377,18 +373,30 @@ pub const Group = struct {
     /// The id of a `<mask>` the layer is cut to, or null. A layer may have
     /// both, and then it is cut to the intersection.
     mask: ?[]const u8,
+    /// The id of a `<filter>` the finished layer is put through, or null.
+    /// §15 applies it before the clip, the mask and the opacity, so it sees
+    /// the layer as painted and they see what it produced.
+    filter: ?[]const u8,
+    /// The `color` in force on the container, which is what a `currentColor`
+    /// inside its filter resolves to. Carried because a filter's own elements
+    /// inherit nothing from the document -- they are in `<defs>`.
+    current_color: ?color.Color,
     /// The user-space matrix in force on the container, which is the space the
     /// clip path's own coordinates are in.
     transform: z2d.Transformation,
 };
 
-/// What an element's `clip-path` and `mask` attributes name.
+/// What an element's `clip-path`, `mask` and `filter` attributes name.
 const Refs = struct {
     clip_path: ?[]const u8,
     mask: ?[]const u8,
+    filter: ?[]const u8,
 
+    /// Whether the element needs a surface of its own. Any of the three does
+    /// it: a clip and a mask because `dst_in` is a whole-surface operation,
+    /// and a filter because it reads the element's finished rendering.
     fn any(self: Refs) bool {
-        return self.clip_path != null or self.mask != null;
+        return self.clip_path != null or self.mask != null or self.filter != null;
     }
 };
 
@@ -426,6 +434,9 @@ pub const Shape = struct {
     /// The id of a `<clipPath>` this shape is cut to, or null. Not inherited:
     /// a clip applies to the element that names it.
     clip_path: ?[]const u8,
+    /// The id of a `<filter>` this shape's rendering is put through, or
+    /// null. §15 applies it before the clip, the mask and the opacity.
+    filter: ?[]const u8,
     /// The id of a `<mask>` this shape is cut to, or null. Not inherited
     /// either, and a shape may carry both.
     mask: ?[]const u8,
@@ -729,6 +740,8 @@ pub const PathIterator = struct {
                 .opacity = opacity,
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
+                .filter = refs.filter,
+                .current_color = root_inherited.current_color,
                 .transform = ctm,
             } };
         }
@@ -838,6 +851,7 @@ pub const PathIterator = struct {
                 .opacity = 1.0,
                 .clip_path = null,
                 .mask = null,
+                .filter = null,
                 .transform = parent.transform,
             },
         };
@@ -903,18 +917,13 @@ pub const PathIterator = struct {
         return color.parseOpacity(raw);
     }
 
-    /// What an element's `clip-path` and `mask` name, or null for each.
-    ///
-    /// This is also where `filter` is refused. It is an attribute and
-    /// attributes are normally ignored -- but ignoring this one draws the
-    /// element *without* the filter it asked for, which is a picture that
-    /// looks finished and is not. `clip-path` and `mask` were both refused
-    /// here too until each was implemented.
+    /// What an element's `clip-path`, `mask` and `filter` name, or null for
+    /// each.
     fn refsOf(self: *const PathIterator, node: ztree.NodeId) Error!Refs {
-        if (namesSomething(self.presentation(node, "filter"))) return error.FilterUnsupported;
         return .{
             .clip_path = try self.referenceAttr(node, "clip-path"),
             .mask = try self.referenceAttr(node, "mask"),
+            .filter = try self.referenceAttr(node, "filter"),
         };
     }
 
@@ -1015,6 +1024,7 @@ pub const PathIterator = struct {
                 .opacity = try self.opacityOf(node),
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
+                .filter = refs.filter,
                 .transform = own_ctm,
             } };
         }
@@ -1031,6 +1041,8 @@ pub const PathIterator = struct {
                 .opacity = opacity,
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
+                .filter = refs.filter,
+                .current_color = effective.current_color,
                 .transform = own_ctm,
             } };
             return null;

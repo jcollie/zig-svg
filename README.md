@@ -266,11 +266,47 @@ rather than by the walk, which never visits either element as somebody's child;
 a cycle the walk cannot see — each level starts a fresh walk that is perfectly
 finite on its own.
 
-**`filter` is refused, not ignored.** Every other attribute this library does
-not implement is passed over, because an attribute is usually decoration — but
-drawing an element *without* the filter it asked for is a picture that looks
-finished and is not. `clip-path` and `mask` were both refused here too, until
-each was implemented.
+**`<filter>` applies to what an element *drew*, not to what it is.** It takes
+the picture the element would have produced, puts it through a chain of image
+operations, and draws the result instead. That is why it costs no new idea
+here: the element is already drawn into a surface of its own for group opacity,
+and a filter is one more thing that happens to that surface between painting it
+and compositing it down. §15 orders that carefully — the filter
+runs first, and the element's `clip-path`, `mask` and `opacity` then apply to
+what the filter produced rather than to what it read.
+
+`feGaussianBlur`, `feOffset`, `feFlood` and `feMerge` are implemented, with
+`in`, `result`, `SourceGraphic` and `SourceAlpha` wiring them together, which
+is between them the canonical drop shadow and most of what documents in the
+wild actually use. Any other `fe` element is **refused**, because a chain with
+a link missing is not the picture the document asked for.
+
+**A filter runs on the canvas, not in user space.** A `stdDeviation` in user
+units becomes a standard deviation in device pixels by the scale of the matrix
+in force, and the rotation in that matrix is deliberately *not* carried: a
+horizontal blur under `rotate(45)` blurs along the screen's horizontal, not the
+element's. That is what resvg does, what browsers do, and the reason the filter
+region is an axis-aligned rectangle of the canvas rather than a rotated one.
+
+**It runs in linearRGB.** §15.3 makes that the default, and it is the surprise
+in the whole element: blurring the boundary between white and black gives a
+midpoint of 188, not 128, because the average is taken of the light rather than
+of the numbers. `color-interpolation-filters: sRGB` switches it off, per
+primitive. Getting this wrong is worth about seventy levels in the middle of
+every gradient a filter touches. Note that it is *not* used for the luminance
+of a `<mask>`, where this follows resvg in leaving the bytes alone — the two
+neighbouring decisions genuinely go opposite ways, and each has a fixture.
+
+**A filter naming nothing draws nothing.** §15.7.1 makes a `filter` pointing at
+a missing id, at an element that is not a `<filter>`, or at a filter with no
+primitives mean that *the element is not rendered* — not that the filter is
+skipped. It is one of the few places in SVG where a dangling reference is
+defined rather than an error, and resvg agrees.
+
+`filterRes` is ignored, which resvg does too. It is a deprecated request to run
+the filter at a lower resolution and scale the result up, it was dropped from
+Filter Effects 1, and ignoring it draws a *sharper* picture than the document
+asked for rather than a wrong one.
 
 A `style` attribute is read, and outranks the presentation attribute of the
 same name — `fill="red" style="fill:blue"` is blue. It matters more than its
@@ -371,7 +407,10 @@ short of the specification.
 | `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
-| `filter` | **no** — refused, not ignored |
+| `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`; any other `fe` element is refused |
+| `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
+| `color-interpolation-filters` | yes — linearRGB by default, per primitive |
+| `filterRes` | ignored, as resvg ignores it |
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>` | yes — `patternUnits`, `patternContentUnits`, `patternTransform`, `viewBox`, `href`, and `overflow` |
 | `<text>`, `<tspan>` | yes — a sequence of runs, filled or stroked, and usable as a clip |
@@ -601,6 +640,33 @@ and a percentage alpha `rgba(255, 0, 0, 50%)`. None of the three appears in the
 corpus, since a fixture using one would be testing resvg's gap rather than this
 code.
 
+Four fixtures are held to their own tolerances, named in `DIVERGENCES` at the
+top of `tools/check_oracle.py` with the reason beside each and printed as
+*diff* rather than *ok* so they stay visible. All four are `<filter>`, for two
+separate reasons.
+
+The first is the **blur kernel**. §15.17 defines `feGaussianBlur` as a Gaussian
+and then offers an approximation — "the implementation *can* approximate the
+Gaussian blur with three successive box-blurs" — and the word is *can*. This
+convolves the Gaussian itself. resvg's kernel was measured here against an
+impulse and is neither: it is an infinite-impulse-response approximation,
+noticeably more peaked than a Gaussian below about `stdDeviation` three and
+indistinguishable from one above it. Two approximations of the same curve
+differ by a level or two across the whole of a blurred area rather than along
+an edge, which is exactly the shape of disagreement a tolerance tuned for
+antialiasing does not fit — `filter-srgb` measures 0.805 with a worst pixel of
+6, which is a lot of pixels differing by one and none differing visibly.
+
+The second is the **region edge**, and here the oracle is the one that is
+wrong. §15.7.5 makes the filter region "a hard clip" on the filter's input and
+its output: clip the input, convolve, clip the output, and at the boundary the
+result is half the kernel's weight. That is what this draws — 140 of 255 where
+it was measured. resvg draws 77, which is the *square* of that, and matches
+`blur(source) × blur(region)` to within a level across the whole profile. A
+product of two blurs is not a linear operator, and `feGaussianBlur` is defined
+as a convolution, which is. `filter-region` exists to record the difference
+rather than being reshaped to avoid it.
+
 ## Fuzzing
 
 `tests/fuzz.zig` holds five targets — the path grammar, the same path
@@ -671,10 +737,12 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Nothing is queued. What SVG 1.1 has that this does not is `<filter>`, CSS
-proper — a `<style>` element, selectors, a cascade — and the
-`spacingAndGlyphs` form of `lengthAdjust`. Each is refused rather than ignored,
-so a document needing one says so.
+CSS proper — a `<style>` element, selectors, a cascade — is next, and after
+that the filter primitives this does not yet have: `feColorMatrix`,
+`feComposite`, `feBlend`, `feComponentTransfer`, `feTile`, `feMorphology`,
+`feImage`, and the three that need a light model. The `spacingAndGlyphs` form
+of `lengthAdjust` is the remaining gap outside those two. Each is refused
+rather than ignored, so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

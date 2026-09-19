@@ -113,7 +113,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "clip-pathruevnodmaskfilter" ++
     "maskUnitContbjeBoudgxywh-typelumnac" ++
     "patternUnitsContTransfombjeBox" ++
-    "textfon-amilysizewghtylanchormddlbup";
+    "textfon-amilysizewghtylanchormddlbup" ++
+    "emx0.5";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -743,6 +744,13 @@ const document_corpus = [_][]const u8{
     // by a route that is not the ordinary fill.
     "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><text x=\"1\" y=\"6\" font-size=\"6\">c</text></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><text x=\"0\" y=\"3\" font-size=\"3\">x</text></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    // `em` and `ex`, whose whole subtlety is the order: `em` in `font-size`
+    // is the parent's size and `em` in anything else is this element's.
+    "<svg viewBox=\"0 0 8 8\"><g font-size=\"4\"><rect width=\"1em\" height=\"1ex\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g font-size=\"4\"><rect font-size=\"2em\" width=\"1em\" height=\"1\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"1em\" height=\"1\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g font-size=\"0\"><rect width=\"1em\" height=\"1\"/></g></svg>",
     // Text properties that are not values at all.
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" text-anchor=\"centre\">hi</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-weight=\"heavy\">hi</text></svg>",

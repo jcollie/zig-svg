@@ -135,6 +135,17 @@ is collapsed the way XML's default `xml:space` asks: text indented across
 several lines in the source draws as one line, which is how documents are
 actually written.
 
+`em` and `ex` resolve against the `font-size` in force, which arrived with the
+fonts: `1em` is that size and `1ex` is half of it, measured against resvg,
+which does not read the font's x-height for `ex` either. The subtlety is the
+*order*: `em` in any other length on an element means that element's own size,
+while `em` in `font-size` itself means the **parent's** — so `font-size` is
+read first and separately, and reading them in one pass would resolve one of
+the two against the wrong number. Where no `font-size` is in force anywhere
+they are still refused, because CSS's initial value is `medium` and browsers
+make that 16 while resvg makes it 12, so picking one draws a picture the wrong
+size in half the world.
+
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
 something else. `preserveAspectRatio` then decides how the one is fitted into
@@ -301,7 +312,7 @@ short of the specification.
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | Entity references in attribute values | yes, resolved as the document is parsed |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
-| Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
+| Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, `em`, `ex`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
 | Masks, clips and patterns inside one another | to `Limits.max_mask_depth` (4) |
@@ -316,7 +327,7 @@ short of the specification.
 | `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
 | `text-anchor` | yes — `start`, `middle`, `end` |
 | `<tspan>`, `textPath`, `dx`/`dy`/`rotate` | **no** — refused, since each is a run of its own at a place of its own |
-| `em`, `ex` lengths | **no** — refused |
+| `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style`, CSS | **no** |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
@@ -600,13 +611,11 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. `<tspan>`, and the font-relative lengths.** A `<text>` is one run here,
-and an element inside one is refused rather than drawn as though it were not
-there. `<tspan>` carries its own position and its own properties, so a `<text>`
-holding them is really several runs at several places — which is a change to
-what the walk yields rather than to how a run is drawn. `em` and `ex` follow
-from the same work: a font size is now in hand, and threading it into
-`length.parse` is what those two need.
+**1. `<tspan>`.** A `<text>` is one run here, and an element inside one is
+refused rather than drawn as though it were not there. `<tspan>` carries its
+own position and its own properties, so a `<text>` holding them is really
+several runs at several places — a change to what the walk yields rather than
+to how a run is drawn.
 
 **2. `<pattern>` sampled rather than drawn.** What is here draws the tile once
 per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a

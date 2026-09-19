@@ -621,7 +621,13 @@ pub fn viewBoxTransform(
 /// rather than a second parser.
 pub const PathIterator = struct {
     doc: *const Document,
-    /// What a percentage in this document is measured against.
+    /// What a relative length is measured against.
+    ///
+    /// Its `font_size` is **not** fixed for the walk: it is whatever the
+    /// element being read came to, so `visit` sets it on the way in and every
+    /// length read from that element resolves `em` against the right number.
+    /// The rest of it -- the width and height a percentage refers to -- is the
+    /// document's and does not change.
     viewport: length.Viewport,
     stack: [max_container_depth + 1]Frame = undefined,
     depth: usize = 0,
@@ -654,10 +660,15 @@ pub const PathIterator = struct {
             const opacity = try self.opacityOf(root);
             const refs = try self.refsOf(root);
             const ctm = try self.readTransform(root);
+            // Nothing above the root, so an `em` in its own `font-size` has
+            // nothing to be relative to and is refused.
+            self.viewport.font_size = null;
+            const root_inherited = try self.readInherited(root);
+            self.viewport.font_size = root_inherited.font_size;
             self.stack[0] = .{
                 .node = root,
                 .next_child = 0,
-                .inherited = try self.readInherited(root),
+                .inherited = root_inherited,
                 .transform = ctm,
                 .opens_layer = opacity < 1.0 or refs.any(),
             };
@@ -750,7 +761,14 @@ pub const PathIterator = struct {
 
             // The `<use>` contributes its own paint and transform, and then
             // §5.6's `x` and `y` as a translation *inside* that.
+            //
+            // Its `font-size` is read against what it inherited and its `x`
+            // and `y` against what it came to, for the same reason the
+            // element at the end of the chain does below: each `<use>` in a
+            // chain is an element with a font size of its own.
+            self.viewport.font_size = inherited.font_size;
             inherited = inherited.with(try self.readInherited(node));
+            self.viewport.font_size = inherited.font_size;
             ctm = ctm.mul(try self.readTransform(node));
             const dx = try self.lengthOf(node, "x", .x, 0);
             const dy = try self.lengthOf(node, "y", .y, 0);
@@ -762,14 +780,20 @@ pub const PathIterator = struct {
 
         const name = tree.node(node).name.local;
         if (isIgnorable(name)) return null;
-
-        // The element's own attributes, on top of everything above it.
-        const effective = inherited.with(try self.readInherited(node));
         const own_ctm = ctm.mul(try self.readTransform(node));
         if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
-        // Read before the geometry test because a shape and a container both
-        // want them, and `filter` has to be refused either way.
+        // The element's own attributes, on top of everything above it -- and
+        // `font-size` first, because `em` in every *other* length on this
+        // element means this element's size, while `em` in `font-size` itself
+        // means the *parent's*. Reading them in one pass would resolve one of
+        // the two against the wrong number.
+        self.viewport.font_size = inherited.font_size;
+        const effective = inherited.with(try self.readInherited(node));
+        self.viewport.font_size = effective.font_size;
+
+        // Read after that, so a `filter` on an element whose `font-size` is
+        // unreadable still reports the length rather than the filter.
         const refs = try self.refsOf(node);
 
         if (try self.readGeometry(node)) |geometry| {
@@ -1853,4 +1877,53 @@ test "a viewBox with an offset is translated away" {
     try testing.expectApproxEqAbs(@as(f64, 1), t.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 12), t.tx, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 12), t.ty, 1e-12);
+}
+
+test "em on an element means that element's own font size" {
+    const gpa = testing.allocator;
+    // The inner rect sets its own `font-size`, so its `2em` is twice *that*
+    // and not twice what the group said.
+    var doc = try read(gpa, "<svg viewBox=\"0 0 64 32\"><g font-size=\"10\">" ++
+        "<rect width=\"1em\" height=\"1\"/>" ++
+        "<rect font-size=\"6\" width=\"2em\" height=\"1\"/>" ++
+        "<rect width=\"4ex\" height=\"1\"/>" ++
+        "</g></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    const widths = [_]f64{ 10, 12, 20 };
+    for (widths) |want| {
+        const item = (try it.next()).?;
+        try testing.expectApproxEqAbs(want, item.shape.geometry.rect.width, 1e-9);
+    }
+}
+
+test "em inside font-size means the parent's font size" {
+    const gpa = testing.allocator;
+    // CSS's rule, and the reason `font-size` is read before every other
+    // length on the same element: `2em` here is twice the eight the group
+    // said, not twice itself.
+    var doc = try read(gpa, "<svg viewBox=\"0 0 64 32\"><g font-size=\"8\">" ++
+        "<rect font-size=\"2em\" width=\"1em\" height=\"1\"/>" ++
+        "</g></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    const item = (try it.next()).?;
+    // font-size resolved to 16, so the element's own `1em` is 16.
+    try testing.expectApproxEqAbs(@as(f64, 16), item.shape.geometry.rect.width, 1e-9);
+}
+
+test "em with no font size anywhere is refused" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.BadLength, read(
+        gpa,
+        "<svg viewBox=\"0 0 64 32\"><rect width=\"1em\" height=\"1\"/></svg>",
+    ));
+    // Including in `font-size` on the root, which has nothing above it to be
+    // relative to.
+    try testing.expectError(error.BadLength, read(
+        gpa,
+        "<svg viewBox=\"0 0 64 32\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
+    ));
 }

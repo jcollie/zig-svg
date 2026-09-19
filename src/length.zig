@@ -31,17 +31,20 @@
 //! `0 0 100 200` resolves `50%` of a height as 100 user units, not as 25
 //! pixels, and resvg agrees.
 //!
-//! ## `em` and `ex` are refused
+//! ## `em` and `ex`
 //!
-//! Both are a multiple of the font size, and there is no font here and no
-//! right answer for what it would be. CSS's initial `font-size` is `medium`,
-//! which browsers make 16 pixels and resvg makes 12 -- so `10em` is 160 pixels
-//! in a browser and 120 in the oracle this library is checked against, and
-//! either choice draws a picture the wrong size somewhere. `ex` is worse,
-//! being the x-height of a font nobody named.
+//! Both are a multiple of the font size in force, which `Viewport.font_size`
+//! carries. `1em` is that size and `1ex` is half of it -- measured against
+//! resvg, which does not read the font's x-height for it, and half an em is
+//! the convention every renderer falls back on when it cannot.
 //!
-//! So they are `error.BadLength` until there is a font size to ask, which
-//! arrives with text.
+//! Where no `font-size` is in force anywhere, there is no right answer: CSS's
+//! initial value is `medium`, which browsers make 16 pixels and resvg makes
+//! 12, so `10em` is 160 pixels in a browser and 120 in the oracle this library
+//! is checked against. That is the caller's choice rather than this module's,
+//! so `font_size` is null until somebody says, and a `em` or `ex` read against
+//! a null one is `error.BadLength` -- the same refusal these both used to get
+//! unconditionally.
 
 const std = @import("std");
 const testing = std.testing;
@@ -63,15 +66,31 @@ pub const Axis = enum {
     other,
 };
 
-/// What a percentage is measured against.
+/// What a relative length is measured against: a percentage against the
+/// viewport, an `em` or an `ex` against the font size in force.
 pub const Viewport = struct {
     width: f64,
     height: f64,
+
+    /// The `font-size` in force where the length is being read, or null when
+    /// none is. `em` and `ex` are refused against a null one rather than
+    /// guessed at -- see the note above about which number that would be.
+    ///
+    /// Not the *document's* font size: it is whatever the element and its
+    /// ancestors came to, so it changes as the walk descends.
+    font_size: ?f64 = null,
 
     /// A viewport of no extent, for reading a length before the real one is
     /// known -- the root's own `width` and `height`, which cannot be a
     /// percentage of themselves.
     pub const unknown: Viewport = .{ .width = 0, .height = 0 };
+
+    /// The same viewport with a different font size in force.
+    pub fn withFontSize(self: Viewport, size: ?f64) Viewport {
+        var out = self;
+        out.font_size = size;
+        return out;
+    }
 
     /// The length a percentage on `axis` is a percentage of.
     pub fn reference(self: Viewport, axis: Axis) f64 {
@@ -110,9 +129,14 @@ pub fn parse(text: []const u8, axis: Axis, viewport: Viewport) Error!f64 {
         number = t[0 .. t.len - 1];
         scale = viewport.reference(axis) / 100.0;
     } else if (std.mem.endsWith(u8, t, "em") or std.mem.endsWith(u8, t, "ex")) {
-        // See the note above: there is no font, and no answer that is right
-        // everywhere.
-        return error.BadLength;
+        // Both are relative to the font size in force. With none in force
+        // there is no answer that is right everywhere -- see the note above --
+        // so this is refused rather than guessed at.
+        const size = viewport.font_size orelse return error.BadLength;
+        number = t[0 .. t.len - 2];
+        // Half an em for `ex`: resvg does not read the font's x-height for it,
+        // and half is what every renderer falls back on when it cannot.
+        scale = if (t[t.len - 1] == 'x') size / 2.0 else size;
     } else for (units) |unit| {
         if (std.mem.endsWith(u8, t, unit.suffix)) {
             number = t[0 .. t.len - unit.suffix.len];
@@ -170,7 +194,32 @@ test "a percentage is of the viewport, and of which measure depends on the axis"
     try testing.expectApproxEqAbs(@as(f64, 10), try parse("10%", .other, square), 1e-9);
 }
 
-test "em and ex are refused rather than guessed at" {
+test "em and ex are the font size in force, and half of it" {
+    const with_font = square.withFontSize(20);
+    try testing.expectApproxEqAbs(@as(f64, 20), try parse("1em", .x, with_font), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 50), try parse("2.5em", .x, with_font), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -10), try parse("-0.5em", .x, with_font), 1e-9);
+    // Half an em, measured against resvg: it does not read the font's
+    // x-height for `ex`, and half is what every renderer falls back on when it
+    // cannot.
+    try testing.expectApproxEqAbs(@as(f64, 10), try parse("1ex", .x, with_font), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 40), try parse("4ex", .x, with_font), 1e-9);
+
+    // Neither depends on the axis, unlike a percentage.
+    for ([_]Axis{ .x, .y, .other }) |axis| {
+        try testing.expectApproxEqAbs(@as(f64, 20), try parse("1em", axis, with_font), 1e-9);
+    }
+
+    // A size of zero is a size: it makes them zero rather than refusing.
+    try testing.expectEqual(@as(f64, 0), try parse("3em", .x, square.withFontSize(0)));
+}
+
+test "em and ex are refused when no font size is in force" {
+    // There is no answer that is right everywhere -- CSS's initial `font-size`
+    // is `medium`, which browsers make 16 and resvg makes 12 -- so this is
+    // refused rather than picking one of them and drawing a picture that is
+    // the wrong size in half the world.
+    try testing.expectEqual(@as(?f64, null), square.font_size);
     for ([_][]const u8{ "1em", "10em", "1ex", "0.5ex" }) |t| {
         try testing.expectError(error.BadLength, parse(t, .x, square));
     }

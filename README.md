@@ -655,15 +655,26 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Roughly in the order they are worth having, and each should arrive with a
-fixture in `tests/oracle` that resvg already renders.
+Nothing is queued. What SVG 1.1 has that this does not is `<filter>`, CSS —
+both a `style` attribute and a `<style>` element — and the `spacingAndGlyphs`
+form of `lengthAdjust`. Each is refused rather than ignored, so a document
+needing one says so.
 
-**1. `<pattern>` sampled rather than drawn.** What is here draws the tile once
-per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a
-colour, a gradient or a dither, with no variant that samples a surface; adding
-one to the fork would make a pattern a first-class paint source there and turn
-this into an ordinary fill. The picture would be the same, so this is about
-what it costs rather than what it draws.
+**`<pattern>` sampled rather than drawn was on this list, and was tried and
+dropped.** The reasoning was that drawing the tile once per cell costs a draw
+per cell, and that sampling a tile as paint would be the same picture for less
+work. A `SurfacePattern` went into the z2d fork to do it — it is still there,
+tested, and is a good thing for that library to have.
+
+It was neither cheaper nor the same picture. Timed on a 256-unit square filled
+with a fine pattern at 1024×1024, both ways came out at 72 ms; at the tile
+limit, 16384 cells, both came out at 73 ms. The per-cell draw was already
+sizing each cell's scratch surfaces to *that cell's* device footprint, so its
+total work scales with the area painted rather than with area times tiles —
+there was nothing left to win. And sampling is nearest-neighbour, so the
+rotated fixtures went from 0.224 and 0.237 to 1.356 and 0.401, which is aliasing
+where the per-cell draw is analytic. Worse pictures for the same time is not a
+trade, so the per-cell draw stayed.
 
 Deliberately not on the list: scripting, `<foreignObject>`, animation, and
 external document references. Those are the parts of SVG that make it a

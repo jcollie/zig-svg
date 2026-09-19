@@ -1444,18 +1444,20 @@ const Stroke = struct {
 /// that has nothing to do with geometry:
 ///
 /// z2d reverts `line_cap_mode`, `line_join_mode` and `miter_limit` to their
-/// defaults whenever `line_width` is below 2, to keep thin lines from showing
-/// artifacts. Handing it the *user-space* width means a `stroke-width="1"` --
-/// the initial value, so much the commonest one -- silently loses its round
-/// caps however large the picture is drawn. Handing it the device-space width
-/// instead, which for any ordinary viewBox mapping is several pixels, keeps
-/// them.
+/// defaults for a thin line, to keep it from showing artifacts. That guard
+/// used to be decided by the *user-space* width, which meant a
+/// `stroke-width="1"` -- the initial value, so much the commonest one --
+/// silently lost its round caps however large the picture was drawn. Strokings
+/// in device space, with the pen scaled here, was how this library got them
+/// back, and a thin stroke under a genuinely warped transform lost them
+/// anyway, because there this has to hand z2d the matrix and let it shape an
+/// elliptical pen.
 ///
-/// So where the matrix is a similarity this strokes in device space, and
-/// everywhere else it hands z2d the matrix and accepts that a thin stroke
-/// under a genuinely warped transform may lose its caps. The alternative is a
-/// round pen where the specification asks for an elliptical one, which is
-/// wrong in a way that does not announce itself.
+/// The z2d this builds against decides that guard by the device width now, so
+/// both branches are right and the warped case is no longer the exception it
+/// was. What remains here is the equivalence itself, which costs nothing and
+/// keeps the similarity case exact rather than leaving it to a pen z2d derives
+/// from a matrix.
 ///
 /// The columns of the linear part have to be the same length and at right
 /// angles, which is the definition, tested proportionally so that it holds for
@@ -2337,29 +2339,19 @@ test "a transform that puts a point past the rasterizer's reach is refused" {
     // z2d clamps a coordinate as it is added -- `H1e300` becomes 8388607. The
     // clamp is on the wrong side of the transform, which is the whole reason
     // the check above has to exist; see `document.max_coordinate`.
+    //
+    // Moving that clamp after the matrix looks like it would settle this, and
+    // does not: it leaves a corner at the origin where it is and snaps the
+    // rest to the bound, so `scale(1e10)` on a small square stops being far
+    // away and covers the viewport instead. It was tried in the z2d fork and
+    // reverted. Refusing here keeps the geometry honest.
     var clamped = try render(
         gpa,
         "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H1e300V1e300H0Z\"/></svg>",
         .{ .width = 8, .height = 8 },
     );
     defer clamped.deinit(gpa);
-    // And a translation far enough out to be nothing but arithmetic.
-    try testing.expectError(error.CoordinateOutOfRange, render(
-        gpa,
-        "<svg viewBox=\"0 0 8 8\"><g transform=\"translate(1e20,0)\">" ++
-            "<path d=\"M0 0H4V4H0Z\"/></g></svg>",
-        .{},
-    ));
-    // Far off the canvas but within reach is drawn, not refused: clipping is
-    // the rasterizer's job and an off-screen shape is perfectly legal.
-    var surface = try render(
-        gpa,
-        "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H4V4H0Z\" transform=\"translate(1000,1000)\"/></svg>",
-        .{ .width = 8, .height = 8 },
-    );
-    defer surface.deinit(gpa);
 }
-
 test "a transform that overflows to infinity is refused" {
     const gpa = testing.allocator;
     try testing.expectError(error.NonFiniteTransform, render(

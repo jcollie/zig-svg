@@ -300,15 +300,20 @@ the one place the same `d` has to become two different node sets, and it is why
 
 And the pen is scaled here rather than by z2d wherever the transform is a
 *similarity* — a uniform scale with any rotation and translation. Such a matrix
-maps a circle to a circle, so the two are equivalent in geometry; what is not
-equivalent is that z2d silently reverts the cap, join and miter limit to their
-defaults whenever `line_width` is below 2. Handing it the user-space width
-means `stroke-width="1"` — the initial value, so much the commonest one — loses
-its round caps however large the picture is drawn. Handing it the device-space
-width keeps them. Under a genuinely warped transform there is no equivalent
-scalar, so the matrix goes to z2d and a thin stroke there may lose its caps;
-the alternative would be a round pen where the specification asks for an
-elliptical one, which is wrong in a way that does not announce itself.
+maps a circle to a circle, so the two are equivalent in geometry, and the
+similarity case stays exact rather than being derived from a matrix. Under a
+genuinely warped transform there is no equivalent scalar, so the matrix goes to
+z2d, which shapes the elliptical pen the specification asks for.
+
+That used to be a compromise rather than a choice. z2d reverts the cap, join
+and miter limit to their defaults for a thin line, and decided which lines were
+thin by the *user-space* width — so `stroke-width="1"`, the initial value and
+much the commonest one, lost its round caps however large the picture was
+drawn, and a thin stroke under a warped transform lost them even with the pen
+scaled here. The z2d this builds against decides that guard by the device width
+instead, so both branches are right;
+`tests/oracle/stroke-thin-warped-caps-and-joins.svg` is the case that used to
+be wrong and now is not.
 
 ## Limits
 
@@ -453,8 +458,19 @@ over a four-unit square. z2d clamps a coordinate to a signed 24-bit range as it
 is added, but on the **wrong side of the transform**: `clampI24(x)` happens and
 *then* the matrix is applied, so path data is protected and a transform is not.
 The rasterizer reduces the polygon's extent to an `i32` and dies. This library
-now bounds the coordinates it hands over, checked on the stored nodes because
-those are what the transform produced — see `document.max_coordinate`.
+bounds the coordinates it hands over, checked on the stored nodes because those
+are what the transform produced — see `document.max_coordinate`.
+
+Moving that clamp after the matrix looks like it would settle the matter in
+z2d, and does not. It was tried in the fork and reverted: clamping afterwards
+leaves a corner at the origin where it is and snaps the rest to the bound, so
+`transform="scale(1e10)"` on a small square stops being far off-screen and
+covers the viewport instead — a solid fill where every other renderer draws
+nothing. No choice of bound avoids it, because it is the corner at the origin
+that does it. The real fix is for the rasterizer to *clip* rather than clamp,
+which keeps the geometry it cannot represent instead of folding it back into
+range; until then the check belongs here, where refusing is available and
+drawing the wrong picture is not.
 
 ```console
 $ zig build fuzz-run -- --seconds 300
@@ -464,15 +480,13 @@ $ zig build fuzz-run -- --alloc-fail --seconds 60
 
 `--alloc-fail` runs each input repeatedly with a different allocation failing
 each time, which is the only way to reach the `errdefer` on the way out of a
-path that never otherwise unwinds. It is **off for the `render` target**, and
-for a reason worth stating rather than burying: z2d leaks when an allocation
-fails part way through its stroke plotter —
-`internal/tess/Polygon.zig`'s `plot` creates a `Corner` and the corners already
-linked are not released when a later allocation in the same plot fails. The
-trace runs entirely through z2d, so there is nothing this library can do about
-it but say so. The other four targets still fail allocations, and `path-fill`
-covers the fill side of the same rasterizer. `Target.alloc_fail` in
-`tests/fuzz.zig` is the flag to turn back on when z2d is fixed.
+path that never otherwise unwinds. Every target runs under it.
+
+It was off for `render` for a while. That is the only target reaching z2d's
+dashed stroke plotter, which leaked when an allocation failed part way through
+capping its initial polygon — found by this very mode, and enough to make it
+unusable here. The z2d this builds against fixes it, and carries a test of its
+own so it cannot come back unnoticed.
 
 ## Looking at a picture
 
@@ -522,10 +536,16 @@ which no project holding a fuzz test can build a test executable at all;
 
 | | |
 | --- | --- |
-| [z2d](https://github.com/vancluever/z2d) | the rasterizer, and the surfaces this draws onto |
+| [z2d](https://git.jcollie.dev/jeff/z2d) | the rasterizer, and the surfaces this draws onto |
 | [ztree](https://git.jcollie.dev/jeff/ztree) | the XML document tree, built on [zxml](https://git.jcollie.dev/jeff/zxml) |
 
-Both are fetched by the Zig package manager. Nix builds fetch them through
+The z2d is a fork of [vancluever/z2d](https://github.com/vancluever/z2d),
+carrying fixes this library needs: a leak in the dashed stroke plotter when an
+allocation fails, the thin-line guard being decided by the user-space width
+rather than the device-space one, and `PathNode` not being exported although
+the painters take it. Each arrived with a test in z2d's own suite.
+
+All are fetched by the Zig package manager. Nix builds fetch them through
 `build.zig.zon.nix`, generated by [zon2nix](https://git.jcollie.dev/jeff/zon2nix):
 
 ```console

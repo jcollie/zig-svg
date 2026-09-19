@@ -84,18 +84,12 @@ pub const Target = struct {
     interesting: []const u8 = path_interesting,
     /// Whether `--alloc-fail` may run this target.
     ///
-    /// Off for the one target that can reach z2d's stroke plotter, which
-    /// **leaks** when an allocation fails part way through it:
-    /// `internal/tess/Polygon.zig`'s `plot` does `alloc.create(Corner)` and
-    /// the partially built corner list is not released when a later allocation
-    /// in the same plot fails. The trace runs entirely through z2d, so there
-    /// is nothing this library can do about it but say so.
-    ///
-    /// The mode is for *this* library's error paths, and the other four
-    /// targets still exercise them -- `path-fill` covers the fill side of the
-    /// same rasterizer. Turn this back on for `render` when z2d is fixed; the
-    /// leak is easy to see again with
-    /// `zig build fuzz-run -- --alloc-fail --target render`.
+    /// On for everything. It was off for `render` for a while, because that is
+    /// the only target reaching z2d's dashed stroke plotter, which leaked when
+    /// an allocation failed part way through capping its initial polygon --
+    /// found by this very mode, and enough to make it unusable here. The fork
+    /// this now builds against fixes it, and carries a test of its own so it
+    /// cannot come back unnoticed.
     alloc_fail: bool = true,
 };
 
@@ -135,9 +129,6 @@ pub const all = [_]Target{
         .corpus = &document_corpus,
         .content_max = 4096,
         .interesting = xml_interesting,
-        // See `Target.alloc_fail`: z2d's stroke plotter leaks under a failed
-        // allocation, and this is the only target that reaches it.
-        .alloc_fail = false,
     },
     .{ .name = "arc", .run = arcTarget, .corpus = &.{}, .content_max = 64 },
 };

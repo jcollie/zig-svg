@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .z2d = .{
-            .url = "https://github.com/vancluever/z2d/archive/6c4f0cac447ce3c96d4198757c514817d729b5dd.tar.gz",
-            .hash = "z2d-0.12.2-pre-j5P_HiVBEQA0HKjyLJpIUMKN5zHSa9-OjvS4qUCuZHJd",
+            .url = "git+https://git.jcollie.dev/jeff/z2d.git#f97a3ee6c8a52e580af13675b08c919ec76b3b4d",
+            .hash = "z2d-0.12.2-pre-j5P_HgBxEQBWo17Nqz-MmpaWECuk_sEh4huVu7-JZke-",
         },
         .zxml = .{
             .url = "git+https://git.jcollie.dev/jeff/zxml.git#cfbda2e23d78d55ce0e4b61e8ce8f1aee64a57f4",

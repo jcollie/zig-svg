@@ -788,7 +788,18 @@ tested, and is a good thing for that library to have.
 
 It was neither cheaper nor the same picture. Timed on a 256-unit square filled
 with a fine pattern at 1024×1024, both ways came out at 72 ms; at the tile
-limit, 16384 cells, both came out at 73 ms. The per-cell draw was already
+limit, 16384 cells, both came out at 73 ms.
+
+**Time that on a release build, and mind which allocator it gets.** A tool
+built through `std.process.Init` is handed a `DebugAllocator` in Debug and
+ReleaseSafe and a fast one otherwise, and a pattern makes a couple of
+allocations per cell — so the same 16384-cell document measures 3035 ms one
+way and 181 ms the other. That seventeenfold gap is the allocator's
+book-keeping and none of it is the renderer, which is a good way to spend an
+afternoon concluding the wrong thing about where a pattern's time goes. On a
+release build the shape of it is the one above: painting the same lattice into
+a sixteenth of the pixels takes 29 ms rather than 64, so the cost follows the
+area painted, and going from 16 cells to 16384 of them moves 19 ms to 64. The per-cell draw was already
 sizing each cell's scratch surfaces to *that cell's* device footprint, so its
 total work scales with the area painted rather than with area times tiles —
 there was nothing left to win. And sampling is nearest-neighbour, so the

@@ -272,6 +272,21 @@ drawing an element *without* the filter it asked for is a picture that looks
 finished and is not. `clip-path` and `mask` were both refused here too, until
 each was implemented.
 
+A `style` attribute is read, and outranks the presentation attribute of the
+same name — `fill="red" style="fill:blue"` is blue. It matters more than its
+size suggests: every drawing program writes it, so Inkscape, Illustrator and
+Figma documents use `style` where a hand-written one would use attributes, and
+a renderer that skips it renders a large part of the world's SVG in the wrong
+colours. That is what it did here until it was tested, and it did it *silently*
+— which is the failure this library is meant not to have.
+
+This is not CSS. One element, one declaration block, the properties it names:
+no selectors, no `<style>` element, no cascade. Values go to the same parsers
+the attributes use, so `style="fill:wobble"` is refused exactly as
+`fill="wobble"` is. A malformed declaration is skipped and the ones after it
+are still read, which is CSS 2.1 §4.2 and what browsers do; resvg stops at the
+first one, so `style="nonsense;fill:blue"` is blue here and black there.
+
 A **definition** is never drawn where it stands. A `<linearGradient>` or a
 `<clipPath>` written straight into the document body rather than into `<defs>`
 is passed over and still indexed, which §5.5 requires and which this used to
@@ -366,7 +381,8 @@ short of the specification.
 | `rotate`, `textLength` | yes — `lengthAdjust="spacing"`, which is the initial value |
 | `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
-| `style`, CSS | **no** |
+| `style` | yes — §6.3's declaration block, which outranks the attributes |
+| CSS: a `<style>` element, selectors, a cascade | **no** |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -655,10 +671,10 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Nothing is queued. What SVG 1.1 has that this does not is `<filter>`, CSS —
-both a `style` attribute and a `<style>` element — and the `spacingAndGlyphs`
-form of `lengthAdjust`. Each is refused rather than ignored, so a document
-needing one says so.
+Nothing is queued. What SVG 1.1 has that this does not is `<filter>`, CSS
+proper — a `<style>` element, selectors, a cascade — and the
+`spacingAndGlyphs` form of `lengthAdjust`. Each is refused rather than ignored,
+so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

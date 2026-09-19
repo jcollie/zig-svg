@@ -71,6 +71,9 @@ pub const shapes = @import("shapes.zig");
 /// `<linearGradient>` and `<radialGradient>`.
 pub const gradient = @import("gradient.zig");
 pub const pattern = @import("pattern.zig");
+/// The `style` attribute of SVG 1.1 §6.3: one CSS declaration block, which
+/// outranks the presentation attributes beside it.
+pub const style = @import("style.zig");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
@@ -122,6 +125,7 @@ test {
     _ = shapes;
     _ = gradient;
     _ = pattern;
+    _ = style;
     _ = length;
     _ = path;
     _ = arc;

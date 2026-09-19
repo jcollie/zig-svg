@@ -71,6 +71,7 @@ const color = @import("color.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
+const style = @import("style.zig");
 const transform = @import("transform.zig");
 
 /// The namespace SVG content is in. An element in no namespace is taken as
@@ -898,7 +899,7 @@ pub const PathIterator = struct {
 
     /// An element's own `opacity`, which is not inherited.
     fn opacityOf(self: *const PathIterator, node: ztree.NodeId) Error!f64 {
-        const raw = self.attr(node, "opacity") orelse return 1.0;
+        const raw = self.presentation(node, "opacity") orelse return 1.0;
         return color.parseOpacity(raw);
     }
 
@@ -910,7 +911,7 @@ pub const PathIterator = struct {
     /// looks finished and is not. `clip-path` and `mask` were both refused
     /// here too until each was implemented.
     fn refsOf(self: *const PathIterator, node: ztree.NodeId) Error!Refs {
-        if (namesSomething(self.attr(node, "filter"))) return error.FilterUnsupported;
+        if (namesSomething(self.presentation(node, "filter"))) return error.FilterUnsupported;
         return .{
             .clip_path = try self.referenceAttr(node, "clip-path"),
             .mask = try self.referenceAttr(node, "mask"),
@@ -923,7 +924,7 @@ pub const PathIterator = struct {
         node: ztree.NodeId,
         name: []const u8,
     ) Error!?[]const u8 {
-        const raw = self.attr(node, name) orelse return null;
+        const raw = self.presentation(node, name) orelse return null;
         const t = std.mem.trim(u8, raw, " \t\r\n");
         // `none` is the initial value and says there is nothing to apply.
         if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
@@ -1103,6 +1104,28 @@ pub const PathIterator = struct {
         return self.doc.tree.attributeValue(node, "", name);
     }
 
+    /// A presentation property: §6.3's `style` attribute first, then the
+    /// presentation attribute of the same name.
+    ///
+    /// That order is the specification's. A `style` declaration outranks the
+    /// attribute, so `fill="red" style="fill:blue"` is blue -- which is the
+    /// case that matters, because a drawing program that writes `style` often
+    /// writes both.
+    ///
+    /// Only *presentation properties* go through here. A geometry attribute --
+    /// a `<rect>`'s `width`, a `<circle>`'s `r` -- is not a property in SVG
+    /// 1.1 and is not readable from `style`, so those keep using `attr`.
+    fn presentation(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+    ) ?[]const u8 {
+        if (self.attr(node, "style")) |block| {
+            if (style.property(block, name)) |value| return value;
+        }
+        return self.attr(node, name);
+    }
+
     fn lengthOf(
         self: *const PathIterator,
         node: ztree.NodeId,
@@ -1131,26 +1154,38 @@ pub const PathIterator = struct {
         return try length.parse(raw, axis, self.viewport);
     }
 
+    /// A length that is also a presentation property, so `style` may carry it:
+    /// `stroke-width`, `font-size`, `stroke-dashoffset`.
+    fn optionalPresentationLength(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+        axis: length.Axis,
+    ) Error!?f64 {
+        const raw = self.presentation(node, name) orelse return null;
+        return try length.parse(raw, axis, self.viewport);
+    }
+
     fn readInherited(self: *const PathIterator, node: ztree.NodeId) Error!Inherited {
         return .{
-            .fill = if (self.attr(node, "fill")) |v| try color.parsePaint(v) else null,
-            .fill_opacity = if (self.attr(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
-            .fill_rule = if (self.attr(node, "fill-rule")) |v| try parseFillRule(v) else null,
-            .clip_rule = if (self.attr(node, "clip-rule")) |v| try parseFillRule(v) else null,
-            .current_color = if (self.attr(node, "color")) |v| try color.parseColor(v) else null,
-            .stroke = if (self.attr(node, "stroke")) |v| try color.parsePaint(v) else null,
-            .stroke_width = try self.optionalLengthOf(node, "stroke-width", .other),
-            .stroke_opacity = if (self.attr(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,
-            .stroke_linecap = if (self.attr(node, "stroke-linecap")) |v| try parseLineCap(v) else null,
-            .stroke_linejoin = if (self.attr(node, "stroke-linejoin")) |v| try parseLineJoin(v) else null,
-            .stroke_miterlimit = if (self.attr(node, "stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
-            .stroke_dasharray = self.attr(node, "stroke-dasharray"),
-            .stroke_dashoffset = try self.optionalLengthOf(node, "stroke-dashoffset", .other),
-            .font_family = self.attr(node, "font-family"),
-            .font_size = try self.optionalLengthOf(node, "font-size", .other),
-            .font_weight = if (self.attr(node, "font-weight")) |v| try parseFontWeight(v) else null,
-            .font_italic = if (self.attr(node, "font-style")) |v| try parseFontStyle(v) else null,
-            .text_anchor = if (self.attr(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
+            .fill = if (self.presentation(node, "fill")) |v| try color.parsePaint(v) else null,
+            .fill_opacity = if (self.presentation(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
+            .fill_rule = if (self.presentation(node, "fill-rule")) |v| try parseFillRule(v) else null,
+            .clip_rule = if (self.presentation(node, "clip-rule")) |v| try parseFillRule(v) else null,
+            .current_color = if (self.presentation(node, "color")) |v| try color.parseColor(v) else null,
+            .stroke = if (self.presentation(node, "stroke")) |v| try color.parsePaint(v) else null,
+            .stroke_width = try self.optionalPresentationLength(node, "stroke-width", .other),
+            .stroke_opacity = if (self.presentation(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,
+            .stroke_linecap = if (self.presentation(node, "stroke-linecap")) |v| try parseLineCap(v) else null,
+            .stroke_linejoin = if (self.presentation(node, "stroke-linejoin")) |v| try parseLineJoin(v) else null,
+            .stroke_miterlimit = if (self.presentation(node, "stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
+            .stroke_dasharray = self.presentation(node, "stroke-dasharray"),
+            .stroke_dashoffset = try self.optionalPresentationLength(node, "stroke-dashoffset", .other),
+            .font_family = self.presentation(node, "font-family"),
+            .font_size = try self.optionalPresentationLength(node, "font-size", .other),
+            .font_weight = if (self.presentation(node, "font-weight")) |v| try parseFontWeight(v) else null,
+            .font_italic = if (self.presentation(node, "font-style")) |v| try parseFontStyle(v) else null,
+            .text_anchor = if (self.presentation(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
         };
     }
 
@@ -2257,5 +2292,70 @@ test "rotate and textLength are read, and refused where they would mislead" {
         gpa,
         "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" textLength=\"40\"" ++
             " lengthAdjust=\"spacingAndGlyphs\">ab</text></svg>",
+    ));
+}
+
+test "a style declaration outranks the presentation attribute" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\"" ++
+        " fill=\"red\" style=\"fill:blue\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const shape = (try it.next()).?.shape;
+    try testing.expectEqual(@as(u8, 0), shape.fill.?.color.r);
+    try testing.expectEqual(@as(u8, 255), shape.fill.?.color.b);
+}
+
+test "style carries every presentation property, and geometry stays an attribute" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"" ++
+        "fill:lime;fill-opacity:0.5;stroke:blue;stroke-width:3;" ++
+        "stroke-linecap:round;font-size:11;text-anchor:middle\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const shape = (try it.next()).?.shape;
+    try testing.expectEqual(@as(u8, 255), shape.fill.?.color.g);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), shape.fill_opacity.?, 1e-9);
+    try testing.expectEqual(@as(u8, 255), shape.stroke.?.color.b);
+    try testing.expectApproxEqAbs(@as(f64, 3), shape.stroke_width.?, 1e-9);
+    try testing.expectEqual(z2d.options.CapMode.round, shape.stroke_linecap.?);
+    try testing.expectApproxEqAbs(@as(f64, 11), shape.font_size.?, 1e-9);
+    try testing.expectEqual(TextAnchor.middle, shape.text_anchor.?);
+
+    // §6.3 lists the *presentation properties*, and a `<rect>`'s geometry is
+    // not among them in SVG 1.1 -- so a width in a style attribute is not a
+    // width, and the attribute is what says how big the rectangle is.
+    try testing.expectApproxEqAbs(@as(f64, 8), shape.geometry.rect.width, 1e-9);
+}
+
+test "a style on a container is inherited like an attribute" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"fill:blue;font-size:9\">" ++
+        "<rect width=\"4\" height=\"8\"/>" ++
+        "<rect x=\"4\" width=\"4\" height=\"8\" style=\"fill:lime\"/>" ++
+        "</g></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const first = (try it.next()).?.shape;
+    try testing.expectEqual(@as(u8, 255), first.fill.?.color.b);
+    try testing.expectApproxEqAbs(@as(f64, 9), first.font_size.?, 1e-9);
+    // The child's own style wins over what it inherited, and takes only what
+    // it names with it.
+    const second = (try it.next()).?.shape;
+    try testing.expectEqual(@as(u8, 255), second.fill.?.color.g);
+    try testing.expectApproxEqAbs(@as(f64, 9), second.font_size.?, 1e-9);
+}
+
+test "a value a style names is read by the same parser an attribute uses" {
+    const gpa = testing.allocator;
+    // Which means it is refused the same way, rather than being skipped for
+    // sitting in a style attribute.
+    try testing.expectError(error.BadColor, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:wobble\"/></svg>",
+    ));
+    try testing.expectError(error.BadFillRule, read(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill-rule:sideways\"/></svg>",
     ));
 }

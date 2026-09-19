@@ -115,7 +115,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "patternUnitsContTransfombjeBox" ++
     "textfon-amilysizewghtylanchormddlbup" ++
     "emx0.5" ++
-    "textPathstOf%";
+    "textPathstOf%" ++
+    "style:;!importan";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -784,6 +785,21 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"1em\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><g font-size=\"0\"><rect width=\"1em\" height=\"1\"/></g></svg>",
+    // §6.3's `style`, which is the same properties written the other way and
+    // outranking the attributes.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:red\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"red\" style=\"fill:blue\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:red;stroke:blue;stroke-width:2;opacity:0.5\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g style=\"fill:red\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    // The shapes a declaration block can be in, well-formed and not.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\";;;\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"nonsense;fill:red\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:red !important\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:url(#g);stroke:none\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:wobble\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" style=\"font-size:4;text-anchor:middle\">a</text></svg>",
     // Text properties that are not values at all.
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" text-anchor=\"centre\">hi</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-weight=\"heavy\">hi</text></svg>",

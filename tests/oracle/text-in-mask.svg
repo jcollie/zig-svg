@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 40"><defs><mask id="m"><rect width="64" height="40" fill="white"/><text x="4" y="26" font-size="24" fill="black">Mask</text></mask></defs><rect width="64" height="40" fill="darkorange" mask="url(#m)"/></svg>

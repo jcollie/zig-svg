@@ -336,12 +336,15 @@ for the one origin a standalone SVG has it comes to five bands: an
 `!important` `style` attribute, an `!important` rule, a `style` attribute, a
 rule, and last of all a presentation attribute. Specificity orders within a
 band and source order breaks the remaining ties. That order lives in exactly
-one function, `css.property`, and **everything** that reads a presentation
+one function, `css.property` — in a [library of its own][zig-css], because
+none of it knows what a shape is — and **everything** that reads a presentation
 property goes through it — the walk, a gradient's `stop-color`, a filter
 primitive's `flood-color`, a `mask-type`. A property read any other way would
 be one the cascade silently did not reach, which is the bug `style` itself had
 here until it was implemented: `<stop style="stop-color:red">`, which is how
 Inkscape writes every gradient it saves, was being ignored.
+
+[zig-css]: https://git.jcollie.dev/jeff/zig-css
 
 What is refused rather than skipped: at-rules, pseudo-classes, pseudo-elements,
 namespace selectors, and the CSS 3 attribute operators. `@import` could not be
@@ -817,6 +820,14 @@ which no project holding a fuzz test can build a test executable at all;
 | --- | --- |
 | [z2d](https://git.jcollie.dev/jeff/z2d) | the rasterizer, and the surfaces this draws onto |
 | [ztree](https://git.jcollie.dev/jeff/ztree) | the XML document tree, built on [zxml](https://git.jcollie.dev/jeff/zxml) |
+| [zig-css](https://git.jcollie.dev/jeff/zig-css) | §6's `style` attribute, `<style>` selectors, and the cascade |
+
+The CSS was `src/css.zig` and `src/style.zig` here until it was lifted out.
+Deciding which of several declarations of one property applies to an element
+is a job with one right answer that has nothing to do with drawing, and
+nothing in it knows what a shape is — so it is a library rather than a
+chapter of this one. What stayed here is the part that knows what `fill`
+*means*.
 
 The z2d is a fork of [vancluever/z2d](https://github.com/vancluever/z2d),
 carrying what this library needs and upstream does not have: gradient extend
@@ -854,6 +865,13 @@ Kept in the Zotero collection **zig-svg**.
   the surfaces this draws onto. Its transformation is applied when a point is
   added rather than when the path is filled, which is why the viewBox scale
   goes on `Path.transformation` before the first `moveTo`.
+- World Wide Web Consortium (W3C). (2011, June). *Cascading Style Sheets Level
+  2 Revision 1 (CSS 2.1) Specification* (W3C Recommendation).
+  <https://www.w3.org/TR/CSS21/> — §6.4.3 is the cascade SVG 1.1 §6.4 adds the
+  presentation attributes to the bottom of.
+- Ollie, J. C. *zig-css*. <https://git.jcollie.dev/jeff/zig-css> — §6, lifted
+  out of this one: the `style` attribute, a `<style>` element's selectors, and
+  the cascade.
 - Ollie, J. C. *ztree*. <https://git.jcollie.dev/jeff/ztree> — the XML document
   tree this reads a document into. A pull parser is the right shape for reading
   a document once and the wrong shape for `<use href="#a">`, where `#a` may be

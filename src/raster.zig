@@ -23,7 +23,7 @@ const z2d = @import("z2d");
 const ztree = @import("ztree");
 
 const color = @import("color.zig");
-const css = @import("css.zig");
+const css = @import("css");
 const document = @import("document.zig");
 const filter = @import("filter.zig");
 const gradient = @import("gradient.zig");

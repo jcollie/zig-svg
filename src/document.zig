@@ -71,8 +71,7 @@ const color = @import("color.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
-const css = @import("css.zig");
-const style = @import("style.zig");
+const css = @import("css");
 const transform = @import("transform.zig");
 
 /// The namespace SVG content is in. An element in no namespace is taken as

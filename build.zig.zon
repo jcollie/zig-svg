@@ -16,6 +16,10 @@
             .url = "git+https://git.jcollie.dev/jeff/ztree.git#21a82ffda399367767663b0432bb716d2b620f25",
             .hash = "ztree-0.0.0-Rb9y2UksAwAIl9qdJcWF_hQJ4OByzMagmRh0rxr14Oel",
         },
+        .zig_css = .{
+            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#4d9a4d855026ff68222498086901ade4dc12c3ad",
+            .hash = "zig_css-0.0.0-d530kKeuAQB7-v8-1VNgjL9pLefK35fR3oIBXTwDqtVP",
+        },
     },
     .paths = .{
         "build.zig",

@@ -75,11 +75,16 @@ pub const pattern = @import("pattern.zig");
 pub const filter = @import("filter.zig");
 /// The pixel operations those primitives are made of.
 pub const image = @import("image.zig");
-/// The `style` attribute of SVG 1.1 §6.3: one CSS declaration block, which
-/// outranks the presentation attributes beside it.
-pub const style = @import("style.zig");
-/// The `<style>` element, its selectors, and §6.4's cascade.
-pub const css = @import("css.zig");
+/// SVG 1.1 §6: the `style` attribute, a `<style>` element's rules, and the
+/// cascade that decides between them.
+///
+/// Re-exported rather than re-implemented. It is [its own library][zig-css],
+/// because deciding which of several declarations of one property applies to
+/// an element is a job with one right answer that has nothing to do with
+/// drawing.
+///
+/// [zig-css]: https://git.jcollie.dev/jeff/zig-css
+pub const css = @import("css");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
@@ -133,7 +138,6 @@ test {
     _ = pattern;
     _ = filter;
     _ = image;
-    _ = style;
     _ = css;
     _ = length;
     _ = path;

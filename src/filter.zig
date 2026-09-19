@@ -67,7 +67,7 @@ const ztree = @import("ztree");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
-const css = @import("css.zig");
+const css = @import("css");
 const document = @import("document.zig");
 const length = @import("length.zig");
 

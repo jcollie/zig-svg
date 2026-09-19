@@ -9,12 +9,17 @@ pub fn build(b: *std.Build) void {
 
     const z2d_dep = b.dependency("z2d", .{ .target = target, .optimize = optimize });
     const ztree_dep = b.dependency("ztree", .{ .target = target, .optimize = optimize });
+    const css_dep = b.dependency("zig_css", .{ .target = target, .optimize = optimize });
 
     const z2d = z2d_dep.module("z2d");
     // ztree rather than zxml directly: the reader needs random access to
     // resolve a `#id` reference, which a pull parser cannot give it. See
     // src/document.zig.
     const ztree = ztree_dep.module("ztree");
+    // SVG 1.1 §6 is CSS, and deciding which of several declarations of one
+    // property applies to an element has nothing to do with drawing. It was
+    // `src/css.zig` and `src/style.zig` here until it was lifted out.
+    const css = css_dep.module("css");
 
     // One module. The reader, the path grammar, the rasterizer and the sandbox
     // live together because Zig only analyses what is referenced: a program
@@ -27,6 +32,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "z2d", .module = z2d },
             .{ .name = "ztree", .module = ztree },
+            .{ .name = "css", .module = css },
         },
     });
 

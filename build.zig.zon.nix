@@ -166,6 +166,15 @@ copyFarm name
       };
     }
     {
+      name = "zig_css-0.0.0-d530kKeuAQB7-v8-1VNgjL9pLefK35fR3oIBXTwDqtVP";
+      path = fetchZigArtifact {
+        name = "zig_css";
+        url = "git+https://git.jcollie.dev/jeff/zig-css.git#4d9a4d855026ff68222498086901ade4dc12c3ad";
+        hash = "sha256-jFKxKiaik+rbwxNKSEKVvGAFr8wNYnET1/Sk19uzvD4=";
+        unpack = true;
+      };
+    }
+    {
       name = "ztree-0.0.0-Rb9y2UksAwAIl9qdJcWF_hQJ4OByzMagmRh0rxr14Oel";
       path = fetchZigArtifact {
         name = "ztree";

@@ -1257,6 +1257,9 @@ fn makeSource(
         // The same inversion decides the stops below, which is why they go in
         // as `.rgba` rather than `.srgba`.
         .method = .linear_rgb,
+        // §13.2.2's `spreadMethod`, whose three values are z2d's three extend
+        // modes under the same meanings.
+        .extend = spec.spread,
     });
     errdefer g.deinit(gpa);
 

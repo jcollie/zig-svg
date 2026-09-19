@@ -29,12 +29,12 @@
 //! pixel back into an offset, so the numbers stay exactly as the document
 //! wrote them.
 //!
-//! ## `spreadMethod` is `pad`, and the other two are refused
-//! z2d has no
-//! extend mode -- there is a `TODO` where one would go -- so `reflect` and
-//! `repeat` cannot be drawn rather than merely being unimplemented here. They
-//! are visibly different pictures, so drawing `pad` instead would be a wrong
-//! picture that looks deliberate.
+//! ## `spreadMethod`
+//! All three of §13.2.2's values are drawn. `pad` holds the end colours
+//! outwards, `repeat` starts the gradient over, and `reflect` turns it around
+//! so that tiles meet without a seam. They are visibly different pictures, so
+//! a value that is none of the three is refused rather than being taken as the
+//! default.
 
 const std = @import("std");
 const testing = std.testing;
@@ -47,8 +47,9 @@ const length = @import("length.zig");
 const transform = @import("transform.zig");
 
 pub const Error = error{
-    /// A `spreadMethod` of `reflect` or `repeat`, which z2d cannot draw, or
-    /// one that is not a spread method at all.
+    /// A `spreadMethod` that is not one of §13.2.2's three. Refused rather
+    /// than taken as `pad`, because the three draw visibly different pictures
+    /// and a document naming a fourth means something by it.
     UnsupportedSpreadMethod,
     /// A `gradientUnits` that is neither `userSpaceOnUse` nor
     /// `objectBoundingBox`.
@@ -111,6 +112,8 @@ pub const Kind = union(enum) {
 pub const Gradient = struct {
     kind: Kind,
     units: Units = .object_bounding_box,
+    /// `spreadMethod`: what is painted beyond the gradient's own range.
+    spread: z2d.gradient.Extend = .pad,
     /// `gradientTransform`, which applies inside the units mapping.
     transform: z2d.Transformation = .identity,
     stops: [max_stops]Stop = undefined,
@@ -208,8 +211,16 @@ fn applyOne(
     }
     if (tree.attributeValue(node, "", "spreadMethod")) |raw| {
         const t = std.mem.trim(u8, raw, " \t\r\n");
-        // `pad` is the initial value and the only one z2d can draw.
-        if (!std.mem.eql(u8, t, "pad")) return error.UnsupportedSpreadMethod;
+        // `pad` is the initial value; the other two are §13.2.2's, and the
+        // names line up one for one with z2d's extend modes.
+        out.spread = if (std.mem.eql(u8, t, "pad"))
+            .pad
+        else if (std.mem.eql(u8, t, "reflect"))
+            .reflect
+        else if (std.mem.eql(u8, t, "repeat"))
+            .repeat
+        else
+            return error.UnsupportedSpreadMethod;
     }
 
     // A gradient's own coordinates only apply to its own kind: a
@@ -420,22 +431,31 @@ test "stop-opacity multiplies into the stop's own alpha" {
     try testing.expectApproxEqAbs(@as(f64, 0.25), g.slice()[0].value.alpha, 0.01);
 }
 
-test "a spread method z2d cannot draw is refused" {
-    const gpa = testing.allocator;
-    var r = try readDoc(gpa, "<svg>" ++
+test "every spread method is read, and a fourth is refused" {
+    var r = try readDoc(testing.allocator, "<svg viewBox=\"0 0 8 8\"><defs>" ++
+        "<linearGradient id=\"none\"><stop offset=\"0\"/></linearGradient>" ++
         "<linearGradient id=\"pad\" spreadMethod=\"pad\"><stop offset=\"0\"/></linearGradient>" ++
         "<linearGradient id=\"reflect\" spreadMethod=\"reflect\"><stop offset=\"0\"/></linearGradient>" ++
         "<linearGradient id=\"repeat\" spreadMethod=\"repeat\"><stop offset=\"0\"/></linearGradient>" ++
         "<linearGradient id=\"bogus\" spreadMethod=\"bogus\"><stop offset=\"0\"/></linearGradient>" ++
-        "</svg>");
+        "</defs></svg>");
     defer r.deinit();
 
-    _ = try gradientNamed(&r, "pad");
-    for ([_][]const u8{ "reflect", "repeat", "bogus" }) |id| {
-        try testing.expectError(error.UnsupportedSpreadMethod, gradientNamed(&r, id));
+    // The attribute's absence is `pad`, which is §13.2.2's initial value.
+    for ([_]struct { id: []const u8, want: z2d.gradient.Extend }{
+        .{ .id = "none", .want = .pad },
+        .{ .id = "pad", .want = .pad },
+        .{ .id = "reflect", .want = .reflect },
+        .{ .id = "repeat", .want = .repeat },
+    }) |case| {
+        const g = try gradientNamed(&r, case.id);
+        try testing.expectEqual(case.want, g.spread);
     }
-}
 
+    // A fourth value is refused rather than taken as the default: the three
+    // draw visibly different pictures, so a document naming one means it.
+    try testing.expectError(error.UnsupportedSpreadMethod, gradientNamed(&r, "bogus"));
+}
 test "a gradientUnits nobody defines is refused" {
     const gpa = testing.allocator;
     var r = try readDoc(gpa, "<svg><linearGradient id=\"g\" gradientUnits=\"bogus\">" ++

@@ -1676,7 +1676,7 @@ fn buildGeometry(
 ) Error!void {
     var scratch: Pen = .{};
     return switch (shape.geometry) {
-        .text => |run| buildText(gpa, p, run, shape, ctm, pen orelse &scratch, doc, opts),
+        .text => |run| buildText(gpa, p, run, shape, ctm, pen orelse &scratch, doc, build_opts, opts),
         else => document.buildShape(p, gpa, shape.geometry, ctm, build_opts),
     };
 }
@@ -1713,6 +1713,7 @@ fn buildText(
     ctm: z2d.Transformation,
     pen: *Pen,
     doc: *const document.Document,
+    build_opts: path.Options,
     opts: Options,
 ) Error!void {
     var font = try faceFor(shape, opts);
@@ -1758,7 +1759,7 @@ fn buildText(
     // run goes down in one call, which is both faster and exactly what z2d
     // does internally anyway.
     if (run.rotate != null or run.text_length != null) {
-        try buildGlyphs(gpa, p, &font, collapsed, run, size, pen, ctm);
+        try buildGlyphs(gpa, p, &font, collapsed, run, size, pen, ctm, build_opts);
         return;
     }
 
@@ -1785,7 +1786,24 @@ fn buildText(
     pen.x += z2d.text.measure(gpa, &font, collapsed, text_opts) catch
         return error.BadFont;
 
+    // A run of text is as many nodes as its glyphs need, and a document can
+    // always write more text. Without this the budget would be the one thing
+    // text did not answer to.
+    try withinBudget(p, glyphs.nodes.items.len, build_opts);
     try p.nodes.appendSlice(gpa, glyphs.nodes.items);
+}
+
+/// Refuse when adding `adding` nodes would put `p` past what `opts` allows.
+///
+/// The same ceiling `shapes.build` keeps, and for the same reason: the budget
+/// exists so that a document cannot ask for unbounded work, and a builder that
+/// does not consult it is a hole in that.
+fn withinBudget(p: *const z2d.Path, adding: usize, opts: path.Options) Error!void {
+    const ceiling = std.math.add(usize, p.nodes.items.len, opts.max_nodes) catch
+        std.math.maxInt(usize);
+    const after = std.math.add(usize, p.nodes.items.len, adding) catch
+        std.math.maxInt(usize);
+    if (after > ceiling) return error.PathTooComplex;
 }
 
 /// Build a run one glyph at a time, for `rotate` and `textLength`.
@@ -1810,6 +1828,7 @@ fn buildGlyphs(
     size: f64,
     pen: *Pen,
     ctm: z2d.Transformation,
+    build_opts: path.Options,
 ) Error!void {
     const opts: z2d.text.ShowTextOptions = .{ .size = size };
 
@@ -1874,6 +1893,7 @@ fn buildGlyphs(
             else => return error.BadFont,
         };
         defer one.deinit(gpa);
+        try withinBudget(p, one.nodes.items.len, build_opts);
         try p.nodes.appendSlice(gpa, one.nodes.items);
 
         x += steps.items[i];
@@ -3762,4 +3782,29 @@ test "a node budget too small to draw with is refused, not overflowed" {
     );
     defer fine.deinit(gpa);
     try testing.expectEqual(@as(u8, 255), fine.getPixel(4, 4).?.rgba.a);
+}
+
+test "the node ceiling is what keeps text from outrunning the budget" {
+    // Text is the one builder whose size the document chooses freely -- a run
+    // is as many nodes as its glyphs need -- so it consults the ceiling before
+    // appending rather than after, which is what the other builders that can
+    // overshoot do not. Checked here directly, because drawing a glyph needs
+    // a font and a unit test has no way to find one: 0.16 reaches the
+    // environment only through `std.process.Init`, which a test does not get.
+    const gpa = testing.allocator;
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    try p.moveTo(gpa, 0, 0);
+    try p.lineTo(gpa, 1, 1);
+
+    // `max_nodes` is what this build may add, so with two already there and a
+    // budget of six, six more fit and seven do not.
+    try withinBudget(&p, 6, .{ .max_nodes = 6 });
+    try testing.expectError(error.PathTooComplex, withinBudget(&p, 7, .{ .max_nodes = 6 }));
+    // Adding nothing always fits, even with nothing left.
+    try withinBudget(&p, 0, .{ .max_nodes = 0 });
+    try testing.expectError(error.PathTooComplex, withinBudget(&p, 1, .{ .max_nodes = 0 }));
+    // A budget so large that the ceiling would wrap is still a budget, and
+    // saturating rather than wrapping is what keeps it one.
+    try withinBudget(&p, 1 << 40, .{ .max_nodes = std.math.maxInt(usize) });
 }

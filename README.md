@@ -105,6 +105,36 @@ run past the oracle's tolerance. The fixtures are sized so that what they
 compare is placement and clipping rather than resampling, because the latter is
 a difference this is on the right side of.
 
+`<text>` is drawn as an ordinary path. z2d hands back the glyph outlines and
+everything after that treats them like any other geometry, which is why text
+can be stroked, clipped, masked and filled with a gradient or a pattern without
+a second set of routines that would drift from the first —
+`tests/oracle/text-as-clip.svg` cuts a rectangle to the letters of a word.
+
+**Fonts are the caller's to supply**, through `Options.fonts`. Choosing a face
+from a family name means a font database, which means a filesystem, and the
+filesystem is exactly what the sandbox exists to take away — so this library
+never looks for one. The resolver is offered each name in the `font-family`
+list in turn, and then asked for its default; a family nothing answers to falls
+back to that default, because naming a font the machine does not have is the
+ordinary case rather than the exceptional one, and refusing would diverge from
+every other renderer. A document with text and *no* resolver at all is refused
+rather than drawn with the words missing.
+
+The resolver runs inside the sandboxed child, so it must answer out of memory
+it already holds: one that opens a file dies of the seccomp filter. That is a
+loud failure rather than a quiet one, but it is still a failure, and reading
+the font files before the render is the caller's job.
+
+Two things about placement were not guessable and are worth naming. A
+`<text>`'s `y` is the **baseline**, and z2d places a run by the top of its em
+box — one em above, because the glyph outline is reflected about the em box
+rather than about the baseline. Getting that wrong puts every line one
+font-size down the page, which looks like a plausible picture. And whitespace
+is collapsed the way XML's default `xml:space` asks: text indented across
+several lines in the source draws as one line, which is how documents are
+actually written.
+
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
 something else. `preserveAspectRatio` then decides how the one is fitted into
@@ -276,14 +306,18 @@ short of the specification.
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
 | Masks, clips and patterns inside one another | to `Limits.max_mask_depth` (4) |
 | Tiles for one `<pattern>` | to `Limits.max_pattern_tiles` (16384) |
-| `em`, `ex` lengths | **no** — refused; they need a font size |
 | `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
 | `filter` | **no** — refused, not ignored |
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>` | yes — `patternUnits`, `patternContentUnits`, `patternTransform`, `viewBox`, `href`, and `overflow` |
-| `style`, text, CSS | **no** |
+| `<text>` | yes — one run per element, filled or stroked, and usable as a clip |
+| `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
+| `text-anchor` | yes — `start`, `middle`, `end` |
+| `<tspan>`, `textPath`, `dx`/`dy`/`rotate` | **no** — refused, since each is a run of its own at a place of its own |
+| `em`, `ex` lengths | **no** — refused |
+| `style`, CSS | **no** |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -566,13 +600,13 @@ Roughly in the order they are worth having. Each is a document that errors
 today, and each should arrive with a fixture in `tests/oracle` that resvg
 already renders.
 
-**1. Text, and the font-relative lengths with it.** `<text>`, `<tspan>`,
-`font-family`, `font-size`, `text-anchor` — and with a font size finally in
-hand, the `em` and `ex` that are refused today. z2d can lay
-out a font, but choosing one from a family name means a font database, which is
-a dependency and a filesystem — and the filesystem is exactly what the sandbox
-exists to take away, so this needs the fonts resolved by the *caller* and
-handed in.
+**1. `<tspan>`, and the font-relative lengths.** A `<text>` is one run here,
+and an element inside one is refused rather than drawn as though it were not
+there. `<tspan>` carries its own position and its own properties, so a `<text>`
+holding them is really several runs at several places — which is a change to
+what the walk yields rather than to how a run is drawn. `em` and `ex` follow
+from the same work: a font size is now in hand, and threading it into
+`length.parse` is what those two need.
 
 **2. `<pattern>` sampled rather than drawn.** What is here draws the tile once
 per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a

@@ -157,11 +157,11 @@ in
 copyFarm name
   [
     {
-      name = "z2d-0.12.2-pre-j5P_HgBxEQBWo17Nqz-MmpaWECuk_sEh4huVu7-JZke-";
+      name = "z2d-0.12.2-pre-j5P_HpepEQBEyHFjRinuCTLcnU-TCiUOE7yWI68BdxJ5";
       path = fetchZigArtifact {
         name = "z2d";
-        url = "git+https://git.jcollie.dev/jeff/z2d.git#f97a3ee6c8a52e580af13675b08c919ec76b3b4d";
-        hash = "sha256-UJru1IgsOpJ7m2Sdq8unl9ey19ybOrC9X2uF79B2bfY=";
+        url = "git+https://git.jcollie.dev/jeff/z2d.git#60ba15dfcc19d9a951ae43cd0d53624dec355709";
+        hash = "sha256-YjDEK70xpqaEu3W0/CWlNoIypsDBD8e0YzU+lF3FZAE=";
         unpack = true;
       };
     }

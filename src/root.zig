@@ -13,13 +13,18 @@
 //!
 //! ## What it draws, and what it does not
 //!
-//! One `<svg>` with a `viewBox`, any number of `<path>` elements with a `d`,
-//! painted in document order in one colour. That is every Material Design
-//! Icon, most other icon sets, and a long way short of SVG: there is no
-//! `<g>`, no `transform`, no `style`, no gradient, no stroke, no text, no
-//! `<use>` and no `fill` attribute. What *is* complete is the path data
-//! grammar of SVG 1.1 §8.3, including the elliptical arc, which is the part
-//! with the arithmetic in it.
+//! The static half of SVG 1.1: paths and the basic shapes, `<g>` and `<use>`,
+//! transforms, fills and strokes with every property that goes with them,
+//! gradients and patterns, clipping and masking, and `<text>` with the fonts
+//! the caller supplies. The path data grammar of §8.3 is complete, elliptical
+//! arcs included, and so is §7.8's `preserveAspectRatio`. `README.md` has the
+//! table, and `tests/oracle` has a fixture for each of them checked against
+//! resvg.
+//!
+//! What it does not draw is the half that makes SVG a programming language
+//! rather than a picture format -- scripting, animation, `<foreignObject>`,
+//! external references -- along with `<filter>`, CSS in a `style` attribute or
+//! a `<style>` element, and `<tspan>`.
 //!
 //! An element it cannot draw is **refused**, not skipped. A renderer that
 //! skips what it does not understand produces a picture quietly missing a
@@ -38,8 +43,9 @@
 //! ## Sandboxing
 //!
 //! `sandbox.render` runs the renderer in a forked process that seccomp has
-//! reduced to four system calls, and passes the pixels back through shared
-//! memory. It matters more for SVG than for most formats: the full
+//! reduced to four system calls -- one of them on a single descriptor -- with
+//! every inherited descriptor closed behind it, and passes the pixels back
+//! through shared memory. It matters more for SVG than for most formats: the full
 //! specification *includes* fetching documents, running scripts and reading
 //! fonts, so a renderer growing towards it grows towards exactly the
 //! capabilities the sandbox takes away. See that module for what it does and

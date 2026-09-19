@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><defs><linearGradient id="g" x1="0" y1="0" x2="64" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="purple"/><stop offset="1" stop-color="orange"/></linearGradient></defs><text x="4" y="22" font-size="20" fill="url(#g)">Gradient</text></svg>

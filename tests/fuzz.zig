@@ -112,7 +112,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "linearGradstopfetURuns%BoxpM" ++
     "clip-pathruevnodmaskfilter" ++
     "maskUnitContbjeBoudgxywh-typelumnac" ++
-    "patternUnitsContTransfombjeBox";
+    "patternUnitsContTransfombjeBox" ++
+    "textfon-amilysizewghtylanchormddlbup";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -723,6 +724,29 @@ const document_corpus = [_][]const u8{
     // the walk cannot see, because each level is a finite document on its own.
     "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"4\" height=\"4\" fill=\"url(#p)\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\" fill=\"white\"/></pattern><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    // `<text>`. No font reaches the fuzzer, so every one of these ends in
+    // `NoFontSupplied` -- which is the point: what is being exercised is the
+    // reading, the whitespace collapsing and the family walk, all of which
+    // happen before a face is ever asked for.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-size=\"6\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-size=\"6\" font-family=\"'A B', C , D\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"4\" y=\"6\" font-size=\"6\" text-anchor=\"middle\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-weight=\"700\" font-style=\"italic\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g font-size=\"5\" font-family=\"X\"><text x=\"1\" y=\"6\">hi</text></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">   spaced\n   out   </text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-size=\"0\">hi</text></svg>",
+    // A `<text>` with elements inside it, which is several runs at several
+    // places and is refused rather than drawn as one.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">a<tspan x=\"4\">b</tspan></text></svg>",
+    // Text as a clip path, and text inside a pattern: both reach the builder
+    // by a route that is not the ordinary fill.
+    "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><text x=\"1\" y=\"6\" font-size=\"6\">c</text></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><text x=\"0\" y=\"3\" font-size=\"3\">x</text></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    // Text properties that are not values at all.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" text-anchor=\"centre\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-weight=\"heavy\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-style=\"slanted\">hi</text></svg>",
     // Still refused: a filter, and units that are neither of the two.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",

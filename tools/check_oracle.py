@@ -38,6 +38,7 @@ to use when the list is meant to be empty.
 """
 
 import argparse
+import os
 import pathlib
 import shutil
 import subprocess
@@ -71,12 +72,29 @@ OUTLIER_FRACTION = 0.0025
 
 
 def render_reference(resvg, svg_path, png_path, width, height):
-    """Render one fixture with resvg, at exactly the size we rendered it."""
-    subprocess.run(
-        [resvg, "--width", str(width), "--height", str(height), str(svg_path), str(png_path)],
-        check=True,
-        capture_output=True,
-    )
+    """Render one fixture with resvg, at exactly the size we rendered it.
+
+    The text fixtures are drawn with one font, and resvg is given that same
+    file and told to ignore the ones installed on the machine. Otherwise the
+    two renderers would be drawing different faces, and the comparison would be
+    measuring the faces rather than the rendering -- and it would pass or fail
+    depending on which fonts the machine happened to have.
+    """
+    argv = [resvg, "--width", str(width), "--height", str(height)]
+    font = os.environ.get("SVG_TEST_FONT")
+    if font:
+        # `--skip-system-fonts` alone is not enough: resvg's default family is
+        # still "Times New Roman", so a fixture that names no `font-family`
+        # finds nothing and draws nothing at all. The loaded face has to be
+        # named as the default as well, which is what the resolver on our side
+        # does by answering every request with the same face.
+        argv += [
+            "--skip-system-fonts",
+            "--use-font-file", font,
+            "--font-family", os.environ.get("SVG_TEST_FONT_FAMILY", "DejaVu Sans"),
+        ]
+    argv += [str(svg_path), str(png_path)]
+    subprocess.run(argv, check=True, capture_output=True)
 
 
 def read_manifest(path):

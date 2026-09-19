@@ -630,6 +630,13 @@ const WireError = enum(u16) {
     bad_pattern_units = 45,
     too_many_pattern_hops = 46,
     too_many_pattern_tiles = 47,
+    bad_text_anchor = 48,
+    bad_font_weight = 49,
+    bad_font_style = 50,
+    unsupported_text_content = 51,
+    text_needs_a_font = 52,
+    no_font_supplied = 53,
+    bad_font = 54,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -681,6 +688,13 @@ fn wireFromError(err: anyerror) WireError {
         error.BadPatternUnits => .bad_pattern_units,
         error.TooManyPatternHops => .too_many_pattern_hops,
         error.TooManyPatternTiles => .too_many_pattern_tiles,
+        error.BadTextAnchor => .bad_text_anchor,
+        error.BadFontWeight => .bad_font_weight,
+        error.BadFontStyle => .bad_font_style,
+        error.UnsupportedTextContent => .unsupported_text_content,
+        error.TextNeedsAFont => .text_needs_a_font,
+        error.NoFontSupplied => .no_font_supplied,
+        error.BadFont => .bad_font,
         error.FilterUnsupported => .filter_unsupported,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -747,6 +761,13 @@ fn wireToError(status: u16) Error {
         .bad_pattern_units => error.BadPatternUnits,
         .too_many_pattern_hops => error.TooManyPatternHops,
         .too_many_pattern_tiles => error.TooManyPatternTiles,
+        .bad_text_anchor => error.BadTextAnchor,
+        .bad_font_weight => error.BadFontWeight,
+        .bad_font_style => error.BadFontStyle,
+        .unsupported_text_content => error.UnsupportedTextContent,
+        .text_needs_a_font => error.TextNeedsAFont,
+        .no_font_supplied => error.NoFontSupplied,
+        .bad_font => error.BadFont,
         .filter_unsupported => error.FilterUnsupported,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -960,6 +981,13 @@ test "a document the reader refuses comes back as that refusal" {
     if (!available) return error.SkipZigTest;
 
     try testing.expectError(error.UnsupportedElement, render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>",
+        .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
+    ));
+    // Text with no resolver behind it: refused rather than drawn without it,
+    // and the refusal survives the trip back out of the child.
+    try testing.expectError(error.NoFontSupplied, render(
         testing.allocator,
         "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
@@ -1211,4 +1239,34 @@ test "a child that stops making progress is killed by the kernel" {
     // kernel's business; that one of them does is the claim.
     const sig = linux.W.TERMSIG(status);
     try testing.expect(sig == linux.SIG.XCPU or sig == linux.SIG.KILL);
+}
+
+test "a font resolver survives the fork into the child" {
+    if (!available) return error.SkipZigTest;
+
+    // The riskiest assumption in the font design: the resolver is a function
+    // pointer and a context pointer in the *parent's* memory, and the child
+    // is a fork rather than an exec -- so both are still valid there, and the
+    // bytes they hand back are the parent's pages, copy-on-write.
+    //
+    // This resolver answers with nothing, which means the render comes back
+    // as `NoFontSupplied`. That is the answer being checked: it can only
+    // arrive if the child actually called through the pointer. A resolver
+    // that was never reached would have left `TextNeedsAFont` instead, from
+    // the builder that has no font.
+    const Never = struct {
+        fn f(ctx: ?*anyopaque, req: raster.FontRequest) ?[]const u8 {
+            _ = ctx;
+            _ = req;
+            return null;
+        }
+    };
+    try testing.expectError(error.NoFontSupplied, render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"20\" font-size=\"12\">hi</text></svg>",
+        .{
+            .render = .{ .limits = test_limits, .fonts = .{ .ctx = null, .resolve = Never.f } },
+            .working_bytes = 4 << 20,
+        },
+    ));
 }

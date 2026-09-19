@@ -39,6 +39,22 @@ const svg = @import("svg");
 /// than one pixel, and small enough that the whole corpus renders in a moment.
 const long_edge: u32 = 256;
 
+/// The one face the fixtures use, handed to every request.
+///
+/// A real caller would look the family up; this answers the same face
+/// whatever is asked for, which is exactly what resvg does when it is given
+/// one `--use-font-file` and told `--skip-system-fonts`. Making the two agree
+/// about *which* face is the whole point.
+const FontCtx = struct {
+    bytes: ?[]const u8,
+
+    fn resolve(ctx: ?*anyopaque, req: svg.raster.FontRequest) ?[]const u8 {
+        _ = req;
+        const self: *const FontCtx = @ptrCast(@alignCast(ctx.?));
+        return self.bytes;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -66,6 +82,19 @@ pub fn main(init: std.process.Init) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr = std.Io.File.stderr().writer(io, &stderr_buf);
     const log = &stderr.interface;
+
+    // The font the text fixtures use, and the *same* file resvg is given with
+    // `--use-font-file`. Comparing text drawn in two different faces would
+    // compare the faces rather than the renderers. The devshell sets this; a
+    // run without it simply has no fonts, and the text fixtures are refused
+    // and counted as such rather than silently drawing nothing.
+    const font_path = init.environ_map.get("SVG_TEST_FONT") orelse "";
+    const font_bytes: ?[]const u8 = if (font_path.len != 0)
+        try std.Io.Dir.cwd().readFileAlloc(io, font_path, gpa, .limited(1 << 24))
+    else
+        null;
+    defer if (font_bytes) |b| gpa.free(b);
+    var font_ctx: FontCtx = .{ .bytes = font_bytes };
 
     var rendered: usize = 0;
     var refused: usize = 0;
@@ -104,6 +133,10 @@ pub fn main(init: std.process.Init) !void {
             // resvg draws for a path that names no fill. Naming anything else
             // here would be comparing two different pictures.
             .fill = .{ .rgba = .{ .r = 0, .g = 0, .b = 0, .a = 255 } },
+            .fonts = if (font_bytes != null) .{
+                .ctx = &font_ctx,
+                .resolve = FontCtx.resolve,
+            } else null,
         }) catch |err| {
             // A fixture this renderer refuses is a fact worth seeing rather
             // than a reason to stop: the corpus deliberately holds documents

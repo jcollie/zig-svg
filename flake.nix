@@ -137,6 +137,12 @@
               # of the same specification does not. See tools/check_oracle.py.
               pkgs.resvg
               (pkgs.python3.withPackages (ps: [ ps.pillow ]))
+              # A font for the text fixtures, and the *same* font for both
+              # renderers: resvg is given it with `--use-font-file` and told
+              # `--skip-system-fonts`, and this one is handed the same bytes.
+              # Comparing text drawn in two different faces would compare the
+              # faces rather than the renderers.
+              pkgs.dejavu_fonts
               # Regenerates build.zig.zon.nix from build.zig.zon, with the Zig
               # it shells out to fixed to this flake's rather than whatever the
               # caller happens to have.
@@ -156,6 +162,15 @@
               # not say. See src/sandbox/seccomp.zig.
               pkgs.strace
             ];
+
+            # Where the text fixtures' font is. Both `zig build oracle` and
+            # `tools/check_oracle.py` read it from here, so that neither has a
+            # store path written into it.
+            SVG_TEST_FONT = "${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf";
+            # What that face calls itself, which resvg needs as its default
+            # family: told to skip the system fonts it still looks for Times
+            # New Roman otherwise, finds nothing, and draws no text at all.
+            SVG_TEST_FONT_FAMILY = "DejaVu Sans";
           };
         }
       );

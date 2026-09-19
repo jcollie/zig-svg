@@ -41,7 +41,12 @@ const arc = @import("arc.zig");
 const path = @import("path.zig");
 
 pub const Error = path.Error;
-pub const BuildError = path.BuildError;
+pub const BuildError = path.BuildError || error{
+    /// A `.text` geometry reached `build`, which has no font and cannot turn
+    /// one into a path. `raster.zig` handles text before it gets here; this is
+    /// what any other caller meets.
+    TextNeedsAFont,
+};
 
 /// An axis-aligned rectangle, with optionally rounded corners.
 pub const Rect = struct {
@@ -87,6 +92,25 @@ pub const Geometry = union(enum) {
     ellipse: Ellipse,
     line: Line,
     poly: Poly,
+    /// A `<text>`'s content and where it starts.
+    ///
+    /// The odd one out, and unavoidably so: every other geometry here is
+    /// numbers this module can turn into a path on its own, and this one needs
+    /// a *font* -- which the caller supplies, because finding one means a font
+    /// database and a filesystem, and the filesystem is what the sandbox
+    /// exists to take away. `build` therefore refuses it; `raster.zig` builds
+    /// it, where the fonts are.
+    text: Text,
+};
+
+/// A run of text, as the document wrote it.
+pub const Text = struct {
+    /// The characters, still as they appear in the document. Whitespace is
+    /// collapsed at drawing time rather than here, because collapsing makes a
+    /// new string and this one is borrowed from the tree's arena.
+    utf8: []const u8,
+    x: f64,
+    y: f64,
 };
 
 /// Append `geometry` to `p`, honouring `p.transformation`.
@@ -103,6 +127,12 @@ pub fn build(
         // A `d` arrives with its entity references already resolved: ztree
         // decodes every attribute value into the tree's arena as it parses.
         .path => |d| return path.build(p, alloc, d, opts),
+        // Text needs a font, which is the caller's to supply and not this
+        // module's to find. `raster.zig` builds it, where the fonts are; this
+        // says so rather than silently drawing nothing, because a `<text>`
+        // that quietly vanishes is the kind of missing piece that looks like a
+        // finished picture.
+        .text => return error.TextNeedsAFont,
         .rect => |r| return buildRect(p, alloc, r),
         .ellipse => |e| return buildEllipse(p, alloc, e),
         .line => |l| return buildLine(p, alloc, l, opts),

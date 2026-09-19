@@ -28,6 +28,7 @@ const gradient = @import("gradient.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const pattern = @import("pattern.zig");
+const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
 
 /// How much a caller is willing to spend on a picture somebody else wrote.
@@ -194,10 +195,80 @@ pub const Options = struct {
     tolerance: f64 = z2d.options.default_tolerance,
 
     limits: Limits = .{},
+
+    /// Where the fonts come from, or null when the caller has none to give.
+    ///
+    /// A document with `<text>` in it and no resolver is refused rather than
+    /// drawn without its text.
+    fonts: ?FontResolver = null,
+};
+
+/// What a document asks for when it wants a font.
+pub const FontRequest = struct {
+    /// One name out of the `font-family` list, trimmed and unquoted. Empty
+    /// when the resolver is being asked for its **default** face: that happens
+    /// after every name in the list has been offered and none answered, and
+    /// also when the document named no family at all.
+    family: []const u8,
+    /// §10.10's numeric weight: 400 for `normal`, 700 for `bold`.
+    weight: u16 = 400,
+    italic: bool = false,
+};
+
+/// How the caller supplies fonts.
+///
+/// A callback rather than a list, so that a caller with a font database can
+/// answer out of it and one with a single embedded face can ignore the
+/// question. The bytes are borrowed: the resolver keeps ownership and they
+/// must outlive the render.
+///
+/// **It runs inside the sandboxed child.** `sandbox.render` forks and installs
+/// a seccomp filter before the document is parsed, so a resolver that opens a
+/// file or reaches the network dies of the filter and the render comes back as
+/// `error.SandboxViolation`. That is a loud failure rather than a quiet one,
+/// but it is still a failure: a resolver must answer out of memory it already
+/// holds. Reading the font files is the caller's job, and doing it before the
+/// render is the caller's job too.
+pub const FontResolver = struct {
+    /// Passed back to `resolve` untouched. Whatever the caller needs to find a
+    /// face -- a database, a hash map, a single slice.
+    ctx: ?*anyopaque = null,
+
+    /// Answers with the bytes of a face, or null when it has none for this
+    /// request. Called once per name in the `font-family` list, in order, and
+    /// then once more with an empty `family` for the default.
+    resolve: *const fn (ctx: ?*anyopaque, req: FontRequest) ?[]const u8,
+
+    /// The face for a shape, or null when nothing answers.
+    ///
+    /// §10.10's `font-family` is a list in preference order, so each name is
+    /// offered in turn. When none answers -- or the document named none --
+    /// the resolver is asked for its default, which is what every other
+    /// renderer does with a family it does not have. Refusing instead would
+    /// refuse a great many real documents, since naming a font the machine
+    /// lacks is the ordinary case rather than the exceptional one.
+    pub fn faceFor(self: FontResolver, shape: document.Shape) ?[]const u8 {
+        const req: FontRequest = .{
+            .family = "",
+            .weight = shape.font_weight orelse 400,
+            .italic = shape.font_italic orelse false,
+        };
+        if (shape.font_family) |list| {
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |raw| {
+                const name = std.mem.trim(u8, raw, " \t\r\n'\"");
+                if (name.len == 0) continue;
+                var named = req;
+                named.family = name;
+                if (self.resolve(self.ctx, named)) |bytes| return bytes;
+            }
+        }
+        return self.resolve(self.ctx, req);
+    }
 };
 
 /// Everything a render can fail with.
-pub const Error = document.Error || path.BuildError || z2d.painter.FillError || error{
+pub const Error = document.Error || document.BuildError || path.BuildError || z2d.painter.FillError || error{
     /// The picture is larger than `Limits` permits.
     ImageTooLarge,
     /// A width or height of zero, whether asked for or taken from the viewBox.
@@ -212,6 +283,12 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     /// A `<pattern>` whose lattice would need more tiles than
     /// `Limits.max_pattern_tiles` to cover what it paints.
     TooManyPatternTiles,
+    /// A document with `<text>` in it, and either no `Options.fonts` at all or
+    /// a resolver that answered nothing -- not even a default. Refused rather
+    /// than drawn with the text missing.
+    NoFontSupplied,
+    /// Bytes a resolver returned that are not a font this can read.
+    BadFont,
     /// Containers needing a layer of their own, nested more deeply than
     /// `Limits.max_layers`.
     TooManyLayers,
@@ -312,8 +389,8 @@ fn drawDocument(
     var layers: Layers = .{ .bottom = destination };
     defer layers.deinit(gpa);
 
-    var shapes = doc.paths();
-    return drawItems(gpa, &layers, doc, &shapes, .{
+    var walk = doc.paths();
+    return drawItems(gpa, &layers, doc, &walk, .{
         .base = doc.transformFor(box.x, box.y, box.width, box.height),
         .nodes_left = &nodes_left,
         .depth = 0,
@@ -409,9 +486,9 @@ fn drawItems(
             // The viewBox mapping outside, the shape's own `transform` chain
             // inside, so that a `transform` is in user units like the path
             // data it applies to.
-            try document.buildShape(&p, gpa, shape.geometry, ctm, .{
+            try buildGeometry(gpa, &p, shape, ctm, .{
                 .max_nodes = pass.nodes_left.*,
-            });
+            }, opts);
             pass.nodes_left.* -= p.nodes.items.len;
 
             // A shape with no geometry draws nothing, which is not an error;
@@ -469,10 +546,13 @@ fn drawItems(
             var p: z2d.Path = .empty;
             defer p.deinit(gpa);
 
-            try document.buildShape(&p, gpa, shape.geometry, ctm, .{
+            try buildGeometry(gpa, &p, shape, ctm, .{
                 .max_nodes = pass.nodes_left.*,
+                // Glyph outlines are closed contours whatever this says, so a
+                // stroked `<text>` is outlined rather than having its letters
+                // capped at their ends.
                 .close_subpaths = false,
-            });
+            }, opts);
             pass.nodes_left.* -= p.nodes.items.len;
 
             if (p.nodes.items.len != 0) {
@@ -932,9 +1012,12 @@ fn buildClip(
         };
         var p: z2d.Path = .empty;
         defer p.deinit(gpa);
-        try document.buildShape(&p, gpa, shape.geometry, shape.transform, .{
+        // Through the text-aware builder: §14.3 lets a `<clipPath>` hold a
+        // `<text>`, and cutting a shape to the letters of a word is a thing
+        // documents actually do.
+        try buildGeometry(gpa, &p, shape, shape.transform, .{
             .max_nodes = pass.nodes_left.*,
-        });
+        }, opts);
         pass.nodes_left.* -= p.nodes.items.len;
         if (p.nodes.items.len == 0) continue;
 
@@ -1542,6 +1625,130 @@ fn strokeBox(box: Box, width: f64, ctm: z2d.Transformation) Box {
     };
 }
 
+/// Build a shape's geometry into `p`, whichever kind it is.
+///
+/// `document.buildShape` covers every geometry but text, which needs a font it
+/// has no way to reach. This is where the two meet, so that everything after
+/// it -- filling, stroking, clipping, measuring -- sees one path and does not
+/// care which kind of element made it.
+fn buildGeometry(
+    gpa: Allocator,
+    p: *z2d.Path,
+    shape: document.Shape,
+    ctm: z2d.Transformation,
+    build_opts: path.Options,
+    opts: Options,
+) Error!void {
+    return switch (shape.geometry) {
+        .text => |run| buildText(gpa, p, run, shape, ctm, opts),
+        else => document.buildShape(p, gpa, shape.geometry, ctm, build_opts),
+    };
+}
+
+/// Build a `<text>` run's glyph outlines into `p`, under `ctm`.
+///
+/// Everything after this treats the result as an ordinary path, which is the
+/// whole point of doing it this way: text is filled, stroked, clipped, masked
+/// and pattern-filled by the same code as every other shape, rather than by a
+/// second set of routines that would drift from it.
+///
+/// The caller's `FontResolver` runs here. A document with text and no resolver
+/// is refused -- `error.NoFontSupplied` -- rather than drawn with the text
+/// quietly missing.
+fn buildText(
+    gpa: Allocator,
+    p: *z2d.Path,
+    run: shapes.Text,
+    shape: document.Shape,
+    ctm: z2d.Transformation,
+    opts: Options,
+) Error!void {
+    const resolver = opts.fonts orelse return error.NoFontSupplied;
+    const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
+
+    var font = z2d.Font.loadBuffer(bytes) catch return error.BadFont;
+
+    // §10.10's initial `font-size` is `medium`, which every renderer takes as
+    // 16 units; resvg uses 12 when the document names none, and says so in
+    // `--font-size`. The document's own value is what matters in practice --
+    // text without a `font-size` is rare -- and 16 is what the CSS keyword
+    // means, so that is what an unspecified one gets here.
+    const size = shape.font_size orelse 16;
+    if (!(size > 0)) return;
+
+    const collapsed = try collapseWhitespace(gpa, run.utf8);
+    defer gpa.free(collapsed);
+    if (collapsed.len == 0) return;
+
+    const text_opts: z2d.text.ShowTextOptions = .{ .size = size };
+
+    // §10.9: the anchor says which end of the advance sits at `x`, so how wide
+    // the text is has to be known before it can be placed. `measure` walks the
+    // same glyphs without building any outline, which is why this costs a pass
+    // over the string rather than a second set of outlines.
+    const anchor = shape.text_anchor orelse .start;
+    const shift: f64 = switch (anchor) {
+        .start => 0,
+        .middle, .end => shifted: {
+            const advance = z2d.text.measure(gpa, &font, collapsed, text_opts) catch
+                return error.BadFont;
+            break :shifted if (anchor == .middle) -advance / 2 else -advance;
+        },
+    };
+
+    // §10.4: a `<text>`'s `y` is the **baseline**. z2d places a run by the top
+    // of its em box, and the two are an ascender apart -- so passing the
+    // baseline straight through puts every line of text one font-size down the
+    // page, which looks like a plausible picture and is the wrong one.
+    var glyphs = z2d.text.outline(
+        gpa,
+        &font,
+        collapsed,
+        run.x + shift,
+        run.y - font.baselineOffset(size),
+        .{ .size = size, .transformation = ctm },
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Every other way this fails is the font or the string being
+        // something the shaper cannot read.
+        else => return error.BadFont,
+    };
+    defer glyphs.deinit(gpa);
+
+    try p.nodes.appendSlice(gpa, glyphs.nodes.items);
+}
+
+/// XML whitespace collapsed the way SVG's default `xml:space` asks.
+///
+/// Every tab, newline and carriage return becomes a space, runs of spaces
+/// become one, and the leading and trailing ones go. That is what makes text
+/// indented across several lines in the source draw as one line here, which is
+/// how documents are actually written -- and getting it wrong shows up as the
+/// text being in the wrong place rather than as anything that looks like a
+/// whitespace bug.
+///
+/// `xml:space="preserve"` asks for the other treatment and is not implemented;
+/// the reader refuses nothing for it yet because the attribute is rare and its
+/// absence is the case that matters.
+fn collapseWhitespace(gpa: Allocator, raw: []const u8) Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var pending_space = false;
+    for (raw) |c| {
+        switch (c) {
+            ' ', '\t', '\r', '\n' => {
+                if (out.items.len != 0) pending_space = true;
+            },
+            else => {
+                if (pending_space) try out.append(gpa, ' ');
+                pending_space = false;
+                try out.append(gpa, c);
+            },
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 /// The overlap of two boxes, or null when they do not meet.
 fn intersect(a: Box, b: Box) ?Box {
     const x0 = @max(a.x, b.x);
@@ -1696,9 +1903,9 @@ fn callerColor(opts: Options) color.Color {
 fn boundingBox(gpa: Allocator, shape: document.Shape, opts: Options) Error!Box {
     var p: z2d.Path = .empty;
     defer p.deinit(gpa);
-    try document.buildShape(&p, gpa, shape.geometry, .identity, .{
+    try buildGeometry(gpa, &p, shape, .identity, .{
         .max_nodes = opts.limits.max_path_nodes,
-    });
+    }, opts);
     return pathBox(p.nodes.items);
 }
 
@@ -1752,9 +1959,9 @@ fn contentExtent(
         };
         var p: z2d.Path = .empty;
         defer p.deinit(gpa);
-        try document.buildShape(&p, gpa, shape.geometry, shape.transform, .{
+        try buildGeometry(gpa, &p, shape, shape.transform, .{
             .max_nodes = opts.limits.max_path_nodes,
-        });
+        }, opts);
         if (p.nodes.items.len == 0) continue;
         var box = pathBox(p.nodes.items);
         if (with_stroke) {
@@ -3075,4 +3282,173 @@ test "draw paints into a surface somebody else made" {
     // Painted on the right half and not on the left.
     try testing.expectEqual(@as(u8, 255), surface.getPixel(48, 16).?.rgb.g);
     try testing.expectEqual(@as(u8, 0), surface.getPixel(16, 16).?.rgb.g);
+}
+
+/// Records what a document asked for, and answers nothing.
+///
+/// Enough for every question here that is about the *request* rather than the
+/// glyphs: which families were offered and in what order, and what weight and
+/// style went with them. Answering nothing means the render ends in
+/// `NoFontSupplied`, which is fine -- by then the asking has happened, and it
+/// is what these tests are looking at.
+///
+/// The alternative would be a font to draw with, and a unit test has no way to
+/// find one: `SVG_TEST_FONT` is what the devshell sets, and 0.16 reaches the
+/// environment only through `std.process.Init`, which a test does not get.
+/// `tests/oracle` is where text is checked against a real face, against resvg,
+/// with both given the same file.
+const Asked = struct {
+    /// Copied rather than borrowed. A request's `family` points into the
+    /// document's arena, which `render` releases before it returns, so
+    /// keeping the slice and reading it afterwards is a use-after-free -- and
+    /// one that showed up as a crash rather than as a wrong answer.
+    var storage: [8][64]u8 = undefined;
+    var lengths: [8]usize = undefined;
+    var count: usize = 0;
+    var weight: u16 = 0;
+    var italic: bool = false;
+
+    fn resolve(ctx: ?*anyopaque, req: FontRequest) ?[]const u8 {
+        _ = ctx;
+        if (count < storage.len) {
+            const n = @min(req.family.len, storage[count].len);
+            @memcpy(storage[count][0..n], req.family[0..n]);
+            lengths[count] = n;
+            count += 1;
+        }
+        weight = req.weight;
+        italic = req.italic;
+        return null;
+    }
+
+    fn family(i: usize) []const u8 {
+        return storage[i][0..lengths[i]];
+    }
+
+    fn reset() void {
+        count = 0;
+        weight = 0;
+        italic = false;
+    }
+
+    fn resolver() FontResolver {
+        return .{ .ctx = null, .resolve = Asked.resolve };
+    }
+};
+
+test "text is refused when there is no font to draw it with" {
+    const gpa = testing.allocator;
+    const src = "<svg viewBox=\"0 0 32 32\"><text x=\"2\" y=\"20\" font-size=\"12\">hi</text></svg>";
+
+    // No resolver at all.
+    try testing.expectError(error.NoFontSupplied, render(gpa, src, .{}));
+
+    // And a resolver that answers nothing, not even a default: refused rather
+    // than drawn with the text missing, which would be a picture that looks
+    // finished and is not.
+    Asked.reset();
+    try testing.expectError(error.NoFontSupplied, render(gpa, src, .{
+        .fonts = Asked.resolver(),
+    }));
+}
+
+test "the font-family list is offered in order, then the default" {
+    Asked.reset();
+    _ = render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 32 32\"><text x=\"2\" y=\"20\" font-size=\"12\"" ++
+            " font-family=\"'Fancy One', Second , Third\">hi</text></svg>",
+        .{ .fonts = Asked.resolver() },
+    ) catch {};
+
+    // §10.10's list is a preference order, so each name is offered in turn --
+    // trimmed and unquoted -- and the empty one at the end is the request for
+    // whatever the resolver calls its default.
+    try testing.expectEqual(@as(usize, 4), Asked.count);
+    try testing.expectEqualStrings("Fancy One", Asked.family(0));
+    try testing.expectEqualStrings("Second", Asked.family(1));
+    try testing.expectEqualStrings("Third", Asked.family(2));
+    try testing.expectEqualStrings("", Asked.family(3));
+}
+
+test "a document naming no family asks only for the default" {
+    Asked.reset();
+    _ = render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 32 32\"><text x=\"2\" y=\"20\" font-size=\"12\">hi</text></svg>",
+        .{ .fonts = Asked.resolver() },
+    ) catch {};
+    try testing.expectEqual(@as(usize, 1), Asked.count);
+    try testing.expectEqualStrings("", Asked.family(0));
+}
+
+test "a font request carries the weight and the style" {
+    for ([_]struct { attrs: []const u8, weight: u16, italic: bool }{
+        .{ .attrs = "", .weight = 400, .italic = false },
+        .{ .attrs = " font-weight=\"bold\"", .weight = 700, .italic = false },
+        .{ .attrs = " font-weight=\"600\"", .weight = 600, .italic = false },
+        .{ .attrs = " font-style=\"italic\"", .weight = 400, .italic = true },
+        // `oblique` is a slanted upright rather than a true italic, and a
+        // resolver asked for one and given the other is closer than one asked
+        // for nothing.
+        .{ .attrs = " font-style=\"oblique\"", .weight = 400, .italic = true },
+        .{ .attrs = " font-weight=\"bold\" font-style=\"italic\"", .weight = 700, .italic = true },
+    }) |case| {
+        Asked.reset();
+        const src = try std.fmt.allocPrint(
+            testing.allocator,
+            "<svg viewBox=\"0 0 32 32\"><text x=\"2\" y=\"20\" font-size=\"12\"{s}>hi</text></svg>",
+            .{case.attrs},
+        );
+        defer testing.allocator.free(src);
+        _ = render(testing.allocator, src, .{ .fonts = Asked.resolver() }) catch {};
+        try testing.expectEqual(case.weight, Asked.weight);
+        try testing.expectEqual(case.italic, Asked.italic);
+    }
+}
+
+test "a font property is inherited through a container" {
+    Asked.reset();
+    _ = render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 32 32\"><g font-family=\"Outer\" font-weight=\"bold\">" ++
+            "<text x=\"2\" y=\"20\" font-size=\"12\">hi</text></g></svg>",
+        .{ .fonts = Asked.resolver() },
+    ) catch {};
+    try testing.expectEqualStrings("Outer", Asked.family(0));
+    try testing.expectEqual(@as(u16, 700), Asked.weight);
+}
+
+test "a text property the reader cannot read is refused" {
+    const gpa = testing.allocator;
+    for ([_]struct { attrs: []const u8, want: anyerror }{
+        .{ .attrs = " text-anchor=\"centre\"", .want = error.BadTextAnchor },
+        .{ .attrs = " font-weight=\"heavy\"", .want = error.BadFontWeight },
+        .{ .attrs = " font-weight=\"0\"", .want = error.BadFontWeight },
+        .{ .attrs = " font-style=\"slanted\"", .want = error.BadFontStyle },
+    }) |case| {
+        const src = try std.fmt.allocPrint(
+            gpa,
+            "<svg viewBox=\"0 0 32 32\"><text x=\"2\" y=\"20\"{s}>hi</text></svg>",
+            .{case.attrs},
+        );
+        defer gpa.free(src);
+        try testing.expectError(case.want, render(gpa, src, .{ .fonts = Asked.resolver() }));
+    }
+}
+
+test "whitespace in a text run is collapsed" {
+    const gpa = testing.allocator;
+    for ([_]struct { raw: []const u8, want: []const u8 }{
+        .{ .raw = "  hello   world  ", .want = "hello world" },
+        .{ .raw = "\n    indented\n    across lines\n  ", .want = "indented across lines" },
+        .{ .raw = "\t\ttabs\tbetween\t", .want = "tabs between" },
+        .{ .raw = "", .want = "" },
+        .{ .raw = "   ", .want = "" },
+        .{ .raw = "one", .want = "one" },
+    }) |case| {
+        const got = try collapseWhitespace(gpa, case.raw);
+        defer gpa.free(got);
+        try testing.expectEqualStrings(case.want, got);
+    }
 }

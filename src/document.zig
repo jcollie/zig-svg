@@ -137,6 +137,18 @@ pub const Error = error{
     /// without the filter it asked for is a picture that looks finished and is
     /// not.
     FilterUnsupported,
+    /// A `text-anchor` that is not one of §10.9's three.
+    BadTextAnchor,
+    /// A `font-weight` that is neither a number in range nor `normal` or
+    /// `bold`.
+    BadFontWeight,
+    /// A `font-style` that is not `normal`, `italic` or `oblique`.
+    BadFontStyle,
+    /// A `<text>` with elements inside it -- a `<tspan>`, most likely. Each
+    /// carries its own position and its own properties, so the run is really
+    /// several runs, and drawing the characters without them would put text on
+    /// the page in the wrong places.
+    UnsupportedTextContent,
 } || transform.Error || color.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -290,6 +302,16 @@ pub const Inherited = struct {
     stroke_dasharray: ?[]const u8 = null,
     stroke_dashoffset: ?f64 = null,
 
+    /// The `font-family` list as the document wrote it, borrowed from the
+    /// tree's arena. Kept as text for the same reason `stroke-dasharray` is: it
+    /// is a list, and splitting it here would mean allocating or giving every
+    /// level of the walk's stack room for one.
+    font_family: ?[]const u8 = null,
+    font_size: ?f64 = null,
+    font_weight: ?u16 = null,
+    font_italic: ?bool = null,
+    text_anchor: ?TextAnchor = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -306,8 +328,23 @@ pub const Inherited = struct {
             .stroke_miterlimit = child.stroke_miterlimit orelse self.stroke_miterlimit,
             .stroke_dasharray = child.stroke_dasharray orelse self.stroke_dasharray,
             .stroke_dashoffset = child.stroke_dashoffset orelse self.stroke_dashoffset,
+            .font_family = child.font_family orelse self.font_family,
+            .font_size = child.font_size orelse self.font_size,
+            .font_weight = child.font_weight orelse self.font_weight,
+            .font_italic = child.font_italic orelse self.font_italic,
+            .text_anchor = child.text_anchor orelse self.text_anchor,
         };
     }
+};
+
+/// §10.9's `text-anchor`: which end of the text sits at the given point.
+pub const TextAnchor = enum {
+    /// The default. The point is where the text begins.
+    start,
+    /// The point is the middle of the text's advance.
+    middle,
+    /// The point is where the text ends.
+    end,
 };
 
 /// What the walk produces: a shape to draw, or the edges of a group that has
@@ -375,6 +412,14 @@ pub const Shape = struct {
     stroke_miterlimit: ?f64,
     stroke_dasharray: ?[]const u8,
     stroke_dashoffset: ?f64,
+    /// What `.text` geometry is drawn with. Meaningless for every other
+    /// geometry, and inherited like the paint properties are, because a
+    /// `font-size` on a `<g>` applies to the text inside it.
+    font_family: ?[]const u8,
+    font_size: ?f64,
+    font_weight: ?u16,
+    font_italic: ?bool,
+    text_anchor: ?TextAnchor,
     /// This element's own `opacity`, which is not inherited. One when the
     /// element does not name it.
     opacity: f64,
@@ -743,6 +788,11 @@ pub const PathIterator = struct {
                 .stroke_miterlimit = effective.stroke_miterlimit,
                 .stroke_dasharray = effective.stroke_dasharray,
                 .stroke_dashoffset = effective.stroke_dashoffset,
+                .font_family = effective.font_family,
+                .font_size = effective.font_size,
+                .font_weight = effective.font_weight,
+                .font_italic = effective.font_italic,
+                .text_anchor = effective.text_anchor,
                 .opacity = try self.opacityOf(node),
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
@@ -878,7 +928,44 @@ pub const PathIterator = struct {
             .stroke_miterlimit = if (self.attr(node, "stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
             .stroke_dasharray = self.attr(node, "stroke-dasharray"),
             .stroke_dashoffset = try self.optionalLengthOf(node, "stroke-dashoffset", .other),
+            .font_family = self.attr(node, "font-family"),
+            .font_size = try self.optionalLengthOf(node, "font-size", .other),
+            .font_weight = if (self.attr(node, "font-weight")) |v| try parseFontWeight(v) else null,
+            .font_italic = if (self.attr(node, "font-style")) |v| try parseFontStyle(v) else null,
+            .text_anchor = if (self.attr(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
         };
+    }
+
+    /// The characters inside a `<text>`, borrowed from the tree's arena.
+    ///
+    /// ztree merges adjacent character data into one node, so an ordinary
+    /// `<text>` has exactly one child and its value is the whole run -- with
+    /// entity references already resolved, since ztree decodes them as it
+    /// parses.
+    ///
+    /// Anything else is refused. An element inside a `<text>` is a `<tspan>`
+    /// or its kind, each carrying its own position and its own properties, so
+    /// the run is really several runs at several places; drawing the
+    /// characters without them would put text on the page where the document
+    /// did not ask for it. Refusing says so instead.
+    fn textContentOf(self: *const PathIterator, node: ztree.NodeId) Error![]const u8 {
+        const tree = self.doc.tree;
+        var found: ?[]const u8 = null;
+        for (tree.node(node).children.items) |child| {
+            switch (tree.node(child).kind) {
+                .text => {
+                    // More than one run of character data means something was
+                    // between them, which is the case above.
+                    if (found != null) return error.UnsupportedTextContent;
+                    found = tree.node(child).value;
+                },
+                .element => return error.UnsupportedTextContent,
+                // A comment or a processing instruction says nothing about
+                // what is drawn.
+                else => {},
+            }
+        }
+        return found orelse "";
     }
 
     fn readTransform(self: *const PathIterator, node: ztree.NodeId) Error!z2d.Transformation {
@@ -897,6 +984,13 @@ pub const PathIterator = struct {
         const name = self.doc.tree.node(node).name.local;
         if (std.mem.eql(u8, name, "path")) {
             return .{ .path = self.attr(node, "d") orelse return error.NoPath };
+        }
+        if (std.mem.eql(u8, name, "text")) {
+            return .{ .text = .{
+                .utf8 = try self.textContentOf(node),
+                .x = try self.lengthOf(node, "x", .x, 0),
+                .y = try self.lengthOf(node, "y", .y, 0),
+            } };
         }
         if (std.mem.eql(u8, name, "rect")) {
             return .{
@@ -1012,6 +1106,46 @@ fn localIs(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) bo
 /// ASCII case-insensitive, while this is an XML attribute value, where they
 /// are not. resvg draws `fill-rule="EVENODD"` with the nonzero rule, which is
 /// the same reading.
+/// §10.9's `text-anchor`. Matched with regard to case, like the other
+/// presentation attributes that are not colours.
+fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "start")) return .start;
+    if (std.mem.eql(u8, t, "middle")) return .middle;
+    if (std.mem.eql(u8, t, "end")) return .end;
+    // `inherit` is the CSS keyword for "what the parent said", which is what
+    // leaving the attribute out already does here.
+    if (std.mem.eql(u8, t, "inherit")) return error.BadTextAnchor;
+    return error.BadTextAnchor;
+}
+
+/// §10.10's `font-weight`, as the number the resolver is asked for.
+///
+/// The numeric spellings and the two names. `bolder` and `lighter` are
+/// relative to the inherited weight, which means resolving them against what
+/// the parent said rather than against a fixed table, and nothing here has
+/// asked for them yet.
+fn parseFontWeight(raw: []const u8) Error!u16 {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "normal")) return 400;
+    if (std.mem.eql(u8, t, "bold")) return 700;
+    const n = std.fmt.parseInt(u16, t, 10) catch return error.BadFontWeight;
+    if (n < 1 or n > 1000) return error.BadFontWeight;
+    return n;
+}
+
+/// §10.10's `font-style`, as whether the face is italic.
+///
+/// `oblique` is a slanted upright rather than a true italic, and a resolver
+/// asked for one and given the other is closer than a resolver asked for
+/// nothing -- so both ask for an italic face here.
+fn parseFontStyle(raw: []const u8) Error!bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "normal")) return false;
+    if (std.mem.eql(u8, t, "italic") or std.mem.eql(u8, t, "oblique")) return true;
+    return error.BadFontStyle;
+}
+
 fn parseFillRule(text: []const u8) Error!z2d.options.FillRule {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (std.mem.eql(u8, t, "nonzero")) return .non_zero;
@@ -1402,10 +1536,6 @@ test "an element with geometry this reader cannot draw is refused" {
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>"),
-    );
-    try testing.expectError(
-        error.UnsupportedElement,
         read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>"),
     );
 }
@@ -1416,7 +1546,7 @@ test "a document is refused before any of it is drawn" {
     // half-drawn picture and an error at once.
     try testing.expectError(error.UnsupportedElement, read(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><text>x</text></svg>",
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><image href=\"a.png\"/></svg>",
     ));
     try testing.expectError(error.NoPath, read(
         testing.allocator,

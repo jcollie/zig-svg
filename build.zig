@@ -114,6 +114,10 @@ pub fn build(b: *std.Build) void {
     run_oracle.stdio = .inherit;
     run_oracle.addArg("tests/oracle");
     run_oracle.addArg(b.getInstallPath(.prefix, "oracle"));
+    // The tool reads `SVG_TEST_FONT` out of its own environment, which the
+    // devshell sets, so the font the text fixtures use needs no argument here
+    // and no store path written into the build.
+
     b.step("oracle", "Render the oracle corpus into zig-out/oracle")
         .dependOn(&run_oracle.step);
     check_step.dependOn(&oracle.step);

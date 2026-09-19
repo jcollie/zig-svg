@@ -522,29 +522,52 @@ pub const Document = struct {
             .width = self.width,
             .height = self.height,
         };
-
-        const par = self.preserve_aspect_ratio;
-        const ratio_x = width / vb.width;
-        const ratio_y = height / vb.height;
-        const scale_x, const scale_y = if (par.stretch)
-            .{ ratio_x, ratio_y }
-        else if (par.slice)
-            .{ @max(ratio_x, ratio_y), @max(ratio_x, ratio_y) }
-        else
-            .{ @min(ratio_x, ratio_y), @min(ratio_x, ratio_y) };
-
-        const spare_x = width - vb.width * scale_x;
-        const spare_y = height - vb.height * scale_y;
-        return .{
-            .ax = scale_x,
-            .by = 0,
-            .cx = 0,
-            .dy = scale_y,
-            .tx = x + spare_x * PreserveAspectRatio.fraction(par.align_x) - vb.min_x * scale_x,
-            .ty = y + spare_y * PreserveAspectRatio.fraction(par.align_y) - vb.min_y * scale_y,
-        };
+        return viewBoxTransform(vb, self.preserve_aspect_ratio, x, y, width, height);
     }
 };
+
+/// §7.8's algorithm on its own, for anything with a `viewBox` to fit into a
+/// box.
+///
+/// The root `<svg>` is the obvious caller and `<pattern>` is the other one: a
+/// pattern with a `viewBox` fits its contents into its tile by exactly this
+/// rule, which is why the arithmetic lives out here rather than inside
+/// `Document`.
+///
+/// `meet` takes the smaller of the two ratios so the whole viewBox fits and
+/// space is left over; `slice` takes the larger so the box is covered and the
+/// viewBox runs off it; `none` takes both and distorts. The alignment says
+/// where any leftover space goes -- and under `slice` the leftover is
+/// negative, which is the same arithmetic saying which part of the viewBox is
+/// kept.
+pub fn viewBoxTransform(
+    vb: ViewBox,
+    par: PreserveAspectRatio,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) z2d.Transformation {
+    const ratio_x = width / vb.width;
+    const ratio_y = height / vb.height;
+    const scale_x, const scale_y = if (par.stretch)
+        .{ ratio_x, ratio_y }
+    else if (par.slice)
+        .{ @max(ratio_x, ratio_y), @max(ratio_x, ratio_y) }
+    else
+        .{ @min(ratio_x, ratio_y), @min(ratio_x, ratio_y) };
+
+    const spare_x = width - vb.width * scale_x;
+    const spare_y = height - vb.height * scale_y;
+    return .{
+        .ax = scale_x,
+        .by = 0,
+        .cx = 0,
+        .dy = scale_y,
+        .tx = x + spare_x * PreserveAspectRatio.fraction(par.align_x) - vb.min_x * scale_x,
+        .ty = y + spare_y * PreserveAspectRatio.fraction(par.align_y) - vb.min_y * scale_y,
+    };
+}
 
 /// Walks a document's drawable elements in painting order.
 ///
@@ -1151,7 +1174,7 @@ fn pick(named: ?f64, fallback: ?f64) ?f64 {
 }
 
 /// `min-x min-y width height`, separated by whitespace or commas.
-fn parseViewBox(raw: []const u8) Error!ViewBox {
+pub fn parseViewBox(raw: []const u8) Error!ViewBox {
     var it = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
     var v: [4]f64 = undefined;
     for (&v) |*slot| {

@@ -111,7 +111,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "usehrfid#defxlink:" ++
     "linearGradstopfetURuns%BoxpM" ++
     "clip-pathruevnodmaskfilter" ++
-    "maskUnitContbjeBoudgxywh-typelumnac";
+    "maskUnitContbjeBoudgxywh-typelumnac" ++
+    "patternUnitsContTransfombjeBox";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -700,12 +701,35 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><g><rect width=\"8\" height=\"8\" fill=\"white\" mask=\"url(#m)\"/></g></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\" clip-path=\"url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" x=\"0\" y=\"0\" width=\"0\" height=\"0\"><rect width=\"8\" height=\"8\" fill=\"white\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    // `<pattern>`, which draws its content once per cell of a lattice and
+    // cuts each to its tile. Every path the renderer has runs inside one.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"0.5\" height=\"0.5\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(30)\"><rect width=\"2\" height=\"2\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" viewBox=\"0 0 2 2\"><rect width=\"1\" height=\"1\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    // Content that leaves its tile, which is the case that needs the clip.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><circle cx=\"3\" cy=\"3\" r=\"3\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    // A pattern on a stroke, which covers the stroked outline instead.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><rect width=\"1\" height=\"1\"/></pattern><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"none\" stroke=\"url(#p)\" stroke-width=\"2\"/></svg>",
+    // A tile with no extent, a pattern with nothing in it, and a reference
+    // that goes round in a circle.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"0\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"/><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"a\" href=\"#b\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"/><pattern id=\"b\" href=\"#a\"><rect width=\"2\" height=\"2\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#a)\"/></svg>",
+    // A pattern whose tile is small enough that the lattice runs past
+    // `Limits.max_pattern_tiles`.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"0.0001\" height=\"0.0001\" patternUnits=\"userSpaceOnUse\"><rect width=\"1\" height=\"1\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    // A pattern that paints itself, and one inside a mask: both are recursion
+    // the walk cannot see, because each level is a finite document on its own.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"4\" height=\"4\" fill=\"url(#p)\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\" fill=\"white\"/></pattern><mask id=\"m\"><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     // Still refused: a filter, and units that are neither of the two.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" mask=\"none\" filter=\"none\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" maskUnits=\"nope\"><rect width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"alpha\"><rect width=\"8\" height=\"8\" fill=\"#ff0000\" fill-opacity=\"0.5\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\" mask-type=\"nope\"><rect width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" patternUnits=\"nope\" width=\"4\" height=\"4\"><rect width=\"2\" height=\"2\"/></pattern><rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
     // A definition written outside `<defs>`, which is not drawn where it
     // stands and used to be refused for standing there.
     "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop offset=\"0\"/></linearGradient><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",

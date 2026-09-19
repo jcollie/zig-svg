@@ -27,6 +27,7 @@ const document = @import("document.zig");
 const gradient = @import("gradient.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
+const pattern = @import("pattern.zig");
 const transform = @import("transform.zig");
 
 /// How much a caller is willing to spend on a picture somebody else wrote.
@@ -82,6 +83,16 @@ pub const Limits = struct {
     ///
     /// Eight is far past any document that means something by its nesting.
     max_layers: usize = 8,
+
+    /// The most tiles to draw for one `<pattern>`.
+    ///
+    /// Each is clipped to its own cell, because §13.3 hides what overflows a
+    /// tile, and a clip is a surface -- so a pattern whose tile is a hundredth
+    /// of a unit across on a shape a thousand units wide is a great many
+    /// surfaces. The tiles are counted before any is drawn and the whole
+    /// pattern is refused if there are too many, rather than a partial lattice
+    /// being painted.
+    max_pattern_tiles: usize = 1 << 14,
 
     /// How deep to follow a mask into another mask.
     ///
@@ -195,10 +206,12 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     TooManyShapes,
     /// A `stroke-dasharray` naming more than `max_dashes` lengths.
     TooManyDashes,
-    /// A `fill` or `stroke` naming something that is not a paint server this
-    /// library implements -- a `<pattern>`, or an element that is not a paint
-    /// server at all.
+    /// A `fill` or `stroke` naming an element that is not a paint server at
+    /// all.
     UnsupportedPaintServer,
+    /// A `<pattern>` whose lattice would need more tiles than
+    /// `Limits.max_pattern_tiles` to cover what it paints.
+    TooManyPatternTiles,
     /// Containers needing a layer of their own, nested more deeply than
     /// `Limits.max_layers`.
     TooManyLayers,
@@ -215,7 +228,7 @@ pub const Error = document.Error || path.BuildError || z2d.painter.FillError || 
     /// `<mask>` whose content is itself masked, or a `<clipPath>` carrying a
     /// `clip-path` of its own, repeated past any sense.
     TooManyMaskHops,
-} || gradient.Error;
+} || gradient.Error || pattern.Error;
 
 /// Where in a surface to draw, in pixels.
 pub const Box = struct {
@@ -406,12 +419,38 @@ fn drawItems(
             if (p.nodes.items.len != 0) {
                 var built: Source = try makeSource(gpa, doc, shape, paint, ctm, opts);
                 defer built.deinit(gpa);
-                if (built.pattern()) |source| {
-                    try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-                        .fill_rule = shape.fill_rule orelse opts.fill_rule,
-                        .anti_aliasing_mode = opts.anti_aliasing_mode,
-                        .tolerance = opts.tolerance,
-                    });
+                const fill_rule = shape.fill_rule orelse opts.fill_rule;
+                switch (built) {
+                    // A `<pattern>` is drawn rather than sampled, so what it
+                    // needs is the region rather than a source: the same fill,
+                    // into an alpha mask, which then cuts the lattice.
+                    .tiled => |t| {
+                        var region = try fillCoverage(gpa, surface, p.nodes.items, .{
+                            .fill_rule = fill_rule,
+                            .anti_aliasing_mode = opts.anti_aliasing_mode,
+                            .tolerance = opts.tolerance,
+                        });
+                        defer region.deinit(gpa);
+                        try paintTiled(
+                            gpa,
+                            doc,
+                            surface,
+                            t,
+                            &region,
+                            pathBox(p.nodes.items),
+                            .{ .shape = shape },
+                            ctm,
+                            pass,
+                            opts,
+                        );
+                    },
+                    else => if (built.pattern()) |source| {
+                        try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
+                            .fill_rule = fill_rule,
+                            .anti_aliasing_mode = opts.anti_aliasing_mode,
+                            .tolerance = opts.tolerance,
+                        });
+                    },
                 }
             }
         }
@@ -451,8 +490,7 @@ fn drawItems(
 
                 var built: Source = try makeSource(gpa, doc, shape, pen.paint, ctm, opts);
                 defer built.deinit(gpa);
-                const source = built.pattern() orelse break :stroking;
-                z2d.painter.stroke(gpa, surface, &source, p.nodes.items, .{
+                const stroke_opts: z2d.painter.StrokeOptions = .{
                     .line_width = pen.width,
                     .line_cap_mode = pen.cap,
                     .line_join_mode = pen.join,
@@ -462,7 +500,30 @@ fn drawItems(
                     .transformation = pen_ctm,
                     .anti_aliasing_mode = opts.anti_aliasing_mode,
                     .tolerance = opts.tolerance,
-                }) catch |err| switch (err) {
+                };
+                // A pattern on a `stroke` covers the stroked outline rather
+                // than the filled one, and that outline is the only thing that
+                // differs from the fill case -- so the mask is stroked and
+                // everything after it is the same.
+                if (built == .tiled) {
+                    var region = try strokeCoverage(gpa, surface, p.nodes.items, stroke_opts);
+                    defer region.deinit(gpa);
+                    try paintTiled(
+                        gpa,
+                        doc,
+                        surface,
+                        built.tiled,
+                        &region,
+                        strokeBox(pathBox(p.nodes.items), pen.width, ctm),
+                        .{ .shape = shape },
+                        ctm,
+                        pass,
+                        opts,
+                    );
+                    break :stroking;
+                }
+                const source = built.pattern() orelse break :stroking;
+                z2d.painter.stroke(gpa, surface, &source, p.nodes.items, stroke_opts) catch |err| switch (err) {
                     // A `transform` that collapses the plane -- `scale(0)` --
                     // has nothing to stroke through. Filling it draws nothing
                     // and stroking it should too, rather than failing.
@@ -549,6 +610,11 @@ fn strokeStyle(shape: document.Shape, width: f64, paint: Paint) Error!Stroke {
 const Source = union(enum) {
     pixel: z2d.Pixel,
     gradient: z2d.Gradient,
+    /// A `<pattern>`, which is not a z2d pattern at all: it is a picture drawn
+    /// once per tile and cut to the shape afterwards, so it carries what is
+    /// needed to do that rather than anything z2d can paint with. `pattern()`
+    /// returns null for it and `paintTiled` is what draws it.
+    tiled: Tiled,
     /// A reference that resolves to nothing paintable -- a gradient with no
     /// stops. resvg draws nothing for one, and so does this.
     nothing,
@@ -566,9 +632,17 @@ const Source = union(enum) {
         return switch (self.*) {
             .pixel => |p| .{ .opaque_pattern = .{ .pixel = p } },
             .gradient => |*g| g.asPattern(),
-            .nothing => null,
+            .tiled, .nothing => null,
         };
     }
+};
+
+/// A `<pattern>` resolved far enough to draw.
+const Tiled = struct {
+    spec: pattern.Pattern,
+    /// `fill-opacity` and `opacity` folded together, applied to the finished
+    /// lattice once rather than to each tile.
+    alpha: f64,
 };
 
 /// The stack of surfaces a document with composited groups is drawn onto.
@@ -1172,6 +1246,312 @@ fn mappedBounds(m: z2d.Transformation, box: Box) Box {
     return .{ .x = min_x, .y = min_y, .width = max_x - min_x, .height = max_y - min_y };
 }
 
+/// Paint a shape with a `<pattern>`.
+///
+/// §13.3. The tile is drawn once per cell of the lattice, each clipped to its
+/// own cell, and the whole lattice is then cut to the shape by the coverage
+/// mask the caller has already painted. Three properties force that shape:
+///
+/// * `overflow` on a `<pattern>` is `hidden`, so content running past a tile's
+///   edge is cut off rather than appearing in the neighbour. A pattern of
+///   overlapping circles is a completely different picture without it, and
+///   resvg honours it -- so every tile needs a clip, and drawing one tile and
+///   stamping it is not enough.
+/// * `patternTransform`, and any rotation on the shape itself, turn the
+///   lattice. Stamping an axis-aligned tile cannot place a rotated one, so the
+///   content is redrawn per cell under the full matrix instead.
+/// * The tile's contents are an arbitrary picture -- groups, gradients, clips,
+///   masks -- so drawing them means the same `drawItems` that draws the
+///   document, which is also what makes a pattern inside a mask work.
+///
+/// Each cell's scratch surfaces are the size of that cell's *device
+/// footprint*, not of the picture, so the total cost is proportional to the
+/// area painted rather than to the area times the number of tiles.
+fn paintTiled(
+    gpa: Allocator,
+    doc: *const document.Document,
+    target: *z2d.Surface,
+    tiled: Tiled,
+    mask: *z2d.Surface,
+    device_box: Box,
+    subject: Subject,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    if (pass.depth >= opts.limits.max_mask_depth) return error.TooManyMaskHops;
+    const spec = tiled.spec;
+    const content = spec.content orelse return;
+
+    var measure: Measure = .{ .subject = subject };
+
+    // The tile is converted into user space *first*, rather than the units
+    // mapping being left in the matrix. `patternUnits` says where the tile is
+    // and `patternContentUnits` says where its contents are, and the two
+    // default to opposite systems -- so leaving a bounding-box scale in the
+    // matrix would put the contents through it as well, and a `<rect
+    // width="4">` inside a tile that is a quarter of a 32-unit shape would
+    // come out 128 units across instead of 4.
+    var tile: Box = .{
+        .x = spec.x,
+        .y = spec.y,
+        .width = spec.width,
+        .height = spec.height,
+    };
+    if (spec.units == .object_bounding_box) {
+        const box = try measure.get(gpa, doc, opts);
+        if (!(box.width > 0) or !(box.height > 0)) return;
+        tile = .{
+            .x = box.x + spec.x * box.width,
+            .y = box.y + spec.y * box.height,
+            .width = spec.width * box.width,
+            .height = spec.height * box.height,
+        };
+    }
+    if (!(tile.width > 0) or !(tile.height > 0)) return;
+
+    // What is left is the shape's own transform with `patternTransform`
+    // inside it, which is the order a gradient's `gradientTransform` takes.
+    const place = ctm.mul(spec.transform);
+    if (!transform.isFinite(place)) return error.NonFiniteTransform;
+
+    // What maps the tile's contents into the tile, with the tile's own corner
+    // as the origin -- confirmed against resvg, which draws a pattern's
+    // content relative to its `x` and `y` rather than to the user origin.
+    // §13.3: a `viewBox` replaces `patternContentUnits` outright, fitting the
+    // contents into the tile by §7.8 exactly as the root `<svg>` is fitted
+    // into its viewport.
+    const tile_content: z2d.Transformation = if (spec.view_box) |vb|
+        document.viewBoxTransform(vb, spec.preserve_aspect_ratio, 0, 0, tile.width, tile.height)
+    else if (spec.content_units == .object_bounding_box) content_box: {
+        const box = try measure.get(gpa, doc, opts);
+        if (!(box.width > 0) or !(box.height > 0)) return;
+        break :content_box .{
+            .ax = box.width,
+            .by = 0,
+            .cx = 0,
+            .dy = box.height,
+            .tx = 0,
+            .ty = 0,
+        };
+    } else .identity;
+
+    // Whether the tile has to be clipped at all.
+    //
+    // §13.3 hides what overflows a tile, but clipping content that was never
+    // going to overflow is not free: the clip's edge and the content's edge
+    // are then the *same* edge, anti-aliased twice, and multiplying one
+    // coverage by the other squares it. A half-covered pixel along the tile
+    // boundary comes out a quarter covered, which is a visibly thin, pale
+    // fringe everywhere the content reaches its tile's edge -- which, for the
+    // usual tile whose content fills it, is every edge in the picture.
+    //
+    // So the contents are measured once, strokes included, and the clip is
+    // only built for a tile they actually leave.
+    const extent = mappedBounds(
+        tile_content,
+        try contentExtent(gpa, doc, content, true, opts),
+    );
+    const needs_clip = extent.x < -0.001 or extent.y < -0.001 or
+        extent.x + extent.width > tile.width + 0.001 or
+        extent.y + extent.height > tile.height + 0.001;
+
+    // Which cells are needed: take the device area actually being painted back
+    // into pattern space, and cover its extent.
+    const inverse = place.inverse() catch return;
+    const painted = intersect(device_box, .{
+        .width = @floatFromInt(target.getWidth()),
+        .height = @floatFromInt(target.getHeight()),
+    }) orelse return;
+    const in_pattern = mappedBounds(inverse, painted);
+
+    const first_i = @floor((in_pattern.x - tile.x) / tile.width);
+    const last_i = @ceil((in_pattern.x + in_pattern.width - tile.x) / tile.width);
+    const first_j = @floor((in_pattern.y - tile.y) / tile.height);
+    const last_j = @ceil((in_pattern.y + in_pattern.height - tile.y) / tile.height);
+    if (!std.math.isFinite(first_i) or !std.math.isFinite(last_i) or
+        !std.math.isFinite(first_j) or !std.math.isFinite(last_j)) return;
+
+    const columns = last_i - first_i;
+    const rows = last_j - first_j;
+    if (!(columns > 0) or !(rows > 0)) return;
+    const budget: f64 = @floatFromInt(opts.limits.max_pattern_tiles);
+    if (columns * rows > budget) return error.TooManyPatternTiles;
+
+    // The whole lattice is assembled here first, so that the shape's coverage
+    // cuts it once rather than each tile being cut twice.
+    var plane = try z2d.Surface.init(
+        .image_surface_rgba,
+        gpa,
+        target.getWidth(),
+        target.getHeight(),
+    );
+    defer plane.deinit(gpa);
+
+    const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
+    const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+
+    var j = first_j;
+    while (j < last_j) : (j += 1) {
+        var i = first_i;
+        while (i < last_i) : (i += 1) {
+            const cell: Box = .{
+                .x = tile.x + i * tile.width,
+                .y = tile.y + j * tile.height,
+                .width = tile.width,
+                .height = tile.height,
+            };
+            const footprint = intersect(mappedBounds(place, cell), painted) orelse continue;
+            const fx: i32 = @intFromFloat(@floor(footprint.x));
+            const fy: i32 = @intFromFloat(@floor(footprint.y));
+            const fw: i32 = @intFromFloat(@ceil(footprint.x + footprint.width) - @floor(footprint.x));
+            const fh: i32 = @intFromFloat(@ceil(footprint.y + footprint.height) - @floor(footprint.y));
+            if (fw <= 0 or fh <= 0) continue;
+
+            // Everything for this cell is drawn as though the footprint's
+            // corner were the origin, so the surfaces are the size of one tile
+            // rather than of the picture.
+            const to_cell: z2d.Transformation = z2d.Transformation.identity
+                .translate(-@as(f64, @floatFromInt(fx)), -@as(f64, @floatFromInt(fy)))
+                .mul(place);
+
+            var ink = try z2d.Surface.init(.image_surface_rgba, gpa, fw, fh);
+            defer ink.deinit(gpa);
+            var cut: ?z2d.Surface = if (needs_clip)
+                try z2d.Surface.init(.image_surface_alpha8, gpa, fw, fh)
+            else
+                null;
+            defer if (cut) |*c| c.deinit(gpa);
+
+            // The cell's own rectangle, which is what `overflow: hidden` cuts
+            // the content to.
+            if (cut) |*cut_surface| {
+                var rect: z2d.Path = .empty;
+                defer rect.deinit(gpa);
+                try document.buildShape(&rect, gpa, .{ .rect = .{
+                    .x = cell.x,
+                    .y = cell.y,
+                    .width = cell.width,
+                    .height = cell.height,
+                } }, to_cell, .{ .max_nodes = pass.nodes_left.* });
+                if (rect.nodes.items.len == 0) continue;
+                // Anti-aliased, and the cells are summed rather than painted
+                // over each other -- see the `plus` below. A hard edge here
+                // would avoid the seam too, but at the cost of cutting the
+                // *content's* own anti-aliasing wherever it reaches the tile
+                // boundary, which for a tile whose content fills it is every
+                // edge in the picture.
+                try z2d.painter.fill(gpa, cut_surface, &white, rect.nodes.items, .{
+                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .tolerance = opts.tolerance,
+                });
+            }
+
+            {
+                var layers: Layers = .{ .bottom = &ink };
+                defer layers.deinit(gpa);
+                var it = doc.subtree(content, to_cell
+                    .translate(cell.x, cell.y)
+                    .mul(tile_content));
+                try drawItems(gpa, &layers, doc, &it, .{
+                    .base = .identity,
+                    .nodes_left = pass.nodes_left,
+                    .depth = pass.depth + 1,
+                }, opts);
+            }
+
+            if (cut) |*c| ink.composite(c, .dst_in, 0, 0, precision);
+            // `plus`, not `src_over`. Neighbouring cells share an edge, and
+            // the anti-aliased clip gives each of them part of the pixels
+            // along it. Painting one over the other leaves about three
+            // quarters coverage where there should be one -- a seam along
+            // every tile boundary. Adding them gives exactly one, because the
+            // cells partition the plane and the two parts are the whole.
+            plane.composite(&ink, .plus, fx, fy, precision);
+        }
+    }
+
+    // `fill-opacity` and `opacity` apply to the finished lattice, not to each
+    // tile: fading them one at a time would show the seams where neighbours
+    // overlap.
+    if (tiled.alpha < 1.0) {
+        const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(tiled.alpha) } };
+        z2d.compositor.SurfaceCompositor.run(&plane, 0, 0, 1, .{
+            .{ .operator = .dst_in, .src = .{ .pixel = faded } },
+        }, precision);
+    }
+    plane.composite(mask, .dst_in, 0, 0, precision);
+    target.composite(&plane, .src_over, 0, 0, precision);
+}
+
+/// The region a fill would cover, as an alpha mask the size of the picture.
+fn fillCoverage(
+    gpa: Allocator,
+    like: *const z2d.Surface,
+    nodes: []const PathNode,
+    fill_opts: z2d.painter.FillOptions,
+) Error!z2d.Surface {
+    var mask = try z2d.Surface.init(
+        .image_surface_alpha8,
+        gpa,
+        like.getWidth(),
+        like.getHeight(),
+    );
+    errdefer mask.deinit(gpa);
+    const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+    try z2d.painter.fill(gpa, &mask, &white, nodes, fill_opts);
+    return mask;
+}
+
+/// The region a stroke would cover, as an alpha mask the size of the picture.
+fn strokeCoverage(
+    gpa: Allocator,
+    like: *const z2d.Surface,
+    nodes: []const PathNode,
+    stroke_opts: z2d.painter.StrokeOptions,
+) Error!z2d.Surface {
+    var mask = try z2d.Surface.init(
+        .image_surface_alpha8,
+        gpa,
+        like.getWidth(),
+        like.getHeight(),
+    );
+    errdefer mask.deinit(gpa);
+    const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+    z2d.painter.stroke(gpa, &mask, &white, nodes, stroke_opts) catch |err| switch (err) {
+        // As in the ordinary stroke: a matrix that collapses the plane has
+        // nothing to stroke through, and covers nothing.
+        error.InvalidMatrix => {},
+        else => |e| return e,
+    };
+    return mask;
+}
+
+/// A stroked path's device extent: the path's own, grown by half the pen.
+///
+/// Generous rather than exact -- a join can reach a miter limit past this, and
+/// it costs a few tiles that turn out to be empty rather than a wrong picture.
+fn strokeBox(box: Box, width: f64, ctm: z2d.Transformation) Box {
+    const scale = @sqrt(@abs(ctm.determinant()));
+    const pad = @abs(width) * 0.5 * (if (std.math.isFinite(scale) and scale > 0) scale else 1.0) + 1.0;
+    return .{
+        .x = box.x - pad,
+        .y = box.y - pad,
+        .width = box.width + 2 * pad,
+        .height = box.height + 2 * pad,
+    };
+}
+
+/// The overlap of two boxes, or null when they do not meet.
+fn intersect(a: Box, b: Box) ?Box {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.width, b.x + b.width);
+    const y1 = @min(a.y + a.height, b.y + b.height);
+    if (!(x1 > x0) or !(y1 > y0)) return null;
+    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+}
+
 /// An opacity as the byte an alpha mask wants.
 fn alphaByte(opacity: f64) u8 {
     return @intFromFloat(@round(std.math.clamp(opacity, 0.0, 1.0) * 255.0));
@@ -1196,6 +1576,17 @@ fn makeSource(
     };
 
     const node = doc.ids.get(ref.id) orelse return error.UnknownReference;
+
+    // A `<pattern>` is a paint server too, and the only one that is not a z2d
+    // pattern: it is drawn rather than sampled. `paintTiled` does that; this
+    // only resolves it.
+    if (try pattern.read(doc.tree, &doc.ids, node, doc.viewport())) |spec| {
+        // §13.3 makes a pattern with no tile, or with nothing in it, paint
+        // nothing at all -- which is what resvg draws, and is not an error.
+        if (!spec.isDrawable()) return .nothing;
+        return .{ .tiled = .{ .spec = spec, .alpha = ref.alpha } };
+    }
+
     const spec = (try gradient.read(
         doc.tree,
         &doc.ids,
@@ -1329,6 +1720,23 @@ fn contentBox(
     node: ztree.NodeId,
     opts: Options,
 ) Error!Box {
+    return contentExtent(gpa, doc, node, false, opts);
+}
+
+/// `contentBox`, optionally grown by what each shape's stroke reaches.
+///
+/// §7.11's bounding box is the fill geometry alone, which is what a gradient
+/// and a clip in `objectBoundingBox` units want. A `<pattern>` asking whether
+/// its contents stay inside their tile wants the opposite: a stroke that
+/// crosses the tile edge has to be cut like anything else, so it has to be
+/// measured like anything else.
+fn contentExtent(
+    gpa: Allocator,
+    doc: *const document.Document,
+    node: ztree.NodeId,
+    with_stroke: bool,
+    opts: Options,
+) Error!Box {
     var min_x: f64 = std.math.inf(f64);
     var min_y: f64 = std.math.inf(f64);
     var max_x: f64 = -std.math.inf(f64);
@@ -1348,7 +1756,22 @@ fn contentBox(
             .max_nodes = opts.limits.max_path_nodes,
         });
         if (p.nodes.items.len == 0) continue;
-        const box = pathBox(p.nodes.items);
+        var box = pathBox(p.nodes.items);
+        if (with_stroke) {
+            if (try resolveStroke(shape, opts)) |pen| {
+                // Half the pen on each side, and the miter limit on top: a
+                // join can reach further than the pen alone, and over-reaching
+                // here only costs a clip that turns out to have been
+                // unnecessary.
+                const reach = @abs(pen.width) * 0.5 * @max(1.0, pen.miter_limit);
+                box = .{
+                    .x = box.x - reach,
+                    .y = box.y - reach,
+                    .width = box.width + 2 * reach,
+                    .height = box.height + 2 * reach,
+                };
+            }
+        }
         min_x = @min(min_x, box.x);
         min_y = @min(min_y, box.y);
         max_x = @max(max_x, box.x + box.width);
@@ -2033,6 +2456,64 @@ test "a filter is refused rather than quietly dropped" {
         .{ .width = 8, .height = 8 },
     );
     defer surface.deinit(gpa);
+}
+
+test "a pattern draws its tile once per cell, and refuses an absurd lattice" {
+    const gpa = testing.allocator;
+    // Four 4-unit tiles over an 8-unit square, each with a 2-unit mark in its
+    // corner: the mark repeats, which is the whole of what a pattern is.
+    var surface = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\"" ++
+            " patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\"" ++
+            " fill=\"black\"/></pattern>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    );
+    defer surface.deinit(gpa);
+    for ([_][2]i32{ .{ 1, 1 }, .{ 5, 1 }, .{ 1, 5 }, .{ 5, 5 } }) |at| {
+        try testing.expectEqual(@as(u8, 255), surface.getPixel(at[0], at[1]).?.rgba.a);
+    }
+    for ([_][2]i32{ .{ 3, 3 }, .{ 7, 3 }, .{ 3, 7 } }) |at| {
+        try testing.expectEqual(@as(u8, 0), surface.getPixel(at[0], at[1]).?.rgba.a);
+    }
+
+    // A tile small enough that the lattice would need more cells than the
+    // budget allows. Refused whole rather than drawn part way.
+    try testing.expectError(error.TooManyPatternTiles, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"0.001\" height=\"0.001\"" ++
+            " patternUnits=\"userSpaceOnUse\"><rect width=\"1\" height=\"1\"/></pattern>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    ));
+
+    // A pattern that paints itself. The walk sees no cycle -- each level is a
+    // finite document drawing a finite tile -- so only the pass depth catches
+    // it, the same bound a mask inside a mask runs into.
+    try testing.expectError(error.TooManyMaskHops, render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\"" ++
+            " patternUnits=\"userSpaceOnUse\"><rect width=\"4\" height=\"4\"" ++
+            " fill=\"url(#p)\"/></pattern>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+        .{ .width = 8, .height = 8 },
+    ));
+
+    // A pattern with no tile, and one with nothing in it, paint nothing --
+    // which is what resvg draws, and is not an error.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"0\" height=\"4\"" ++
+            " patternUnits=\"userSpaceOnUse\"><rect width=\"2\" height=\"2\"/></pattern>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"4\" height=\"4\"" ++
+            " patternUnits=\"userSpaceOnUse\"/>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"url(#p)\"/></svg>",
+    }) |src| {
+        var blank = try render(gpa, src, .{ .width = 8, .height = 8 });
+        defer blank.deinit(gpa);
+        try testing.expectEqual(@as(u8, 0), blank.getPixel(4, 4).?.rgba.a);
+    }
 }
 
 test "a mask turns its content's luminance into coverage" {

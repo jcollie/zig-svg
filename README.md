@@ -66,6 +66,45 @@ they map onto were added to the z2d fork; all six fixtures covering them,
 linear and radial and one with a focal point, match resvg exactly rather than
 merely within tolerance.
 
+`<pattern>` is a picture drawn once per cell of a lattice and then cut to the
+shape. It is not a z2d pattern — z2d paints from a colour, a gradient or a
+dither, and none of those is a picture — so it goes through the layer machinery
+`<mask>` uses instead, and the tile's contents are drawn by the same code that
+draws the document. A gradient inside a tile therefore works, and so does a
+group, a clip, or another pattern.
+
+Three properties of §13.3 decide that shape. `overflow` on a `<pattern>` is
+`hidden`, so content running past a tile's edge is cut rather than appearing in
+the neighbour — which means a tile needs a clip, and drawing one tile and
+stamping it is not enough. `patternTransform`, and any rotation on the shape
+itself, turn the lattice, so an axis-aligned stamp could not place the cells
+anyway. And `patternUnits` and `patternContentUnits` default to *opposite*
+systems: the tile is a fraction of the shape and the things inside it are in
+user units. That last one is the trap — leaving the bounding-box scale in the
+matrix puts the contents through it as well, and a `<rect width="4">` in a tile
+a quarter the width of a 32-unit shape comes out 128 units across.
+
+The clip is built only for a tile the contents actually leave, and that is not
+an optimisation. Clipping content that was never going to overflow makes the
+clip's edge and the content's edge the same edge, anti-aliased twice, and
+multiplying one coverage by the other squares it: a half-covered pixel along
+the tile boundary comes out a quarter covered. For the usual tile whose content
+fills it, that is a pale fringe along every edge in the picture, and it took
+`tests/oracle/pattern-transform-rotate.svg` from 0.553 to 0.224. Where a clip
+*is* needed, the cells are summed rather than painted over one another, because
+two anti-aliased half-covered edges composited together come to three quarters
+where they should come to one.
+
+Drawing each cell rather than stamping one has a consequence worth naming: on a
+densely patterned shape under a rotation, this and resvg genuinely differ.
+resvg rasterises the tile into a pixmap and tiles that pixmap through the
+matrix, so its edges are resampled; these are drawn analytically at each cell,
+so they are *sharper*. The difference is a pixel's worth of alpha along every
+edge, in both directions, and it is large enough on a fine rotated lattice to
+run past the oracle's tolerance. The fixtures are sized so that what they
+compare is placement and clipping rather than resampling, because the latter is
+a difference this is on the right side of.
+
 A document is drawn at the size it says it is — its `width` and `height` if it
 names them, its `viewBox`'s extent if not — unless the caller asks for
 something else. `preserveAspectRatio` then decides how the one is fitted into
@@ -235,14 +274,16 @@ short of the specification.
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |
-| Masks and clips inside one another | to `Limits.max_mask_depth` (4) |
+| Masks, clips and patterns inside one another | to `Limits.max_mask_depth` (4) |
+| Tiles for one `<pattern>` | to `Limits.max_pattern_tiles` (16384) |
 | `em`, `ex` lengths | **no** — refused; they need a font size |
 | `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
 | `filter` | **no** — refused, not ignored |
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
-| `<pattern>`, `style`, text, CSS | **no** |
+| `<pattern>` | yes — `patternUnits`, `patternContentUnits`, `patternTransform`, `viewBox`, `href`, and `overflow` |
+| `style`, text, CSS | **no** |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -512,10 +553,12 @@ a dependency and a filesystem — and the filesystem is exactly what the sandbox
 exists to take away, so this needs the fonts resolved by the *caller* and
 handed in.
 
-**2. `<pattern>`.** A tile rendered to its own surface and then repeated
-across the shape. z2d's `Pattern` is a colour, a gradient or a dither, with no
-variant that samples a surface, so this is upstream work in the fork before it
-is work here.
+**2. `<pattern>` sampled rather than drawn.** What is here draws the tile once
+per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a
+colour, a gradient or a dither, with no variant that samples a surface; adding
+one to the fork would make a pattern a first-class paint source there and turn
+this into an ordinary fill. The picture would be the same, so this is about
+what it costs rather than what it draws.
 
 Deliberately not on the list: scripting, `<foreignObject>`, animation, and
 external document references. Those are the parts of SVG that make it a

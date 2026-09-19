@@ -64,6 +64,7 @@ pub const transform = @import("transform.zig");
 pub const shapes = @import("shapes.zig");
 /// `<linearGradient>` and `<radialGradient>`.
 pub const gradient = @import("gradient.zig");
+pub const pattern = @import("pattern.zig");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
@@ -114,6 +115,7 @@ test {
     _ = transform;
     _ = shapes;
     _ = gradient;
+    _ = pattern;
     _ = length;
     _ = path;
     _ = arc;

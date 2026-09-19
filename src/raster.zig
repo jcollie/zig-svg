@@ -1733,6 +1733,14 @@ fn buildText(
         }
     }
 
+    // The attributes that place glyphs one at a time. Without them the whole
+    // run goes down in one call, which is both faster and exactly what z2d
+    // does internally anyway.
+    if (run.rotate != null or run.text_length != null) {
+        try buildGlyphs(gpa, p, &font, collapsed, run, size, pen, ctm);
+        return;
+    }
+
     var glyphs = z2d.text.outline(
         gpa,
         &font,
@@ -1757,6 +1765,119 @@ fn buildText(
         return error.BadFont;
 
     try p.nodes.appendSlice(gpa, glyphs.nodes.items);
+}
+
+/// Build a run one glyph at a time, for `rotate` and `textLength`.
+///
+/// Both need each glyph placed on its own: `rotate` turns each about its own
+/// origin, and `textLength` changes the gaps between them without touching
+/// their shapes -- which is §10.4's `lengthAdjust="spacing"`, the initial
+/// value, and what resvg draws.
+///
+/// The whole difficulty is the step from one glyph's origin to the next,
+/// because it is the glyph's advance *plus the kerning pair* with what follows
+/// and z2d exposes neither on its own. Measuring a two-character string and
+/// taking away the second character's own width leaves exactly that step, so
+/// the kerning survives being placed by hand -- which is the thing that would
+/// otherwise go quietly wrong, since text without kerning looks like text.
+fn buildGlyphs(
+    gpa: Allocator,
+    p: *z2d.Path,
+    font: *z2d.Font,
+    utf8: []const u8,
+    run: shapes.Text,
+    size: f64,
+    pen: *Pen,
+    ctm: z2d.Transformation,
+) Error!void {
+    const opts: z2d.text.ShowTextOptions = .{ .size = size };
+
+    // Where each character begins and ends, so that a glyph can be cut out of
+    // the run and measured or drawn on its own.
+    var bounds: std.ArrayListUnmanaged(usize) = .empty;
+    defer bounds.deinit(gpa);
+    {
+        var i: usize = 0;
+        while (i < utf8.len) {
+            try bounds.append(gpa, i);
+            i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
+        }
+        try bounds.append(gpa, utf8.len);
+    }
+    const count = bounds.items.len - 1;
+    if (count == 0) return;
+
+    // The step from each glyph's origin to the next, kerning included.
+    var steps: std.ArrayListUnmanaged(f64) = .empty;
+    defer steps.deinit(gpa);
+    var natural: f64 = 0;
+    for (0..count) |i| {
+        const here = utf8[bounds.items[i]..bounds.items[i + 1]];
+        const step = if (i + 1 < count) pair: {
+            const both = utf8[bounds.items[i]..bounds.items[i + 2]];
+            const next = utf8[bounds.items[i + 1]..bounds.items[i + 2]];
+            const whole = z2d.text.measure(gpa, font, both, opts) catch return error.BadFont;
+            const tail = z2d.text.measure(gpa, font, next, opts) catch return error.BadFont;
+            break :pair whole - tail;
+        } else z2d.text.measure(gpa, font, here, opts) catch return error.BadFont;
+        try steps.append(gpa, step);
+        natural += step;
+    }
+
+    // §10.4: `textLength` is the width the run is adjusted to. With one glyph
+    // there is no gap to put the difference in, so there is nothing to adjust.
+    var extra: f64 = 0;
+    if (run.text_length) |want| {
+        if (count > 1) extra = (want - natural) / @as(f64, @floatFromInt(count - 1));
+    }
+
+    const baseline = font.baselineOffset(size);
+    var x = pen.x;
+    for (0..count) |i| {
+        const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
+        // Each glyph is turned about its own origin, which is where it sits on
+        // the baseline rather than the corner of its ink.
+        var placement = ctm.translate(x, pen.y);
+        if (try rotationAt(run.rotate, i)) |degrees| {
+            placement = placement.rotate(degrees * std.math.pi / 180.0);
+        }
+        var one = z2d.text.outline(
+            gpa,
+            font,
+            glyph,
+            0,
+            -baseline,
+            .{ .size = size, .transformation = placement },
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.BadFont,
+        };
+        defer one.deinit(gpa);
+        try p.nodes.appendSlice(gpa, one.nodes.items);
+
+        x += steps.items[i];
+        if (i + 1 < count) x += extra;
+    }
+    pen.x = x;
+}
+
+/// The angle for the glyph at `index` in a `rotate` list, in degrees.
+///
+/// §10.4: the list is one angle per character and the **last** one repeats for
+/// whatever is left, which is what makes `rotate="45"` turn every glyph rather
+/// than only the first.
+fn rotationAt(list: ?[]const u8, index: usize) Error!?f64 {
+    const raw = list orelse return null;
+    var it = std.mem.tokenizeAny(u8, raw, " ,\t\r\n");
+    var seen: usize = 0;
+    var last: ?f64 = null;
+    while (it.next()) |tok| {
+        const v = std.fmt.parseFloat(f64, tok) catch return error.BadLength;
+        last = v;
+        if (seen == index) return v;
+        seen += 1;
+    }
+    return last;
 }
 
 /// The face a shape's text is drawn in.
@@ -1812,7 +1933,10 @@ fn chunkWidth(
         defer gpa.free(collapsed);
         total += run.dx;
         if (collapsed.len == 0) continue;
-        total += z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
+        // `textLength` says what the run comes to, so that *is* its width --
+        // which is the point of the attribute.
+        total += run.text_length orelse
+            z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
             return error.BadFont;
     }
     return total;
@@ -3557,4 +3681,24 @@ test "whitespace in a text run is collapsed" {
         defer gpa.free(got);
         try testing.expectEqualStrings(case.want, got);
     }
+}
+
+test "a rotate list gives its last angle to every glyph after it" {
+    // §10.4: one angle per character, and the last repeats for whatever is
+    // left -- which is what makes `rotate="45"` turn every glyph rather than
+    // only the first.
+    try testing.expectEqual(@as(?f64, null), try rotationAt(null, 0));
+    for (0..4) |i| {
+        try testing.expectEqual(@as(?f64, 45), try rotationAt("45", i));
+    }
+    try testing.expectEqual(@as(?f64, 0), try rotationAt("0 30 -30", 0));
+    try testing.expectEqual(@as(?f64, 30), try rotationAt("0 30 -30", 1));
+    try testing.expectEqual(@as(?f64, -30), try rotationAt("0 30 -30", 2));
+    try testing.expectEqual(@as(?f64, -30), try rotationAt("0 30 -30", 9));
+    // Commas and runs of space separate as well as single spaces do.
+    try testing.expectEqual(@as(?f64, 30), try rotationAt(" 0 , 30 ,-30 ", 1));
+    // An empty list has no angle to give.
+    try testing.expectEqual(@as(?f64, null), try rotationAt("   ", 0));
+    // And something that is not a number is refused rather than skipped.
+    try testing.expectError(error.BadLength, rotationAt("0 wobbly", 1));
 }

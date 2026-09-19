@@ -138,6 +138,20 @@ pub const Text = struct {
     /// True for the first run of its `<text>`, which is what tells the
     /// renderer to start a fresh pen rather than carry one on.
     starts_element: bool,
+
+    /// §10.4's `rotate`, as the document wrote it: a list of angles in
+    /// degrees, one per character, the last repeating for whatever is left.
+    /// Kept as text for the same reason `stroke-dasharray` is -- it is a list,
+    /// and splitting it here would mean allocating.
+    rotate: ?[]const u8,
+
+    /// §10.4's `textLength`: the width the run is to be adjusted to fit.
+    ///
+    /// Only `lengthAdjust="spacing"` is implemented, which is the initial
+    /// value: the gaps between glyphs change and the glyphs do not. resvg
+    /// draws it that way too, which a fixture pins by showing the same letters
+    /// at different spacings.
+    text_length: ?f64,
 };
 
 /// Append `geometry` to `p`, honouring `p.transformation`.

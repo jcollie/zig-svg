@@ -754,11 +754,21 @@ pub const PathIterator = struct {
     /// anchor -- is what the element came to, which the frame already holds.
     fn runFrom(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
-        // Attributes that move glyphs about, and that this does not implement.
-        // Ignoring one draws text in the wrong place, which is the failure
-        // nobody notices.
-        for ([_][]const u8{ "rotate", "textLength", "lengthAdjust" }) |name| {
-            if (self.attr(parent.node, name) != null) return error.UnsupportedTextLayout;
+        // `lengthAdjust="spacingAndGlyphs"` stretches the glyphs themselves
+        // rather than the gaps between them, which is a different drawing and
+        // not one this does. The initial value is `spacing`, which is.
+        if (self.attr(parent.node, "lengthAdjust")) |raw| {
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            if (!std.mem.eql(u8, t, "spacing")) return error.UnsupportedTextLayout;
+        }
+        const rotate = self.attr(parent.node, "rotate");
+        const text_length = try self.optionalLengthOf(parent.node, "textLength", .x);
+        // Both index into the characters of the element as a whole, so a
+        // `<tspan>` inside one that carries them would have to be counted
+        // into the same sequence. Refused rather than applied per run, which
+        // would put the angles on the wrong letters.
+        if ((rotate != null or text_length != null) and hasElementChild(tree, parent.node)) {
+            return error.UnsupportedTextLayout;
         }
         const raw = tree.node(child).value;
         if (allWhitespace(raw)) return null;
@@ -780,6 +790,8 @@ pub const PathIterator = struct {
                     .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
                     .owner = owner,
                     .starts_element = owner == parent.node and first,
+                    .rotate = rotate,
+                    .text_length = text_length,
                 } },
                 .fill = parent.inherited.fill,
                 .fill_opacity = parent.inherited.fill_opacity,
@@ -1193,6 +1205,14 @@ fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
 /// single space, and SVG's own rule agrees that leading and trailing
 /// whitespace in a text element goes -- so a run that is nothing else is not a
 /// run at all.
+/// Whether an element has any element children -- a `<tspan>`, for a `<text>`.
+fn hasElementChild(tree: *const ztree.Document, node: ztree.NodeId) bool {
+    for (tree.node(node).children.items) |child| {
+        if (tree.node(child).kind == .element) return true;
+    }
+    return false;
+}
+
 fn allWhitespace(raw: []const u8) bool {
     for (raw) |c| switch (c) {
         ' ', '\t', '\r', '\n' => {},
@@ -2103,15 +2123,47 @@ test "whitespace between markup is not a run" {
     try testing.expectEqual(@as(?Item, null), try it.next());
 }
 
-test "a text attribute that moves glyphs about is refused" {
+test "textPath is refused rather than drawn as a straight line" {
+    // It runs the glyphs along a curve, which is a different placement
+    // altogether; drawing the characters in a row would be a picture that
+    // looks finished and is not.
+    try testing.expectError(error.UnsupportedElement, read(
+        testing.allocator,
+        "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\">" ++
+            "<textPath href=\"#p\">along</textPath></text></svg>",
+    ));
+}
+test "rotate and textLength are read, and refused where they would mislead" {
     const gpa = testing.allocator;
-    for ([_][]const u8{ "rotate=\"30\"", "textLength=\"40\"", "lengthAdjust=\"spacing\"" }) |attr| {
+    {
+        var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" font-size=\"10\"" ++
+            " rotate=\"0 30\" textLength=\"40\">ab</text></svg>");
+        defer doc.deinit();
+        var it = doc.paths();
+        const run = (try it.next()).?.shape.geometry.text;
+        try testing.expectEqualStrings("0 30", run.rotate.?);
+        try testing.expectEqual(@as(?f64, 40), run.text_length);
+    }
+
+    // Both index into the characters of the element as a whole, so a `<tspan>`
+    // inside one would have to be counted into the same sequence. Refused
+    // rather than applied per run, which would put the angles on the wrong
+    // letters.
+    for ([_][]const u8{ "rotate=\"30\"", "textLength=\"40\"" }) |attr| {
         const src = try std.fmt.allocPrint(
             gpa,
-            "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>hi</text></svg>",
+            "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>a<tspan>b</tspan></text></svg>",
             .{attr},
         );
         defer gpa.free(src);
         try testing.expectError(error.UnsupportedTextLayout, read(gpa, src));
     }
+
+    // `spacingAndGlyphs` stretches the glyphs themselves, which is a different
+    // drawing; `spacing` is the initial value and is the one implemented.
+    try testing.expectError(error.UnsupportedTextLayout, read(
+        gpa,
+        "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" textLength=\"40\"" ++
+            " lengthAdjust=\"spacingAndGlyphs\">ab</text></svg>",
+    ));
 }

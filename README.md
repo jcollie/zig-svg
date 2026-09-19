@@ -576,8 +576,8 @@ every subpath is closed, and a document the reader accepted can be drawn.
 
 Zig 0.16.0 leaves the fuzzer's coverage table empty however the modules are
 built, so `tools/fuzz.zig` is a loop of our own: it mutates the corpus, hands
-the result to a target, and reports what comes back. It has found two things so far, each within
-seconds of being pointed at new code.
+the result to a target, and reports what comes back. It has found three things
+so far, each within minutes of being pointed at new code.
 
 An infinite loop in the path parser: a bare number after `Z`, which has no
 argument sequence to repeat, so the implicit-command rule ran a command that
@@ -601,6 +601,16 @@ that does it. The real fix is for the rasterizer to *clip* rather than clamp,
 which keeps the geometry it cannot represent instead of folding it back into
 range; until then the check belongs here, where refusing is available and
 drawing the wrong picture is not.
+
+And an integer overflow — a panic again — reached through a `<pattern>`. A
+pattern draws its content once per cell of its lattice and every cell spends
+from the same `max_path_nodes` budget, so a fine enough tile drains it to
+nearly nothing. Several builders then produce a fixed number of nodes whatever
+the budget says, because there is no sensible half-drawn rectangle, and
+subtracting five from a `usize` holding two is a crash rather than an error.
+Overshooting the budget *is* the budget running out, so that is what
+`spendNodes` reports now. The input was
+`<pattern width="07.0001" …>`, which no test would have thought to write.
 
 ```console
 $ zig build fuzz-run -- --seconds 300

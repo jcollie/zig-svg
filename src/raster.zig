@@ -397,6 +397,27 @@ fn drawDocument(
     }, opts);
 }
 
+/// Spend `used` nodes from the document's budget, or refuse when it has run
+/// out.
+///
+/// Not a plain subtraction, and the difference is a panic. Several of the
+/// builders produce a fixed number of nodes whatever `max_nodes` says -- a
+/// `<rect>` is five and an `<ellipse>` rather more, because there is no
+/// sensible half-drawn rectangle -- and text produces however many its glyphs
+/// need. So the budget can be overshot, and subtracting past zero in a `usize`
+/// is an integer overflow, which is a crash rather than an error.
+///
+/// Overshooting *is* the budget running out, so that is what it reports.
+///
+/// The fuzzer found this through a `<pattern>`, which is where it became easy
+/// to reach: a pattern draws its content once per cell of the lattice and they
+/// all spend from the one budget, so a document with a fine enough pattern
+/// drains it to nearly nothing and then the next rectangle asks for five.
+fn spendNodes(pass: Pass, used: usize) Error!void {
+    if (used > pass.nodes_left.*) return error.PathTooComplex;
+    pass.nodes_left.* -= used;
+}
+
 /// Everything a run of `drawItems` shares with the one that called it.
 const Pass = struct {
     /// The matrix outside every shape's own: the viewBox-to-pixels mapping for
@@ -497,7 +518,7 @@ fn drawItems(
             try buildGeometry(gpa, &p, shape, ctm, .{
                 .max_nodes = pass.nodes_left.*,
             }, doc, &pen, opts);
-            pass.nodes_left.* -= p.nodes.items.len;
+            try spendNodes(pass, p.nodes.items.len);
 
             // A shape with no geometry draws nothing, which is not an error;
             // `painter.fill` would take it too, but this says so on purpose.
@@ -564,7 +585,7 @@ fn drawItems(
                 // capped at their ends.
                 .close_subpaths = false,
             }, doc, &stroke_pen, opts);
-            pass.nodes_left.* -= p.nodes.items.len;
+            try spendNodes(pass, p.nodes.items.len);
 
             if (p.nodes.items.len != 0) {
                 // Where the matrix is a similarity, the pen is scaled here and
@@ -1030,7 +1051,7 @@ fn buildClip(
         try buildGeometry(gpa, &p, shape, shape.transform, .{
             .max_nodes = pass.nodes_left.*,
         }, doc, &clip_pen, opts);
-        pass.nodes_left.* -= p.nodes.items.len;
+        try spendNodes(pass, p.nodes.items.len);
         if (p.nodes.items.len == 0) continue;
 
         try z2d.painter.fill(gpa, &mask, &white, p.nodes.items, .{
@@ -3701,4 +3722,44 @@ test "a rotate list gives its last angle to every glyph after it" {
     try testing.expectEqual(@as(?f64, null), try rotationAt("   ", 0));
     // And something that is not a number is refused rather than skipped.
     try testing.expectError(error.BadLength, rotationAt("0 wobbly", 1));
+}
+
+test "a node budget too small to draw with is refused, not overflowed" {
+    const gpa = testing.allocator;
+
+    // Found by the fuzzer, through a `<pattern>`. Several builders produce a
+    // fixed number of nodes whatever the budget says -- there is no sensible
+    // half-drawn rectangle -- so the budget can be overshot, and subtracting
+    // past zero in a `usize` is an integer overflow rather than an error.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><circle cx=\"4\" cy=\"4\" r=\"3\"/></svg>",
+        "<svg viewBox=\"0 0 8 8\"><ellipse cx=\"4\" cy=\"4\" rx=\"3\" ry=\"2\"/></svg>",
+    }) |src| {
+        try testing.expectError(error.PathTooComplex, render(gpa, src, .{
+            .width = 8,
+            .height = 8,
+            .limits = .{ .max_path_nodes = 2 },
+        }));
+    }
+
+    // And the way the fuzzer reached it: a pattern spends one budget across
+    // every cell of its lattice, so a fine enough one drains it to nearly
+    // nothing and the next rectangle asks for five.
+    try testing.expectError(error.PathTooComplex, render(
+        gpa,
+        "<svg viewBox=\"0 0 32 32\"><pattern id=\"p\" width=\"2\" height=\"2\"" ++
+            " patternUnits=\"userSpaceOnUse\"><rect width=\"1\" height=\"1\"/></pattern>" ++
+            "<rect width=\"32\" height=\"32\" fill=\"url(#p)\"/></svg>",
+        .{ .width = 32, .height = 32, .limits = .{ .max_path_nodes = 40 } },
+    ));
+
+    // A budget that is enough still draws.
+    var fine = try render(
+        gpa,
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"black\"/></svg>",
+        .{ .width = 8, .height = 8, .limits = .{ .max_path_nodes = 64 } },
+    );
+    defer fine.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), fine.getPixel(4, 4).?.rgba.a);
 }

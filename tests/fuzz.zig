@@ -747,10 +747,20 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">\n  <tspan>a</tspan>\n  <tspan>b</tspan>\n</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><tspan><tspan>deep</tspan></tspan></text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><tspan/></text></svg>",
-    // Attributes that move glyphs about, which are refused rather than
-    // ignored.
+    // `rotate` and `textLength`, which place glyphs one at a time.
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"30\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"0 30 -30\">abcd</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"0 wobbly\">ab</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"4\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"0\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"4\">a</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"4\" y=\"6\" text-anchor=\"end\" textLength=\"4\">ab</text></svg>",
+    // Still refused: the ones that would need the pen to leave a straight
+    // line, or would put the angles on the wrong letters.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"30\">a<tspan>b</tspan></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"4\" lengthAdjust=\"spacingAndGlyphs\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><textPath href=\"#p\">a</textPath></text></svg>",
     // Text as a clip path, and text inside a pattern: both reach the builder
     // by a route that is not the ordinary fill.
     "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><text x=\"1\" y=\"6\" font-size=\"6\">c</text></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",

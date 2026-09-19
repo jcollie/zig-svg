@@ -104,6 +104,23 @@ pub const Geometry = union(enum) {
     text: Text,
 };
 
+/// Where along a `<textPath>`'s shape a run begins.
+pub const OnPath = struct {
+    /// The element whose geometry the glyphs follow.
+    node: ztree.NodeId,
+    /// §10.13's `startOffset`. A percentage is of the path's own length,
+    /// which is not known until it has been measured, so which kind it is has
+    /// to survive as far as the renderer.
+    offset: Offset,
+
+    pub const Offset = union(enum) {
+        /// User units along the path.
+        absolute: f64,
+        /// A fraction of the path's length.
+        fraction: f64,
+    };
+};
+
 /// One run of text, as the document wrote it.
 ///
 /// A `<text>` is not one run but a sequence of them: every `<tspan>` inside it
@@ -144,6 +161,14 @@ pub const Text = struct {
     /// Kept as text for the same reason `stroke-dasharray` is -- it is a list,
     /// and splitting it here would mean allocating.
     rotate: ?[]const u8,
+
+    /// The path this run is laid along, when it sits inside a `<textPath>`.
+    ///
+    /// §10.13: the glyphs follow the shape rather than a straight line, each
+    /// turned to the tangent where it sits. The renderer needs the referenced
+    /// element to measure the curve, which the reader cannot do -- measuring
+    /// means flattening it, and that is drawing work.
+    on_path: ?OnPath,
 
     /// §10.4's `textLength`: the width the run is to be adjusted to fit.
     ///

@@ -95,6 +95,23 @@ fills it, that is a pale fringe along every edge in the picture, and it took
 two anti-aliased half-covered edges composited together come to three quarters
 where they should come to one.
 
+`<textPath>` lays a run along a shape, each glyph turned to the tangent where
+it sits and placed so that the **middle of its advance** is on the curve —
+the middle rather than the start, because a glyph turned about its own left
+edge leans away from the line it is meant to sit on. Distances along a Bézier
+have no closed form, so the shape is flattened and the pieces added up.
+
+**The oracle cannot judge it**, which is worth saying rather than leaving as a
+gap in the corpus. On a straight path a `<textPath>` must draw exactly what the
+same text drawn plainly does, and this renderer's two outputs are
+*pixel-identical*; resvg's differ from each other by a mean of 1.247, which is
+more than this project's whole tolerance. So a textPath fixture would be
+measuring resvg's per-glyph placement against its own plain text more than it
+would be measuring this. What covers it instead is that equivalence, and unit
+tests over the arc-length machinery — the length of a flattened quarter circle,
+the point and tangent at a distance, a distance off either end being a glyph
+that is not drawn.
+
 Drawing each cell rather than stamping one has a consequence worth naming: on a
 densely patterned shape under a rotation, this and resvg genuinely differ.
 resvg rasterises the tile into a pixmap and tiles that pixmap through the
@@ -346,7 +363,8 @@ short of the specification.
 | `x`, `y`, `dx`, `dy` on a run | yes — `x`/`y` start a chunk, `dx`/`dy` shift the pen |
 | `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
 | `text-anchor` | yes — `start`, `middle`, `end` |
-| `rotate`, `textLength`, `textPath` | **no** — refused, not ignored |
+| `rotate`, `textLength` | yes — `lengthAdjust="spacing"`, which is the initial value |
+| `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style`, CSS | **no** |
 
@@ -640,13 +658,7 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 Roughly in the order they are worth having, and each should arrive with a
 fixture in `tests/oracle` that resvg already renders.
 
-**1. `rotate`, `textLength` and `textPath`.** The three text attributes that
-move glyphs about, all refused rather than ignored. `rotate` turns each glyph
-on its own, `textLength` stretches a run to a given width, and `textPath` runs
-it along a curve — each needing the pen to do something other than advance in a
-straight line.
-
-**2. `<pattern>` sampled rather than drawn.** What is here draws the tile once
+**1. `<pattern>` sampled rather than drawn.** What is here draws the tile once
 per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a
 colour, a gradient or a dither, with no variant that samples a surface; adding
 one to the fork would make a pattern a first-class paint source there and turn

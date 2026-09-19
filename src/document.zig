@@ -563,6 +563,22 @@ pub const Document = struct {
         return it;
     }
 
+    /// One element's own geometry, or null when it has none.
+    ///
+    /// `subtree` walks a node's *children*, which is what a `<clipPath>` or a
+    /// `<pattern>` wants and is exactly wrong for asking a `<path>` what it
+    /// draws -- a `<path>` has no children, so rooting a walk there yields
+    /// nothing at all. `<textPath>` needs the shape it names rather than
+    /// whatever is inside it.
+    ///
+    /// The element's own `transform` is *not* applied: the caller is laying
+    /// text along the shape in the referencing element's user space, and
+    /// `transformOf` is there for a caller that wants it.
+    pub fn geometryOf(self: *const Document, node: ztree.NodeId) Error!?shapes.Geometry {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        return it.readGeometry(node);
+    }
+
     /// An element's own `transform`, or the identity when it has none.
     ///
     /// `subtree` deliberately leaves the root's attributes alone, because the
@@ -761,6 +777,10 @@ pub const PathIterator = struct {
             const t = std.mem.trim(u8, raw, " \t\r\n");
             if (!std.mem.eql(u8, t, "spacing")) return error.UnsupportedTextLayout;
         }
+        // §10.13: a `<textPath>` lays its run along the shape it names, each
+        // glyph turned to the tangent where it sits.
+        const on_path = try self.onPathOf(parent.node);
+
         const rotate = self.attr(parent.node, "rotate");
         const text_length = try self.optionalLengthOf(parent.node, "textLength", .x);
         // Both index into the characters of the element as a whole, so a
@@ -792,6 +812,7 @@ pub const PathIterator = struct {
                     .starts_element = owner == parent.node and first,
                     .rotate = rotate,
                     .text_length = text_length,
+                    .on_path = on_path,
                 } },
                 .fill = parent.inherited.fill,
                 .fill_opacity = parent.inherited.fill_opacity,
@@ -819,6 +840,48 @@ pub const PathIterator = struct {
                 .transform = parent.transform,
             },
         };
+    }
+
+    /// The shape a run follows, when it is inside a `<textPath>`.
+    ///
+    /// Looked up on the stack rather than on the element, because the run may
+    /// be inside a `<tspan>` inside the `<textPath>` -- the path belongs to
+    /// the nearest such ancestor, the way the `<text>` owns the chunk.
+    fn onPathOf(self: *const PathIterator, node: ztree.NodeId) Error!?shapes.OnPath {
+        const tree = self.doc.tree;
+        var found: ?ztree.NodeId = null;
+        var i = self.depth + 1;
+        while (i > 0) {
+            i -= 1;
+            if (localIs(tree, self.stack[i].node, "textPath")) {
+                found = self.stack[i].node;
+                break;
+            }
+        }
+        if (found == null and localIs(tree, node, "textPath")) found = node;
+        const element = found orelse return null;
+
+        const raw = tree.attributeValue(element, "", "href") orelse
+            tree.attributeValue(element, xlink_ns, "href") orelse
+            return error.BadReference;
+        const target = std.mem.trim(u8, raw, " \t\r\n");
+        if (target.len < 2 or target[0] != '#') return error.BadReference;
+        const shape = self.doc.ids.get(target[1..]) orelse return error.UnknownReference;
+
+        // A percentage is of the path's own length, which nothing here has
+        // measured, so which kind it is has to survive as far as the renderer.
+        var offset: shapes.OnPath.Offset = .{ .absolute = 0 };
+        if (tree.attributeValue(element, "", "startOffset")) |text| {
+            const t = std.mem.trim(u8, text, " \t\r\n");
+            if (std.mem.endsWith(u8, t, "%")) {
+                const v = std.fmt.parseFloat(f64, t[0 .. t.len - 1]) catch
+                    return error.BadLength;
+                offset = .{ .fraction = v / 100.0 };
+            } else {
+                offset = .{ .absolute = try length.parse(t, .other, self.viewport) };
+            }
+        }
+        return .{ .node = shape, .offset = offset };
     }
 
     /// The `<text>` a run belongs to: the nearest such ancestor on the stack,
@@ -1191,7 +1254,8 @@ fn isContainer(name: []const u8) bool {
 /// order is the whole of text layout: the runs share a pen, and which one
 /// comes first decides where the next begins.
 fn isTextishName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "text") or std.mem.eql(u8, name, "tspan");
+    return std.mem.eql(u8, name, "text") or std.mem.eql(u8, name, "tspan") or
+        std.mem.eql(u8, name, "textPath");
 }
 
 fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
@@ -2123,14 +2187,42 @@ test "whitespace between markup is not a run" {
     try testing.expectEqual(@as(?Item, null), try it.next());
 }
 
-test "textPath is refused rather than drawn as a straight line" {
-    // It runs the glyphs along a curve, which is a different placement
-    // altogether; drawing the characters in a row would be a picture that
-    // looks finished and is not.
-    try testing.expectError(error.UnsupportedElement, read(
-        testing.allocator,
-        "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\">" ++
-            "<textPath href=\"#p\">along</textPath></text></svg>",
+test "a textPath carries the shape it follows and where to start" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 96 48\"><defs><path id=\"c\" d=\"M6 40 Q48 4 90 40\"/></defs>" ++
+        "<text font-size=\"12\"><textPath href=\"#c\" startOffset=\"30\">go</textPath></text></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    const run = (try it.next()).?.shape.geometry.text;
+    try testing.expectEqual(doc.ids.get("c").?, run.on_path.?.node);
+    try testing.expectEqual(@as(f64, 30), run.on_path.?.offset.absolute);
+}
+
+test "a startOffset in percent stays a fraction until the path is measured" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 96 48\"><defs><path id=\"c\" d=\"M6 40 Q48 4 90 40\"/></defs>" ++
+        "<text font-size=\"12\"><textPath href=\"#c\" startOffset=\"25%\">go</textPath></text></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    const run = (try it.next()).?.shape.geometry.text;
+    // A quarter of the path's own length, which the reader has no way to
+    // know -- measuring a curve means flattening it, and that is drawing.
+    try testing.expectApproxEqAbs(@as(f64, 0.25), run.on_path.?.offset.fraction, 1e-9);
+}
+
+test "a textPath naming nothing is refused" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.UnknownReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 96 48\"><text font-size=\"12\">" ++
+            "<textPath href=\"#missing\">go</textPath></text></svg>",
+    ));
+    try testing.expectError(error.BadReference, read(
+        gpa,
+        "<svg viewBox=\"0 0 96 48\"><text font-size=\"12\">" ++
+            "<textPath>go</textPath></text></svg>",
     ));
 }
 test "rotate and textLength are read, and refused where they would mislead" {

@@ -114,7 +114,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "maskUnitContbjeBoudgxywh-typelumnac" ++
     "patternUnitsContTransfombjeBox" ++
     "textfon-amilysizewghtylanchormddlbup" ++
-    "emx0.5";
+    "emx0.5" ++
+    "textPathstOf%";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -760,7 +761,18 @@ const document_corpus = [_][]const u8{
     // line, or would put the angles on the wrong letters.
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"30\">a<tspan>b</tspan></text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"4\" lengthAdjust=\"spacingAndGlyphs\">ab</text></svg>",
+    // `<textPath>`, which lays a run along a shape.
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 Q4 1 7 6\"/><text font-size=\"3\"><textPath href=\"#c\">ab</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 L7 6\"/><text font-size=\"3\"><textPath href=\"#c\" startOffset=\"2\">ab</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 L7 6\"/><text font-size=\"3\"><textPath href=\"#c\" startOffset=\"50%\">ab</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 L7 6\"/><text font-size=\"3\"><textPath href=\"#c\">far too long to fit on it</textPath></text></svg>",
+    // A path with no length, a second subpath, and a reference to something
+    // with no geometry at all.
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 L1 6\"/><text font-size=\"3\"><textPath href=\"#c\">ab</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path id=\"c\" d=\"M1 6 L7 6 M1 1 L7 1\"/><text font-size=\"3\"><textPath href=\"#c\">ab</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g id=\"c\"/><text font-size=\"3\"><textPath href=\"#c\">ab</textPath></text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><textPath href=\"#p\">a</textPath></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><textPath>a</textPath></text></svg>",
     // Text as a clip path, and text inside a pattern: both reach the builder
     // by a route that is not the ordinary fill.
     "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><text x=\"1\" y=\"6\" font-size=\"6\">c</text></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",

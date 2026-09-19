@@ -289,6 +289,8 @@ pub const Error = document.Error || document.BuildError || path.BuildError || z2
     NoFontSupplied,
     /// Bytes a resolver returned that are not a font this can read.
     BadFont,
+    /// A `<textPath>` naming something with no geometry to follow.
+    BadTextPath,
     /// Containers needing a layer of their own, nested more deeply than
     /// `Limits.max_layers`.
     TooManyLayers,
@@ -1755,6 +1757,13 @@ fn buildText(
         }
     }
 
+    // §10.13: a run inside a `<textPath>` follows a shape rather than a
+    // line, which is a different placement for every glyph.
+    if (run.on_path) |on_path| {
+        try buildOnPath(gpa, p, &font, collapsed, on_path, size, pen, ctm, doc, build_opts, opts);
+        return;
+    }
+
     // The attributes that place glyphs one at a time. Without them the whole
     // run goes down in one call, which is both faster and exactly what z2d
     // does internally anyway.
@@ -1836,14 +1845,7 @@ fn buildGlyphs(
     // the run and measured or drawn on its own.
     var bounds: std.ArrayListUnmanaged(usize) = .empty;
     defer bounds.deinit(gpa);
-    {
-        var i: usize = 0;
-        while (i < utf8.len) {
-            try bounds.append(gpa, i);
-            i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
-        }
-        try bounds.append(gpa, utf8.len);
-    }
+    try splitCodepoints(gpa, utf8, &bounds);
     const count = bounds.items.len - 1;
     if (count == 0) return;
 
@@ -1852,14 +1854,7 @@ fn buildGlyphs(
     defer steps.deinit(gpa);
     var natural: f64 = 0;
     for (0..count) |i| {
-        const here = utf8[bounds.items[i]..bounds.items[i + 1]];
-        const step = if (i + 1 < count) pair: {
-            const both = utf8[bounds.items[i]..bounds.items[i + 2]];
-            const next = utf8[bounds.items[i + 1]..bounds.items[i + 2]];
-            const whole = z2d.text.measure(gpa, font, both, opts) catch return error.BadFont;
-            const tail = z2d.text.measure(gpa, font, next, opts) catch return error.BadFont;
-            break :pair whole - tail;
-        } else z2d.text.measure(gpa, font, here, opts) catch return error.BadFont;
+        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, opts);
         try steps.append(gpa, step);
         natural += step;
     }
@@ -1900,6 +1895,271 @@ fn buildGlyphs(
         if (i + 1 < count) x += extra;
     }
     pen.x = x;
+}
+
+/// Lay a run along a `<textPath>`'s shape.
+///
+/// §10.13. Each glyph is placed so that the **middle of its advance** sits on
+/// the path at the right distance, turned to the tangent there -- the middle
+/// rather than the start, because a glyph turned about its own left edge on a
+/// tight curve leans away from the line it is meant to sit on.
+///
+/// A glyph whose midpoint falls off either end of the path is not drawn, which
+/// is what the specification says to do and is why a string longer than its
+/// path simply stops.
+fn buildOnPath(
+    gpa: Allocator,
+    p: *z2d.Path,
+    font: *z2d.Font,
+    utf8: []const u8,
+    on_path: shapes.OnPath,
+    size: f64,
+    pen: *Pen,
+    ctm: z2d.Transformation,
+    doc: *const document.Document,
+    build_opts: path.Options,
+    opts: Options,
+) Error!void {
+    var arc: Arc = .{};
+    defer arc.deinit(gpa);
+    try measurePath(gpa, doc, on_path.node, &arc, opts);
+    if (arc.total() <= 0) return;
+
+    const start = switch (on_path.offset) {
+        .absolute => |v| v,
+        .fraction => |f| f * arc.total(),
+    };
+
+    const text_opts: z2d.text.ShowTextOptions = .{ .size = size };
+    var bounds: std.ArrayListUnmanaged(usize) = .empty;
+    defer bounds.deinit(gpa);
+    try splitCodepoints(gpa, utf8, &bounds);
+    const count = bounds.items.len - 1;
+    if (count == 0) return;
+
+    const baseline = font.baselineOffset(size);
+    var along = start;
+    for (0..count) |i| {
+        const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
+        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, text_opts);
+        // The midpoint of this glyph's advance is what sits on the curve.
+        if (arc.at(along + step / 2)) |spot| {
+            const placement = ctm
+                .translate(spot.x, spot.y)
+                .rotate(spot.angle)
+                .translate(-step / 2, 0);
+            var one = z2d.text.outline(
+                gpa,
+                font,
+                glyph,
+                0,
+                -baseline,
+                .{ .size = size, .transformation = placement },
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.BadFont,
+            };
+            defer one.deinit(gpa);
+            try withinBudget(p, one.nodes.items.len, build_opts);
+            try p.nodes.appendSlice(gpa, one.nodes.items);
+        }
+        along += step;
+    }
+    // A `<textPath>` leaves the pen where the run ended along the curve, which
+    // is what a `<tspan>` after it carries on from.
+    pen.placed = true;
+}
+
+/// The shape a `<textPath>` names, flattened and measured.
+///
+/// Built in the *user* space of the referencing element rather than in device
+/// space: the distances §10.13 talks about are user units, and the whole run
+/// is put through `ctm` afterwards like any other geometry.
+fn measurePath(
+    gpa: Allocator,
+    doc: *const document.Document,
+    node: ztree.NodeId,
+    out: *Arc,
+    opts: Options,
+) Error!void {
+    // The element's *own* geometry, not its children's: a `<path>` has no
+    // children, so walking its subtree would find nothing at all.
+    const geometry = (try doc.geometryOf(node)) orelse return error.BadTextPath;
+    // Text is not a shape to lay text along, and following it would be a
+    // recursion with no bottom.
+    if (geometry == .text) return error.BadTextPath;
+
+    var built: z2d.Path = .empty;
+    defer built.deinit(gpa);
+    try document.buildShape(&built, gpa, geometry, try doc.transformOf(node), .{
+        .max_nodes = opts.limits.max_path_nodes,
+        // Left open: a closed subpath would add a segment back to the start
+        // that the document did not draw, and text would run along it.
+        .close_subpaths = false,
+    });
+    try flatten(gpa, built.nodes.items, out);
+}
+
+/// Where each character of `utf8` begins, and where the last one ends.
+fn splitCodepoints(
+    gpa: Allocator,
+    utf8: []const u8,
+    out: *std.ArrayListUnmanaged(usize),
+) Error!void {
+    var i: usize = 0;
+    while (i < utf8.len) {
+        try out.append(gpa, i);
+        i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
+    }
+    try out.append(gpa, utf8.len);
+}
+
+/// The step from one glyph's origin to the next, kerning included.
+///
+/// A glyph's advance and its kerning pair with what follows, which z2d exposes
+/// neither of on its own: measuring the two characters together and taking
+/// away the second's own width leaves exactly the step. Without it the kerning
+/// would be lost the moment glyphs were placed by hand, and text without
+/// kerning still looks like text.
+fn glyphStep(
+    gpa: Allocator,
+    font: *z2d.Font,
+    utf8: []const u8,
+    bounds: []const usize,
+    i: usize,
+    count: usize,
+    opts: z2d.text.ShowTextOptions,
+) Error!f64 {
+    if (i + 1 < count) {
+        const both = utf8[bounds[i]..bounds[i + 2]];
+        const next = utf8[bounds[i + 1]..bounds[i + 2]];
+        const whole = z2d.text.measure(gpa, font, both, opts) catch return error.BadFont;
+        const tail = z2d.text.measure(gpa, font, next, opts) catch return error.BadFont;
+        return whole - tail;
+    }
+    const here = utf8[bounds[i]..bounds[i + 1]];
+    return z2d.text.measure(gpa, font, here, opts) catch error.BadFont;
+}
+
+/// A path flattened to a polyline, with how far along each vertex sits.
+///
+/// §10.13 places a glyph at a *distance* along a shape, which a Bezier does
+/// not answer directly: there is no closed form for the arc length of a cubic.
+/// Flattening it to short straight pieces and adding them up is what every
+/// renderer does instead, and the error is bounded by how short the pieces
+/// are.
+const Arc = struct {
+    xs: std.ArrayListUnmanaged(f64) = .empty,
+    ys: std.ArrayListUnmanaged(f64) = .empty,
+    /// Cumulative length at each vertex, so `at` can binary-search it.
+    lengths: std.ArrayListUnmanaged(f64) = .empty,
+
+    /// How finely a curve is chopped. Sixteen pieces per cubic is well past
+    /// what a glyph's placement can show at any size this draws at.
+    const per_curve = 256;
+
+    fn deinit(self: *Arc, gpa: Allocator) void {
+        self.xs.deinit(gpa);
+        self.ys.deinit(gpa);
+        self.lengths.deinit(gpa);
+    }
+
+    fn total(self: Arc) f64 {
+        return if (self.lengths.items.len == 0) 0 else self.lengths.items[self.lengths.items.len - 1];
+    }
+
+    fn add(self: *Arc, gpa: Allocator, x: f64, y: f64) Error!void {
+        if (self.xs.items.len == 0) {
+            try self.xs.append(gpa, x);
+            try self.ys.append(gpa, y);
+            try self.lengths.append(gpa, 0);
+            return;
+        }
+        const last = self.xs.items.len - 1;
+        const dx = x - self.xs.items[last];
+        const dy = y - self.ys.items[last];
+        const step = @sqrt(dx * dx + dy * dy);
+        // A repeated point adds nothing and would make a zero-length segment
+        // with no direction to take a tangent from.
+        if (!(step > 0)) return;
+        try self.xs.append(gpa, x);
+        try self.ys.append(gpa, y);
+        try self.lengths.append(gpa, self.lengths.items[last] + step);
+    }
+
+    /// The point at `distance` along, and the direction the path is going
+    /// there. Null when the distance falls off either end, which §10.13 says
+    /// is a glyph that is not rendered.
+    fn at(self: Arc, distance: f64) ?struct { x: f64, y: f64, angle: f64 } {
+        if (self.xs.items.len < 2) return null;
+        if (distance < 0 or distance > self.total()) return null;
+
+        // The first vertex at or past the distance.
+        var lo: usize = 1;
+        var hi: usize = self.lengths.items.len - 1;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.lengths.items[mid] < distance) lo = mid + 1 else hi = mid;
+        }
+        const i = lo;
+        const span = self.lengths.items[i] - self.lengths.items[i - 1];
+        const t = if (span > 0) (distance - self.lengths.items[i - 1]) / span else 0;
+        const x0 = self.xs.items[i - 1];
+        const y0 = self.ys.items[i - 1];
+        const x1 = self.xs.items[i];
+        const y1 = self.ys.items[i];
+        return .{
+            .x = x0 + (x1 - x0) * t,
+            .y = y0 + (y1 - y0) * t,
+            .angle = std.math.atan2(y1 - y0, x1 - x0),
+        };
+    }
+};
+
+/// Flatten a built path into an `Arc`.
+fn flatten(gpa: Allocator, nodes: []const PathNode, out: *Arc) Error!void {
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    var start_x: f64 = 0;
+    var start_y: f64 = 0;
+    for (nodes) |node| switch (node) {
+        .move_to => |n| {
+            // §10.13 lays text along *the* path; a second subpath would need
+            // a rule for where one ends and the next begins that the
+            // specification does not give, so the first is what is followed.
+            if (out.xs.items.len != 0) return;
+            cx = n.point.x;
+            cy = n.point.y;
+            start_x = cx;
+            start_y = cy;
+            try out.add(gpa, cx, cy);
+        },
+        .line_to => |n| {
+            cx = n.point.x;
+            cy = n.point.y;
+            try out.add(gpa, cx, cy);
+        },
+        .curve_to => |n| {
+            var step: usize = 1;
+            while (step <= Arc.per_curve) : (step += 1) {
+                const t = @as(f64, @floatFromInt(step)) / @as(f64, @floatFromInt(Arc.per_curve));
+                const u = 1 - t;
+                // de Casteljau, written out: the cubic at `t`.
+                const bx = u * u * u * cx + 3 * u * u * t * n.p1.x +
+                    3 * u * t * t * n.p2.x + t * t * t * n.p3.x;
+                const by = u * u * u * cy + 3 * u * u * t * n.p1.y +
+                    3 * u * t * t * n.p2.y + t * t * t * n.p3.y;
+                try out.add(gpa, bx, by);
+            }
+            cx = n.p3.x;
+            cy = n.p3.y;
+        },
+        .close_path => {
+            cx = start_x;
+            cy = start_y;
+            try out.add(gpa, cx, cy);
+        },
+    };
 }
 
 /// The angle for the glyph at `index` in a `rotate` list, in degrees.
@@ -3807,4 +4067,80 @@ test "the node ceiling is what keeps text from outrunning the budget" {
     // A budget so large that the ceiling would wrap is still a budget, and
     // saturating rather than wrapping is what keeps it one.
     try withinBudget(&p, 1 << 40, .{ .max_nodes = std.math.maxInt(usize) });
+}
+
+test "an Arc measures a path and answers points along it" {
+    const gpa = testing.allocator;
+    var arc: Arc = .{};
+    defer arc.deinit(gpa);
+
+    // A right-angled path: ten across, then ten down.
+    try arc.add(gpa, 0, 0);
+    try arc.add(gpa, 10, 0);
+    try arc.add(gpa, 10, 10);
+    try testing.expectApproxEqAbs(@as(f64, 20), arc.total(), 1e-9);
+
+    // Along the first leg, heading east.
+    const a = arc.at(5).?;
+    try testing.expectApproxEqAbs(@as(f64, 5), a.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), a.y, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), a.angle, 1e-9);
+
+    // Along the second, heading south -- which is a quarter turn in SVG's
+    // coordinates, where y grows downwards.
+    const b = arc.at(15).?;
+    try testing.expectApproxEqAbs(@as(f64, 10), b.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5), b.y, 1e-9);
+    try testing.expectApproxEqAbs(std.math.pi / 2.0, b.angle, 1e-9);
+
+    // Both ends are on the path; past either is not, which is §10.13's rule
+    // for a glyph that simply is not rendered.
+    try testing.expect(arc.at(0) != null);
+    try testing.expect(arc.at(20) != null);
+    try testing.expect(arc.at(-0.5) == null);
+    try testing.expect(arc.at(20.5) == null);
+
+    // A repeated point adds no length and leaves no segment without a
+    // direction to take a tangent from.
+    try arc.add(gpa, 10, 10);
+    try testing.expectApproxEqAbs(@as(f64, 20), arc.total(), 1e-9);
+    try testing.expectEqual(@as(usize, 3), arc.xs.items.len);
+}
+
+test "flattening a curve gets its length about right" {
+    const gpa = testing.allocator;
+
+    // A quarter circle of radius ten, as the cubic that approximates one.
+    // The cubic is not exactly a circle, so its length is not exactly
+    // `pi * r / 2` either -- it is within a fraction of a percent, and so is
+    // the flattening, which is far finer than a glyph's placement can show.
+    const k = 0.5522847498307936;
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    try p.moveTo(gpa, 10, 0);
+    try p.curveTo(gpa, 10, 10 * k, 10 * k, 10, 0, 10);
+
+    var arc: Arc = .{};
+    defer arc.deinit(gpa);
+    try flatten(gpa, p.nodes.items, &arc);
+
+    const truth = std.math.pi * 10.0 / 2.0;
+    try testing.expectApproxEqRel(truth, arc.total(), 0.002);
+}
+
+test "only the first subpath of a textPath's shape is followed" {
+    const gpa = testing.allocator;
+    // §10.13 lays text along *the* path, and gives no rule for where one
+    // subpath ends and the next begins, so the first is what is followed.
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    try p.moveTo(gpa, 0, 0);
+    try p.lineTo(gpa, 6, 0);
+    try p.moveTo(gpa, 100, 100);
+    try p.lineTo(gpa, 200, 100);
+
+    var arc: Arc = .{};
+    defer arc.deinit(gpa);
+    try flatten(gpa, p.nodes.items, &arc);
+    try testing.expectApproxEqAbs(@as(f64, 6), arc.total(), 1e-9);
 }

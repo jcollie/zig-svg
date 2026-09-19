@@ -637,6 +637,7 @@ const WireError = enum(u16) {
     text_needs_a_font = 52,
     no_font_supplied = 53,
     bad_font = 54,
+    bad_text_path = 55,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -695,6 +696,7 @@ fn wireFromError(err: anyerror) WireError {
         error.TextNeedsAFont => .text_needs_a_font,
         error.NoFontSupplied => .no_font_supplied,
         error.BadFont => .bad_font,
+        error.BadTextPath => .bad_text_path,
         error.FilterUnsupported => .filter_unsupported,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -768,6 +770,7 @@ fn wireToError(status: u16) Error {
         .text_needs_a_font => error.TextNeedsAFont,
         .no_font_supplied => error.NoFontSupplied,
         .bad_font => error.BadFont,
+        .bad_text_path => error.BadTextPath,
         .filter_unsupported => error.FilterUnsupported,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,

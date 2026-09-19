@@ -144,11 +144,10 @@ pub const Error = error{
     BadFontWeight,
     /// A `font-style` that is not `normal`, `italic` or `oblique`.
     BadFontStyle,
-    /// A `<text>` with elements inside it -- a `<tspan>`, most likely. Each
-    /// carries its own position and its own properties, so the run is really
-    /// several runs, and drawing the characters without them would put text on
-    /// the page in the wrong places.
-    UnsupportedTextContent,
+    /// A `rotate`, `textLength` or `lengthAdjust` on a `<text>` or a
+    /// `<tspan>`. Each changes where the glyphs go, so ignoring one draws text
+    /// that is in the wrong place and looks deliberate.
+    UnsupportedTextLayout,
 } || transform.Error || color.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -534,6 +533,36 @@ pub const Document = struct {
         return it;
     }
 
+    /// The runs of one `<text>`, for measuring.
+    ///
+    /// `subtree` deliberately leaves the root's own attributes alone, because
+    /// a `<clipPath>` or a `<pattern>` contributes none of its own to what is
+    /// inside it. A `<text>` is the opposite: its `font-size`, its
+    /// `font-family` and its `text-anchor` are exactly what its runs are drawn
+    /// with, and measuring them without it measures the wrong thing -- at the
+    /// default size rather than the document's, which is a ratio rather than a
+    /// small error.
+    ///
+    /// Used to find the width of a chunk, which `text-anchor` needs before the
+    /// first run of one can be placed.
+    pub fn textRuns(self: *const Document, root: ztree.NodeId) Error!PathIterator {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        it.started = true;
+        // The element's own `font-size` first, against nothing -- there is no
+        // parent here to make an `em` relative to -- and then everything else
+        // against what it came to.
+        it.viewport.font_size = null;
+        const own = try it.readInherited(root);
+        it.viewport.font_size = own.font_size;
+        it.stack[0] = .{
+            .node = root,
+            .next_child = 0,
+            .inherited = own,
+            .transform = .identity,
+        };
+        return it;
+    }
+
     /// An element's own `transform`, or the identity when it has none.
     ///
     /// `subtree` deliberately leaves the root's attributes alone, because the
@@ -647,6 +676,10 @@ pub const PathIterator = struct {
         /// Whether this container opened a layer that has to be closed when
         /// the walk leaves it.
         opens_layer: bool = false,
+        /// Whether this element has yet produced a run of text. Its `x`, `y`,
+        /// `dx` and `dy` belong to the first one only; what follows carries on
+        /// from the pen.
+        first_run: bool = true,
         /// Whether that close has already been reported.
         closed: bool = false,
     };
@@ -698,8 +731,94 @@ pub const PathIterator = struct {
             const child = children[top.next_child];
             top.next_child += 1;
 
+            // Character data inside a `<text>` or a `<tspan>` is a run of its
+            // own, in the order it appears among that element's `<tspan>`
+            // children. The generic walk only visits *elements*, so this is
+            // where text gets to be content rather than markup.
+            if (tree.node(child).kind == .text and isTextish(tree, top.node)) {
+                if (try self.runFrom(child, top.*)) |item| return item;
+                continue;
+            }
+
             if (try self.visit(child, top.*)) |item| return item;
         }
+    }
+
+    /// The run one piece of character data makes, or null when it is only
+    /// whitespace between markup.
+    ///
+    /// Its position comes from the element it sits in, and only when it is
+    /// that element's *first* run: `<tspan x="40">ab<tspan>cd</tspan></tspan>`
+    /// puts the forty on `ab` and leaves `cd` to carry on from wherever the
+    /// pen reached. Everything else about it -- the paint, the font, the
+    /// anchor -- is what the element came to, which the frame already holds.
+    fn runFrom(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
+        const tree = self.doc.tree;
+        // Attributes that move glyphs about, and that this does not implement.
+        // Ignoring one draws text in the wrong place, which is the failure
+        // nobody notices.
+        for ([_][]const u8{ "rotate", "textLength", "lengthAdjust" }) |name| {
+            if (self.attr(parent.node, name) != null) return error.UnsupportedTextLayout;
+        }
+        const raw = tree.node(child).value;
+        if (allWhitespace(raw)) return null;
+
+        const owner = self.textOwnerOf(parent.node);
+        const first = parent.first_run;
+        // A frame is shared, so the flag has to be written back to the real
+        // one rather than to the copy this was handed.
+        self.stack[self.depth].first_run = false;
+
+        self.viewport.font_size = parent.inherited.font_size;
+        return .{
+            .shape = .{
+                .geometry = .{ .text = .{
+                    .utf8 = raw,
+                    .x = if (first) try self.optionalLengthOf(parent.node, "x", .x) else null,
+                    .y = if (first) try self.optionalLengthOf(parent.node, "y", .y) else null,
+                    .dx = if (first) try self.lengthOf(parent.node, "dx", .x, 0) else 0,
+                    .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
+                    .owner = owner,
+                    .starts_element = owner == parent.node and first,
+                } },
+                .fill = parent.inherited.fill,
+                .fill_opacity = parent.inherited.fill_opacity,
+                .fill_rule = parent.inherited.fill_rule,
+                .clip_rule = parent.inherited.clip_rule,
+                .current_color = parent.inherited.current_color,
+                .stroke = parent.inherited.stroke,
+                .stroke_width = parent.inherited.stroke_width,
+                .stroke_opacity = parent.inherited.stroke_opacity,
+                .stroke_linecap = parent.inherited.stroke_linecap,
+                .stroke_linejoin = parent.inherited.stroke_linejoin,
+                .stroke_miterlimit = parent.inherited.stroke_miterlimit,
+                .stroke_dasharray = parent.inherited.stroke_dasharray,
+                .stroke_dashoffset = parent.inherited.stroke_dashoffset,
+                .font_family = parent.inherited.font_family,
+                .font_size = parent.inherited.font_size,
+                .font_weight = parent.inherited.font_weight,
+                .font_italic = parent.inherited.font_italic,
+                .text_anchor = parent.inherited.text_anchor,
+                // A run has no `opacity` of its own: the element it sits in does,
+                // and that element opened a layer for it if it needed one.
+                .opacity = 1.0,
+                .clip_path = null,
+                .mask = null,
+                .transform = parent.transform,
+            },
+        };
+    }
+
+    /// The `<text>` a run belongs to: the nearest such ancestor on the stack,
+    /// which is the element `text-anchor` is measured across.
+    fn textOwnerOf(self: *const PathIterator, node: ztree.NodeId) ztree.NodeId {
+        var i = self.depth + 1;
+        while (i > 0) {
+            i -= 1;
+            const frame_node = self.stack[i].node;
+            if (localIs(self.doc.tree, frame_node, "text")) return frame_node;
+        }
+        return node;
     }
 
     /// An element's own `opacity`, which is not inherited.
@@ -960,38 +1079,6 @@ pub const PathIterator = struct {
         };
     }
 
-    /// The characters inside a `<text>`, borrowed from the tree's arena.
-    ///
-    /// ztree merges adjacent character data into one node, so an ordinary
-    /// `<text>` has exactly one child and its value is the whole run -- with
-    /// entity references already resolved, since ztree decodes them as it
-    /// parses.
-    ///
-    /// Anything else is refused. An element inside a `<text>` is a `<tspan>`
-    /// or its kind, each carrying its own position and its own properties, so
-    /// the run is really several runs at several places; drawing the
-    /// characters without them would put text on the page where the document
-    /// did not ask for it. Refusing says so instead.
-    fn textContentOf(self: *const PathIterator, node: ztree.NodeId) Error![]const u8 {
-        const tree = self.doc.tree;
-        var found: ?[]const u8 = null;
-        for (tree.node(node).children.items) |child| {
-            switch (tree.node(child).kind) {
-                .text => {
-                    // More than one run of character data means something was
-                    // between them, which is the case above.
-                    if (found != null) return error.UnsupportedTextContent;
-                    found = tree.node(child).value;
-                },
-                .element => return error.UnsupportedTextContent,
-                // A comment or a processing instruction says nothing about
-                // what is drawn.
-                else => {},
-            }
-        }
-        return found orelse "";
-    }
-
     fn readTransform(self: *const PathIterator, node: ztree.NodeId) Error!z2d.Transformation {
         const raw = self.attr(node, "transform") orelse return .identity;
         return transform.parse(raw);
@@ -1008,13 +1095,6 @@ pub const PathIterator = struct {
         const name = self.doc.tree.node(node).name.local;
         if (std.mem.eql(u8, name, "path")) {
             return .{ .path = self.attr(node, "d") orelse return error.NoPath };
-        }
-        if (std.mem.eql(u8, name, "text")) {
-            return .{ .text = .{
-                .utf8 = try self.textContentOf(node),
-                .x = try self.lengthOf(node, "x", .x, 0),
-                .y = try self.lengthOf(node, "y", .y, 0),
-            } };
         }
         if (std.mem.eql(u8, name, "rect")) {
             return .{
@@ -1088,7 +1168,37 @@ fn referenceId(t: []const u8) ?[]const u8 {
 /// path rather than the root being a special case that drifts from the general
 /// one.
 fn isContainer(name: []const u8) bool {
-    return std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "g");
+    return std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "g") or
+        isTextishName(name);
+}
+
+/// Whether an element holds runs of text: a `<text>` or a `<tspan>`.
+///
+/// Both are containers here, which is what lets the walk descend into one and
+/// meet its character data and its `<tspan>` children in document order. That
+/// order is the whole of text layout: the runs share a pen, and which one
+/// comes first decides where the next begins.
+fn isTextishName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "text") or std.mem.eql(u8, name, "tspan");
+}
+
+fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
+    return isTextishName(tree.node(node).name.local);
+}
+
+/// Whether a piece of character data is only the whitespace between markup.
+///
+/// `<text>\n  <tspan>a</tspan>\n</text>` has character data on either side of
+/// the tspan that the document did not mean as text. Collapsing would leave a
+/// single space, and SVG's own rule agrees that leading and trailing
+/// whitespace in a text element goes -- so a run that is nothing else is not a
+/// run at all.
+fn allWhitespace(raw: []const u8) bool {
+    for (raw) |c| switch (c) {
+        ' ', '\t', '\r', '\n' => {},
+        else => return false,
+    };
+    return true;
 }
 
 /// The elements that are not drawn where they stand.
@@ -1926,4 +2036,82 @@ test "em with no font size anywhere is refused" {
         gpa,
         "<svg viewBox=\"0 0 64 32\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
     ));
+}
+
+test "a text element is a sequence of runs sharing a pen" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" font-size=\"10\">" ++
+        "ab<tspan fill=\"red\" font-size=\"6\">cd</tspan>ef</text></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    // Three runs in document order, and only the first carries the `<text>`'s
+    // own position -- the rest carry on from wherever the pen reached, which
+    // is why they have none of their own.
+    const first = (try it.next()).?.shape;
+    try testing.expectEqualStrings("ab", first.geometry.text.utf8);
+    try testing.expectEqual(@as(?f64, 4), first.geometry.text.x);
+    try testing.expect(first.geometry.text.starts_element);
+    try testing.expectEqual(@as(?f64, 10), first.font_size);
+
+    const second = (try it.next()).?.shape;
+    try testing.expectEqualStrings("cd", second.geometry.text.utf8);
+    try testing.expectEqual(@as(?f64, null), second.geometry.text.x);
+    try testing.expect(!second.geometry.text.starts_element);
+    // The tspan's own properties, over what it inherited.
+    try testing.expectEqual(@as(?f64, 6), second.font_size);
+    try testing.expectEqual(@as(u8, 255), second.fill.?.color.r);
+
+    const third = (try it.next()).?.shape;
+    try testing.expectEqualStrings("ef", third.geometry.text.utf8);
+    try testing.expectEqual(@as(?f64, null), third.geometry.text.x);
+    // Back to the `<text>`'s own size: a tspan's properties end with it.
+    try testing.expectEqual(@as(?f64, 10), third.font_size);
+
+    // All three belong to the same element, which is what `text-anchor` is
+    // measured across.
+    try testing.expectEqual(first.geometry.text.owner, second.geometry.text.owner);
+    try testing.expectEqual(first.geometry.text.owner, third.geometry.text.owner);
+
+    try testing.expectEqual(@as(?Item, null), try it.next());
+}
+
+test "a tspan that places itself starts a chunk" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"12\" font-size=\"10\">" ++
+        "one<tspan x=\"4\" y=\"26\">two</tspan></text></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    _ = (try it.next()).?;
+    const second = (try it.next()).?.shape.geometry.text;
+    try testing.expectEqual(@as(?f64, 4), second.x);
+    try testing.expectEqual(@as(?f64, 26), second.y);
+}
+
+test "whitespace between markup is not a run" {
+    const gpa = testing.allocator;
+    // The newlines and indentation around the tspans are not text the document
+    // meant to draw, and a run made of nothing else is not a run.
+    var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" font-size=\"10\">\n" ++
+        "  <tspan>a</tspan>\n  <tspan>b</tspan>\n</text></svg>");
+    defer doc.deinit();
+
+    var it = doc.paths();
+    try testing.expectEqualStrings("a", (try it.next()).?.shape.geometry.text.utf8);
+    try testing.expectEqualStrings("b", (try it.next()).?.shape.geometry.text.utf8);
+    try testing.expectEqual(@as(?Item, null), try it.next());
+}
+
+test "a text attribute that moves glyphs about is refused" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{ "rotate=\"30\"", "textLength=\"40\"", "lengthAdjust=\"spacing\"" }) |attr| {
+        const src = try std.fmt.allocPrint(
+            gpa,
+            "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>hi</text></svg>",
+            .{attr},
+        );
+        defer gpa.free(src);
+        try testing.expectError(error.UnsupportedTextLayout, read(gpa, src));
+    }
 }

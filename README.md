@@ -105,7 +105,26 @@ run past the oracle's tolerance. The fixtures are sized so that what they
 compare is placement and clipping rather than resampling, because the latter is
 a difference this is on the right side of.
 
-`<text>` is drawn as an ordinary path. z2d hands back the glyph outlines and
+A `<text>` is a *sequence* of runs, not one string: every `<tspan>` inside it
+is a run with its own properties, and the characters around them are runs too.
+They share a pen that advances along the line, so a run with no position of its
+own carries on from wherever the last one ended — which means the walk yields
+them in document order and the renderer keeps the pen across them. `x` and `y`
+on a run are absolute and start a new *chunk*; `dx` and `dy` shift the pen
+without starting one.
+
+That is what makes `text-anchor` the awkward one. It moves a whole chunk rather
+than a run, so placing the *first* run of one means knowing the width of every
+run in it — and those widths need the font, which the reader does not have. The
+renderer measures the chunk by walking the `<text>` a second time, which is the
+same trick a clip in bounding-box units uses to measure a group. That second
+walk has to read the `<text>`'s own `font-size` and `font-family`, which is why
+it is `Document.textRuns` and not `Document.subtree`: the latter deliberately
+ignores the root's attributes, which is right for a `<clipPath>` and wrong
+here, and measuring without them measures at the default size — a ratio wrong,
+not a rounding.
+
+Each run is drawn as an ordinary path. z2d hands back the glyph outlines and
 everything after that treats them like any other geometry, which is why text
 can be stroked, clipped, masked and filled with a gradient or a pattern without
 a second set of routines that would drift from the first —
@@ -323,10 +342,11 @@ short of the specification.
 | `filter` | **no** — refused, not ignored |
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>` | yes — `patternUnits`, `patternContentUnits`, `patternTransform`, `viewBox`, `href`, and `overflow` |
-| `<text>` | yes — one run per element, filled or stroked, and usable as a clip |
+| `<text>`, `<tspan>` | yes — a sequence of runs, filled or stroked, and usable as a clip |
+| `x`, `y`, `dx`, `dy` on a run | yes — `x`/`y` start a chunk, `dx`/`dy` shift the pen |
 | `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
 | `text-anchor` | yes — `start`, `middle`, `end` |
-| `<tspan>`, `textPath`, `dx`/`dy`/`rotate` | **no** — refused, since each is a run of its own at a place of its own |
+| `rotate`, `textLength`, `textPath` | **no** — refused, not ignored |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style`, CSS | **no** |
 
@@ -607,15 +627,14 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Roughly in the order they are worth having. Each is a document that errors
-today, and each should arrive with a fixture in `tests/oracle` that resvg
-already renders.
+Roughly in the order they are worth having, and each should arrive with a
+fixture in `tests/oracle` that resvg already renders.
 
-**1. `<tspan>`.** A `<text>` is one run here, and an element inside one is
-refused rather than drawn as though it were not there. `<tspan>` carries its
-own position and its own properties, so a `<text>` holding them is really
-several runs at several places — a change to what the walk yields rather than
-to how a run is drawn.
+**1. `rotate`, `textLength` and `textPath`.** The three text attributes that
+move glyphs about, all refused rather than ignored. `rotate` turns each glyph
+on its own, `textLength` stretches a run to a given width, and `textPath` runs
+it along a curve — each needing the pen to do something other than advance in a
+straight line.
 
 **2. `<pattern>` sampled rather than drawn.** What is here draws the tile once
 per cell, which is exact but costs a draw per cell. z2d's `Pattern` is a

@@ -737,9 +737,20 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">   spaced\n   out   </text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"></text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-size=\"0\">hi</text></svg>",
-    // A `<text>` with elements inside it, which is several runs at several
-    // places and is refused rather than drawn as one.
-    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">a<tspan x=\"4\">b</tspan></text></svg>",
+    // `<tspan>`: a `<text>` is a sequence of runs sharing a pen, so these
+    // exercise the walk's interleaving of character data and markup.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">a<tspan>b</tspan>c</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">a<tspan x=\"4\" y=\"7\">b</tspan>c</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">a<tspan dx=\"2\" dy=\"-1\">b</tspan></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-size=\"4\">a<tspan font-size=\"2\" fill=\"red\">b</tspan></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"4\" y=\"6\" text-anchor=\"middle\">a<tspan>bc</tspan></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\">\n  <tspan>a</tspan>\n  <tspan>b</tspan>\n</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><tspan><tspan>deep</tspan></tspan></text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\"><tspan/></text></svg>",
+    // Attributes that move glyphs about, which are refused rather than
+    // ignored.
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" rotate=\"30\">ab</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" textLength=\"4\">ab</text></svg>",
     // Text as a clip path, and text inside a pattern: both reach the builder
     // by a route that is not the ordinary fill.
     "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><text x=\"1\" y=\"6\" font-size=\"6\">c</text></clipPath><rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",

@@ -33,6 +33,7 @@
 //! changing the shape of what the reader produces.
 
 const std = @import("std");
+const ztree = @import("ztree");
 const testing = std.testing;
 
 const z2d = @import("z2d");
@@ -103,14 +104,40 @@ pub const Geometry = union(enum) {
     text: Text,
 };
 
-/// A run of text, as the document wrote it.
+/// One run of text, as the document wrote it.
+///
+/// A `<text>` is not one run but a sequence of them: every `<tspan>` inside it
+/// is a run of its own with its own properties, and the characters around them
+/// are runs too. They share a pen that advances along the line, which is why a
+/// run does not always know where it starts.
 pub const Text = struct {
     /// The characters, still as they appear in the document. Whitespace is
     /// collapsed at drawing time rather than here, because collapsing makes a
     /// new string and this one is borrowed from the tree's arena.
     utf8: []const u8,
-    x: f64,
-    y: f64,
+
+    /// Where the run begins, when the element said. §10.4's `x` and `y` are
+    /// absolute and each starts a new *chunk*; a run without them carries on
+    /// from wherever the previous one left the pen.
+    x: ?f64,
+    y: ?f64,
+
+    /// §10.4's `dx` and `dy`: a shift from wherever the pen is, which does
+    /// not start a new chunk.
+    dx: f64,
+    dy: f64,
+
+    /// The `<text>` this run belongs to.
+    ///
+    /// The renderer needs it to measure: `text-anchor` applies to a whole
+    /// chunk rather than to a run, so placing the first run of one means
+    /// knowing the width of all of them -- and the widths need a font, which
+    /// only the renderer has. It walks this subtree to find them.
+    owner: ztree.NodeId,
+
+    /// True for the first run of its `<text>`, which is what tells the
+    /// renderer to start a fresh pen rather than carry one on.
+    starts_element: bool,
 };
 
 /// Append `geometry` to `p`, honouring `p.transformation`.

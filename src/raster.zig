@@ -428,6 +428,11 @@ fn drawItems(
     const height = layers.bottom.getHeight();
     const view_box = pass.base;
 
+    // Where the next run of text goes. One per walk, because the runs of a
+    // `<text>` arrive consecutively and each carries on from the last; a run
+    // that begins a new element resets it.
+    var pen: Pen = .{};
+
     while (try items.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
@@ -475,6 +480,9 @@ fn drawItems(
         defer if (shape_layer) layers.close(gpa);
 
         const surface = layers.target();
+        // Kept so the stroke can start from the same place the fill did: both
+        // draw the same run, and the fill leaves the pen past it.
+        const pen_before_fill = pen;
         const fill_paint = resolveFill(shape, opts);
         const stroke = try resolveStroke(shape, opts);
 
@@ -488,7 +496,7 @@ fn drawItems(
             // data it applies to.
             try buildGeometry(gpa, &p, shape, ctm, .{
                 .max_nodes = pass.nodes_left.*,
-            }, opts);
+            }, doc, &pen, opts);
             pass.nodes_left.* -= p.nodes.items.len;
 
             // A shape with no geometry draws nothing, which is not an error;
@@ -546,13 +554,16 @@ fn drawItems(
             var p: z2d.Path = .empty;
             defer p.deinit(gpa);
 
+            // The same pen the fill used, rewound: a run is filled and then
+            // stroked, and both have to land in the same place.
+            var stroke_pen = pen_before_fill;
             try buildGeometry(gpa, &p, shape, ctm, .{
                 .max_nodes = pass.nodes_left.*,
                 // Glyph outlines are closed contours whatever this says, so a
                 // stroked `<text>` is outlined rather than having its letters
                 // capped at their ends.
                 .close_subpaths = false,
-            }, opts);
+            }, doc, &stroke_pen, opts);
             pass.nodes_left.* -= p.nodes.items.len;
 
             if (p.nodes.items.len != 0) {
@@ -561,22 +572,22 @@ fn drawItems(
                 // the matrix and shapes the pen itself. `uniformScale` says
                 // why the two are not interchangeable in practice even though
                 // they are in geometry.
-                var pen = s.*;
+                var nib = s.*;
                 var pen_ctm: z2d.Transformation = ctm;
                 if (uniformScale(ctm)) |factor| {
-                    pen.scaleBy(factor);
+                    nib.scaleBy(factor);
                     pen_ctm = .identity;
                 }
 
-                var built: Source = try makeSource(gpa, doc, shape, pen.paint, ctm, opts);
+                var built: Source = try makeSource(gpa, doc, shape, nib.paint, ctm, opts);
                 defer built.deinit(gpa);
                 const stroke_opts: z2d.painter.StrokeOptions = .{
-                    .line_width = pen.width,
-                    .line_cap_mode = pen.cap,
-                    .line_join_mode = pen.join,
-                    .miter_limit = pen.miter_limit,
-                    .dashes = pen.dashes(),
-                    .dash_offset = pen.dash_offset,
+                    .line_width = nib.width,
+                    .line_cap_mode = nib.cap,
+                    .line_join_mode = nib.join,
+                    .miter_limit = nib.miter_limit,
+                    .dashes = nib.dashes(),
+                    .dash_offset = nib.dash_offset,
                     .transformation = pen_ctm,
                     .anti_aliasing_mode = opts.anti_aliasing_mode,
                     .tolerance = opts.tolerance,
@@ -594,7 +605,7 @@ fn drawItems(
                         surface,
                         built.tiled,
                         &region,
-                        strokeBox(pathBox(p.nodes.items), pen.width, ctm),
+                        strokeBox(pathBox(p.nodes.items), nib.width, ctm),
                         .{ .shape = shape },
                         ctm,
                         pass,
@@ -894,7 +905,7 @@ const Measure = struct {
     ) Error!Box {
         if (self.box) |b| return b;
         const b = switch (self.subject) {
-            .shape => |sh| try boundingBox(gpa, sh, opts),
+            .shape => |sh| try boundingBox(gpa, doc, sh, opts),
             .container => |node| try contentBox(gpa, doc, node, opts),
         };
         self.box = b;
@@ -1002,6 +1013,7 @@ fn buildClip(
 
     const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
 
+    var clip_pen: Pen = .{};
     var it = doc.subtree(node, placed);
     while (try it.next()) |item| {
         const shape = switch (item) {
@@ -1017,7 +1029,7 @@ fn buildClip(
         // documents actually do.
         try buildGeometry(gpa, &p, shape, shape.transform, .{
             .max_nodes = pass.nodes_left.*,
-        }, opts);
+        }, doc, &clip_pen, opts);
         pass.nodes_left.* -= p.nodes.items.len;
         if (p.nodes.items.len == 0) continue;
 
@@ -1637,13 +1649,30 @@ fn buildGeometry(
     shape: document.Shape,
     ctm: z2d.Transformation,
     build_opts: path.Options,
+    doc: *const document.Document,
+    pen: ?*Pen,
     opts: Options,
 ) Error!void {
+    var scratch: Pen = .{};
     return switch (shape.geometry) {
-        .text => |run| buildText(gpa, p, run, shape, ctm, opts),
+        .text => |run| buildText(gpa, p, run, shape, ctm, pen orelse &scratch, doc, opts),
         else => document.buildShape(p, gpa, shape.geometry, ctm, build_opts),
     };
 }
+
+/// Where the next run of text begins.
+///
+/// A `<text>` is a sequence of runs sharing a pen: a `<tspan>` with no position
+/// of its own carries on from wherever the previous run left off, so drawing
+/// one run means knowing what the ones before it came to. The renderer keeps
+/// this across the runs of a text element and resets it when a new one starts.
+const Pen = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+    /// Whether anything has been drawn yet in this `<text>`. Until something
+    /// has, a run with no position of its own has nothing to carry on from.
+    placed: bool = false,
+};
 
 /// Build a `<text>` run's glyph outlines into `p`, under `ctm`.
 ///
@@ -1661,51 +1690,60 @@ fn buildText(
     run: shapes.Text,
     shape: document.Shape,
     ctm: z2d.Transformation,
+    pen: *Pen,
+    doc: *const document.Document,
     opts: Options,
 ) Error!void {
-    const resolver = opts.fonts orelse return error.NoFontSupplied;
-    const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
-
-    var font = z2d.Font.loadBuffer(bytes) catch return error.BadFont;
-
-    // §10.10's initial `font-size` is `medium`, which every renderer takes as
-    // 16 units; resvg uses 12 when the document names none, and says so in
-    // `--font-size`. The document's own value is what matters in practice --
-    // text without a `font-size` is rare -- and 16 is what the CSS keyword
-    // means, so that is what an unspecified one gets here.
+    var font = try faceFor(shape, opts);
     const size = shape.font_size orelse 16;
-    if (!(size > 0)) return;
 
     const collapsed = try collapseWhitespace(gpa, run.utf8);
     defer gpa.free(collapsed);
-    if (collapsed.len == 0) return;
+
+    // §10.4: `x` and `y` are absolute and start a new *chunk*; `dx` and `dy`
+    // shift the pen without starting one. A run with neither carries on.
+    if (run.starts_element or !pen.placed) {
+        pen.x = 0;
+        pen.y = 0;
+        pen.placed = true;
+    }
+    var starts_chunk = run.starts_element;
+    if (run.x) |x| {
+        pen.x = x;
+        starts_chunk = true;
+    }
+    if (run.y) |y| pen.y = y;
+    pen.x += run.dx;
+    pen.y += run.dy;
+
+    if (collapsed.len == 0 or !(size > 0)) return;
 
     const text_opts: z2d.text.ShowTextOptions = .{ .size = size };
 
-    // §10.9: the anchor says which end of the advance sits at `x`, so how wide
-    // the text is has to be known before it can be placed. `measure` walks the
-    // same glyphs without building any outline, which is why this costs a pass
-    // over the string rather than a second set of outlines.
-    const anchor = shape.text_anchor orelse .start;
-    const shift: f64 = switch (anchor) {
-        .start => 0,
-        .middle, .end => shifted: {
-            const advance = z2d.text.measure(gpa, &font, collapsed, text_opts) catch
-                return error.BadFont;
-            break :shifted if (anchor == .middle) -advance / 2 else -advance;
-        },
-    };
+    // §10.9: the anchor moves a whole *chunk*, not a run -- so placing the
+    // first run of one means knowing the width of every run in it, and those
+    // widths need the font. The chunk is measured by walking the `<text>` this
+    // run belongs to, which is the same trick a clip in bounding-box units
+    // uses to measure a group.
+    if (starts_chunk) {
+        const anchor = shape.text_anchor orelse .start;
+        if (anchor != .start) {
+            const width = try chunkWidth(gpa, doc, run, opts);
+            pen.x -= if (anchor == .middle) width / 2 else width;
+        }
+    }
 
-    // §10.4: a `<text>`'s `y` is the **baseline**. z2d places a run by the top
-    // of its em box, and the two are an ascender apart -- so passing the
-    // baseline straight through puts every line of text one font-size down the
-    // page, which looks like a plausible picture and is the wrong one.
     var glyphs = z2d.text.outline(
         gpa,
         &font,
         collapsed,
-        run.x + shift,
-        run.y - font.baselineOffset(size),
+        pen.x,
+        // §10.4: a `<text>`'s `y` is the **baseline**. z2d places a run by the
+        // top of its em box, one em above, because the glyph outline is
+        // reflected about the em box rather than about the baseline. Passing
+        // the baseline straight through puts every line one font-size down the
+        // page, which looks like a plausible picture and is the wrong one.
+        pen.y - font.baselineOffset(size),
         .{ .size = size, .transformation = ctm },
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1715,7 +1753,69 @@ fn buildText(
     };
     defer glyphs.deinit(gpa);
 
+    pen.x += z2d.text.measure(gpa, &font, collapsed, text_opts) catch
+        return error.BadFont;
+
     try p.nodes.appendSlice(gpa, glyphs.nodes.items);
+}
+
+/// The face a shape's text is drawn in.
+fn faceFor(shape: document.Shape, opts: Options) Error!z2d.Font {
+    const resolver = opts.fonts orelse return error.NoFontSupplied;
+    const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
+    return z2d.Font.loadBuffer(bytes) catch error.BadFont;
+}
+
+/// How wide the chunk beginning at `from` is, in user units.
+///
+/// A chunk runs from a position the document gave outright to the next one, so
+/// this walks the `<text>` and adds up every run from `from` until another
+/// names an `x` of its own. Each is measured in *its* font at *its* size,
+/// because a `<tspan>` may change both.
+///
+/// It costs a second walk of the element, which is what §10.9 asks for:
+/// `text-anchor` cannot be applied to the first run until the last one is
+/// known.
+fn chunkWidth(
+    gpa: Allocator,
+    doc: *const document.Document,
+    from: shapes.Text,
+    opts: Options,
+) Error!f64 {
+    var total: f64 = 0;
+    var started = false;
+    // `textRuns` rather than `subtree`: the `<text>`'s own `font-size` and
+    // `font-family` are what its runs are drawn with, and a walk that skipped
+    // them would measure at the default size instead -- which is a ratio
+    // wrong, not a rounding.
+    var it = try doc.textRuns(from.owner);
+    while (try it.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            else => continue,
+        };
+        const run = switch (shape.geometry) {
+            .text => |t| t,
+            else => continue,
+        };
+        // Wait for the run this chunk starts at, then stop at the next one
+        // that places itself.
+        if (!started) {
+            if (run.utf8.ptr != from.utf8.ptr) continue;
+            started = true;
+        } else if (run.x != null) break;
+
+        const size = shape.font_size orelse 16;
+        if (!(size > 0)) continue;
+        var font = try faceFor(shape, opts);
+        const collapsed = try collapseWhitespace(gpa, run.utf8);
+        defer gpa.free(collapsed);
+        total += run.dx;
+        if (collapsed.len == 0) continue;
+        total += z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
+            return error.BadFont;
+    }
+    return total;
 }
 
 /// XML whitespace collapsed the way SVG's default `xml:space` asks.
@@ -1810,7 +1910,7 @@ fn makeSource(
     // units mapping, then `gradientTransform` inside that.
     var placement = ctm;
     if (spec.units == .object_bounding_box) {
-        const box = try boundingBox(gpa, shape, opts);
+        const box = try boundingBox(gpa, doc, shape, opts);
         // A shape with no extent in one direction has no box to be fractions
         // of, and §7.11 says such a gradient is not rendered.
         if (!(box.width > 0) or !(box.height > 0)) return .nothing;
@@ -1900,12 +2000,17 @@ fn callerColor(opts: Options) color.Color {
 /// that: the fill's path is already in device space and the stroke's is too,
 /// and the bounding box of a rotated shape is not the rotation of its bounding
 /// box. Only a gradient in `objectBoundingBox` units asks for one.
-fn boundingBox(gpa: Allocator, shape: document.Shape, opts: Options) Error!Box {
+fn boundingBox(
+    gpa: Allocator,
+    doc: *const document.Document,
+    shape: document.Shape,
+    opts: Options,
+) Error!Box {
     var p: z2d.Path = .empty;
     defer p.deinit(gpa);
     try buildGeometry(gpa, &p, shape, .identity, .{
         .max_nodes = opts.limits.max_path_nodes,
-    }, opts);
+    }, doc, null, opts);
     return pathBox(p.nodes.items);
 }
 
@@ -1949,6 +2054,7 @@ fn contentExtent(
     var max_x: f64 = -std.math.inf(f64);
     var max_y: f64 = -std.math.inf(f64);
 
+    var measure_pen: Pen = .{};
     var it = doc.subtree(node, .identity);
     while (try it.next()) |item| {
         const shape = switch (item) {
@@ -1961,7 +2067,7 @@ fn contentExtent(
         defer p.deinit(gpa);
         try buildGeometry(gpa, &p, shape, shape.transform, .{
             .max_nodes = opts.limits.max_path_nodes,
-        }, opts);
+        }, doc, &measure_pen, opts);
         if (p.nodes.items.len == 0) continue;
         var box = pathBox(p.nodes.items);
         if (with_stroke) {

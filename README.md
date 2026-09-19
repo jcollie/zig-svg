@@ -410,8 +410,8 @@ which is a simpler lifetime than the borrowed slices it replaced.
 ## Sandboxing
 
 `svg.sandbox.render` runs the renderer in a forked process that seccomp has
-reduced to `write`, `exit_group`, `exit` and `rt_sigreturn`, and passes the
-pixels back through a shared `memfd`:
+reduced to `write` — on one descriptor — plus `exit_group`, `exit` and
+`rt_sigreturn`, and passes the pixels back through a shared `memfd`:
 
 ```zig
 var image = try svg.sandbox.render(gpa, source, .{
@@ -426,6 +426,27 @@ growing towards it grows towards exactly the capabilities the sandbox takes
 away. A renderer subverted into opening a file, reaching the network or
 spawning a program dies at the attempt, and a renderer that segfaults comes
 back as `error.RendererCrashed` rather than as a dead program.
+
+Before that filter goes on, four things are taken away from the child, none of
+which needs permitting because all of it happens first. Its **inherited
+descriptors** are closed: a forked child keeps everything the parent had, since
+`CLOEXEC` means nothing to a process that never execs, and while a renderer
+cannot *open* a socket under this profile, `write` is a call it has — so a
+subverted one could put attacker-controlled bytes into a connection the parent
+already had. The reply pipe is moved to a fixed number, everything above it is
+closed, and `write` is then permitted on that descriptor and no other; the two
+halves make each other worth having, since closing takes away what there is to
+write to and the filter takes away the ability to name anything else. Then
+**processor time** through `RLIMIT_CPU`, so a renderer stuck in a loop is
+killed by the kernel rather than waited for; **core dumps** through
+`RLIMIT_CORE`, so a crash cannot write the shared mapping out to disk; and
+**dumpability** through `PR_SET_DUMPABLE`, which stops another process of the
+same user attaching with `ptrace` to read that mapping.
+
+Each is proved against the kernel rather than asserted: two children differing
+only in the descriptor they write to, a child reporting through the one
+descriptor it kept that the one it should not have is gone, and a child that
+spins until the kernel ends it.
 
 It does not make the pixels *trustworthy* — writing into the shared mapping is
 the child's job. What the parent validates is the shape of the reply: that the

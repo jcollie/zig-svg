@@ -54,8 +54,17 @@
 //! integers, so it can say "no `openat` at all" but never "no `openat` outside
 //! this directory": the path is a pointer, and following it would race with
 //! another thread rewriting what it points at. That is why the sandbox is
-//! built around a decoder that needs no files rather than around a filter that
+//! built around a renderer that needs no files rather than around a filter that
 //! tries to police which files it opens.
+//!
+//! The exception is a **file descriptor**, which is an integer and not a
+//! pointer, and so is the one argument a filter can usefully compare. `Rule`
+//! carries that comparison, and `write` is what needs it: the child inherits
+//! every descriptor the calling program had open, so permitting `write` on all
+//! of them would let a renderer subverted by a malicious document put
+//! attacker-controlled bytes into a connection the parent already had. The
+//! descriptor has to be a constant for the filter to compare it, which is what
+//! `reply_fd` and the `dup3` in front of the filter are for.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -122,12 +131,34 @@ pub const Profile = enum {
     /// much sandbox left.
     permissive,
 
-    /// The calls this profile permits, in the order the filter tests them.
+    /// The rules this profile is made of: every call it permits, and for one
+    /// of them the only descriptor it may be used on.
+    pub fn rules(comptime self: Profile) []const Rule {
+        comptime {
+            var out: []const Rule = &.{};
+            for (self.syscalls()) |sys| out = out ++ &[_]Rule{.{ .sys = sys }};
+
+            // Writing the reply, which is the only thing the child has to
+            // say. Under `strict` it may say it down one descriptor and no
+            // other: the child inherits everything the parent had open, and a
+            // renderer that cannot *open* a socket can still write to one
+            // that was already there.
+            //
+            // `permissive` leaves `write` alone, because its whole purpose is
+            // to let a panic reach the standard error the child inherited and
+            // so tell a crash from a filter violation.
+            out = out ++ switch (self) {
+                .strict => &[_]Rule{.{ .sys = .write, .fd = reply_fd }},
+                .permissive => &[_]Rule{.{ .sys = .write }},
+            };
+            return out;
+        }
+    }
+
+    /// The calls this profile permits with no condition attached, in the
+    /// order the filter tests them.
     pub fn syscalls(comptime self: Profile) []const linux.SYS {
         const strict_set = &[_]linux.SYS{
-            // Writing the reply to the pipe, which is the only thing the
-            // child has to say.
-            .write,
             // Leaving, both spellings: `exit_group` is what a Zig program
             // exits with, and `exit` is what a bare thread would.
             .exit_group,
@@ -154,6 +185,40 @@ pub const Profile = enum {
                 "restart_syscall",
             }),
         };
+    }
+};
+
+/// The descriptor a child writes its reply to.
+///
+/// Fixed, and that is the point. A seccomp filter is built at compile time and
+/// compares constants, so the descriptor it is to permit has to be one -- and
+/// the number `pipe2` hands out is not. The child therefore moves the reply
+/// pipe onto this number with `dup3` before installing the filter, which it
+/// may do freely because at that moment there is no filter to stop it.
+///
+/// Three, because nought, one and two are the standard streams and the child
+/// inherits them. z2dimg, which this module comes from, uses four: it has a
+/// second pipe for acknowledging streamed frames, and that one takes three.
+/// Nothing here streams, so nothing here needs it.
+pub const reply_fd: u32 = 3;
+
+/// One entry in a filter: a call, and optionally the only value its first
+/// argument may hold.
+pub const Rule = struct {
+    sys: linux.SYS,
+
+    /// The value `args[0]` must equal, or null to permit any arguments.
+    ///
+    /// Only a descriptor is worth putting here, and that is a limitation of
+    /// seccomp rather than of this type: a filter sees arguments as integers
+    /// and cannot follow a pointer, so it can say "no `openat` at all" and
+    /// never "no `openat` outside this directory". A descriptor *is* an
+    /// integer, which makes it the one argument a filter can usefully police.
+    fd: ?u32 = null,
+
+    /// How many instructions this rule compiles to.
+    fn len(self: Rule) usize {
+        return if (self.fd == null) 1 else 6;
     }
 };
 
@@ -218,12 +283,21 @@ pub const supported = builtin.os.tag == .linux and @bitSizeOf(usize) == 64 and a
 /// allocated from.
 pub fn build(comptime profile: Profile) [programLen(profile)]Insn {
     comptime {
-        const allowed = profile.syscalls();
-        const n = allowed.len;
+        const rules = profile.rules();
         const arch_check_len = 2;
         const x32_check_len: usize = if (builtin.cpu.arch == .x86_64) 2 else 1;
+        var body_len: usize = 0;
+        for (rules) |rule| body_len += rule.len();
         // Where the two `ret` instructions end up.
-        const kill_at = arch_check_len + x32_check_len + n;
+        const kill_at = arch_check_len + x32_check_len + body_len;
+
+        // Which half of an eight-byte argument holds the low word. A filter
+        // loads four bytes at a time, and which four are the ones that matter
+        // is the target's business.
+        const args_at = @offsetOf(SECCOMP.data, "arg0");
+        const little = builtin.cpu.arch.endian() == .little;
+        const arg0_lo: u32 = args_at + (if (little) 0 else 4);
+        const arg0_hi: u32 = args_at + (if (little) 4 else 0);
 
         var insns: [programLen(profile)]Insn = undefined;
         var i: usize = 0;
@@ -243,9 +317,36 @@ pub fn build(comptime profile: Profile) [programLen(profile)]Insn {
             i += 1;
         }
 
-        for (allowed) |sys| {
-            // A match jumps to the `ret #ALLOW` that follows the kill.
-            insns[i] = jeq(@intFromEnum(sys), @intCast(kill_at + 1 - (i + 1)), 0);
+        for (rules) |rule| {
+            const fd = rule.fd orelse {
+                // A match jumps to the `ret #ALLOW` that follows the kill.
+                insns[i] = jeq(@intFromEnum(rule.sys), @intCast(kill_at + 1 - (i + 1)), 0);
+                i += 1;
+                continue;
+            };
+
+            // A rule with a condition. The call number is loaded again first,
+            // because the instructions below leave an argument in the
+            // accumulator and every rule has to start from the same place --
+            // which also means one of these may sit anywhere in the chain
+            // rather than only at the end of it.
+            insns[i] = ld(@offsetOf(SECCOMP.data, "nr"));
+            i += 1;
+            // Not this call: step over the four instructions that test it.
+            insns[i] = jeq(@intFromEnum(rule.sys), 0, 4);
+            i += 1;
+            // The top half of the argument has to be zero. The kernel narrows
+            // a descriptor to `unsigned int` and would ignore anything up
+            // there, but a filter that looked at half a number and permitted
+            // the call would be one whose reasoning did not survive being
+            // written down.
+            insns[i] = ld(arg0_hi);
+            i += 1;
+            insns[i] = jeq(0, 0, @intCast(kill_at - (i + 1)));
+            i += 1;
+            insns[i] = ld(arg0_lo);
+            i += 1;
+            insns[i] = jeq(fd, @intCast(kill_at + 1 - (i + 1)), @intCast(kill_at - (i + 1)));
             i += 1;
         }
 
@@ -262,8 +363,12 @@ pub fn build(comptime profile: Profile) [programLen(profile)]Insn {
 /// How many instructions `build` produces, which the return type needs before
 /// the body has run.
 pub fn programLen(comptime profile: Profile) usize {
-    const x32 = if (builtin.cpu.arch == .x86_64) @as(usize, 1) else 0;
-    return 2 + 1 + x32 + profile.syscalls().len + 2;
+    comptime {
+        const x32 = if (builtin.cpu.arch == .x86_64) @as(usize, 1) else 0;
+        var body: usize = 0;
+        for (profile.rules()) |rule| body += rule.len();
+        return 2 + 1 + x32 + body + 2;
+    }
 }
 
 /// `ld [k]`: a word-sized absolute load out of `struct seccomp_data`, which is
@@ -360,17 +465,51 @@ test "every jump lands on a verdict and never off the end" {
     }
 }
 
-test "the strict profile allows only what a pure decoder needs" {
-    const allowed = comptime Profile.strict.syscalls();
+test "the strict profile allows only what a pure renderer needs" {
+    const allowed = comptime Profile.strict.rules();
     try testing.expectEqual(@as(usize, 4), allowed.len);
-    for (allowed) |sys| switch (sys) {
-        .write, .exit_group, .exit, .rt_sigreturn => {},
+    for (allowed) |rule| switch (rule.sys) {
+        // And `write` only down the reply pipe. The child inherits every
+        // descriptor the parent had open, so a renderer that cannot open a
+        // socket can still write to one that was already there -- which is
+        // the hole this closes.
+        .write => try testing.expectEqual(@as(?u32, reply_fd), rule.fd),
+        .exit_group, .exit, .rt_sigreturn => try testing.expectEqual(@as(?u32, null), rule.fd),
         // Anything else would need justifying in the doc comment above, and
         // this is where that gets noticed.
         else => return error.UnexpectedSyscallInStrictProfile,
     };
 }
 
+test "only the permissive profile lets a child write anywhere" {
+    // The panic message goes to the standard error the child inherited, which
+    // is what tells a crash from a filter violation -- and is exactly the
+    // freedom the strict profile must not have.
+    for (comptime Profile.strict.rules()) |rule| {
+        if (rule.sys == .write) try testing.expectEqual(@as(?u32, reply_fd), rule.fd);
+    }
+    var permissive_write_is_free = false;
+    for (comptime Profile.permissive.rules()) |rule| {
+        if (rule.sys == .write and rule.fd == null) permissive_write_is_free = true;
+    }
+    try testing.expect(permissive_write_is_free);
+}
+
+test "a rule with a descriptor compiles to a longer filter" {
+    // Six instructions rather than one, and the filter still ends on a
+    // verdict: the generic checks below walk every jump, so this only has to
+    // pin the size down so that a change to the encoding is noticed here.
+    const plain: Rule = .{ .sys = .exit_group };
+    const conditional: Rule = .{ .sys = .write, .fd = reply_fd };
+    try testing.expectEqual(@as(usize, 1), plain.len());
+    try testing.expectEqual(@as(usize, 6), conditional.len());
+    // Both are comptime-only: their bodies are a `comptime` block, so a
+    // runtime call cannot take the value back out.
+    try testing.expectEqual(
+        comptime programLen(.strict),
+        (comptime build(.strict)).len,
+    );
+}
 test "the permissive profile is a superset of the strict one" {
     const strict = comptime Profile.strict.syscalls();
     const permissive = comptime Profile.permissive.syscalls();

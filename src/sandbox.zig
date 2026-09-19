@@ -94,6 +94,31 @@
 //! It does not stop a renderer reading the rest of the shared mapping, which
 //! holds this render's own working memory and nothing else.
 //!
+//! ## What the child is stripped of before the filter goes on
+//!
+//! A forked child keeps everything the parent had, because `CLOEXEC` means
+//! nothing to a process that never execs. Four things are taken away first,
+//! and none of them needs permitting because all of them happen before the
+//! filter exists:
+//!
+//! **Its inherited descriptors.** A renderer cannot *open* a socket under any
+//! profile here, but `write` is a call it has, and a subverted one could put
+//! attacker-controlled bytes into a connection the parent already had. The
+//! reply pipe is moved to a fixed number, everything above it is closed, and
+//! `strict` then permits `write` on that descriptor and no other. The two
+//! halves are what make each other worth having: closing takes away what could
+//! be written to, and the filter takes away the ability to name anything else.
+//!
+//! **Processor time**, through `RLIMIT_CPU`. A renderer stuck in a loop is
+//! killed by the kernel, so the parent needs no clock of its own.
+//!
+//! **Core dumps**, through `RLIMIT_CORE`, so that a crash does not write the
+//! shared mapping out to disk.
+//!
+//! **Dumpability**, through `PR_SET_DUMPABLE`, which also stops another
+//! process of the same user attaching with `ptrace` and reading the mapping
+//! out from under the parent.
+//!
 //! It is not a replacement for the limits. A child cannot exhaust the parent's
 //! memory, but it can touch every page of the mapping, so the mapping is sized
 //! by `Limits` like everything else here.
@@ -205,6 +230,16 @@ pub const Options = struct {
     /// Address space rather than memory, like the rest of the mapping. Too
     /// small shows up as `error.OutOfMemory` from the render.
     working_bytes: usize = 32 << 20,
+
+    /// A ceiling on the processor time the child may use, in seconds, or null
+    /// for none.
+    ///
+    /// The answer to a renderer that has stopped making progress: the kernel
+    /// kills it, so the parent needs no timeout of its own. A wall rather than
+    /// a budget -- sixty seconds is far above what any render inside the
+    /// default `Limits.max_pixels` costs -- but a caller who raises that limit
+    /// a long way should raise this with it.
+    cpu_seconds: ?u32 = 60,
 };
 
 /// A rendered picture living in memory the sandbox set up.
@@ -371,6 +406,20 @@ fn childMain(write_fd: i32, arena: []u8, input: []const u8, opts: Options) noret
     };
 
     result: {
+        // The reply pipe onto the number the filter knows, and then every
+        // other descriptor the child inherited shut. Both before the filter
+        // exists, which is why neither needs permitting.
+        const parked = parkDescriptor(write_fd) orelse {
+            reply.status = @intFromEnum(WireError.sandbox);
+            break :result;
+        };
+        if (!claimDescriptor(parked, seccomp.reply_fd)) {
+            reply.status = @intFromEnum(WireError.sandbox);
+            break :result;
+        }
+        sealDescriptors();
+        hardenChild(opts);
+
         // The point of no return: after this the process can report a result
         // and stop, and that is all.
         switch (opts.profile) {
@@ -400,7 +449,7 @@ fn childMain(write_fd: i32, arena: []u8, input: []const u8, opts: Options) noret
         reply.len = bytes.len;
     }
 
-    writeAll(write_fd, mem.asBytes(&reply));
+    writeAll(@intCast(seccomp.reply_fd), mem.asBytes(&reply));
     _ = linux.exit_group(0);
     unreachable;
 }
@@ -414,6 +463,83 @@ fn surfaceBytes(sfc: z2d.Surface) []const u8 {
 
 /// `write` until it is all gone, which is the child's only system call in
 /// ordinary operation.
+/// The lowest descriptor number the child may close: everything at or above
+/// this is something it inherited and has no business keeping.
+const first_closable: i32 = @intCast(seccomp.reply_fd + 1);
+
+/// Moves a descriptor out of the way, to a number at or above
+/// `first_closable`, so that the fixed number can be claimed without the move
+/// closing the descriptor it was going to use.
+///
+/// One pipe needs no ordering care, but the parking step is what makes the
+/// case safe where the pipe is already sitting on the number it is about to
+/// claim: `dup3` refuses a descriptor onto itself.
+fn parkDescriptor(fd: i32) ?i32 {
+    if (fd >= first_closable) return fd;
+    const rc = linux.fcntl(fd, linux.F.DUPFD, @intCast(first_closable));
+    if (linux.errno(rc) != .SUCCESS) return null;
+    return @intCast(rc);
+}
+
+/// Claims `want` for `fd`, which must already have been parked out of range.
+fn claimDescriptor(fd: i32, want: u32) bool {
+    return linux.errno(linux.dup3(fd, @intCast(want), 0)) == .SUCCESS;
+}
+
+/// Closes every descriptor the child inherited and does not need.
+///
+/// The child is forked and never exec'd, so `CLOEXEC` does nothing for it: it
+/// starts life holding everything the parent had open. It cannot *open* a
+/// socket or a file -- no profile permits that -- but `write` is a call it
+/// has, and a renderer subverted into writing attacker-controlled bytes into a
+/// connection the parent already had is a containment failure in the thing
+/// whose only job is containment.
+///
+/// Called before the filter is installed, so it needs no permission of its
+/// own, and paired with pinning `write` to one descriptor afterwards: this
+/// takes away what could be written to, and the filter takes away the ability
+/// to name anything else.
+///
+/// Best effort on a kernel without `close_range`, which is Linux 5.9. The
+/// fallback is bounded rather than running to the descriptor limit, which may
+/// be millions.
+fn sealDescriptors() void {
+    const rc = linux.close_range(first_closable, math.maxInt(i32), .{
+        .UNSHARE = false,
+        .CLOEXEC = false,
+    });
+    if (linux.errno(rc) == .SUCCESS) return;
+    var fd: i32 = first_closable;
+    while (fd < 4096) : (fd += 1) _ = linux.close(fd);
+}
+
+/// The limits and flags a child is given before its filter goes on.
+///
+/// None of these needs permitting, because all of them happen first, and none
+/// of them can be undone afterwards -- `RLIMIT` hard limits only ever go down
+/// for a process without privilege, and `PR_SET_DUMPABLE` is not a thing a
+/// filtered process can call back.
+fn hardenChild(opts: Options) void {
+    // A crash must not write the shared mapping out to disk.
+    const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
+    _ = linux.setrlimit(.CORE, &no_core);
+
+    // A renderer that has stopped making progress is killed by the kernel
+    // rather than waited for by the parent. This is a wall, not a budget: it
+    // is far above what any render inside the default pixel limit costs, and a
+    // caller who raises `Limits.max_pixels` a long way should raise this with
+    // it.
+    if (opts.cpu_seconds) |seconds| {
+        const cpu: linux.rlimit = .{ .cur = seconds, .max = seconds };
+        _ = linux.setrlimit(.CPU, &cpu);
+    }
+
+    // Not dumpable: no core file, and no ptrace attach from another process of
+    // the same user, which would otherwise be able to read the mapping out
+    // from under the parent.
+    _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
+}
+
 fn writeAll(fd: i32, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
@@ -943,4 +1069,146 @@ fn inSet(comptime Set: type, comptime err: anyerror) bool {
         }
         return false;
     }
+}
+
+test "a strict child may write down the reply pipe and nowhere else" {
+    if (!available) return error.SkipZigTest;
+
+    // The hole this closes: a forked child keeps every descriptor the parent
+    // had open, because `CLOEXEC` means nothing to a process that never
+    // execs. A renderer cannot *open* a socket under any profile here, but
+    // `write` is a call it has -- so without this it could put
+    // attacker-controlled bytes into a connection the parent already had.
+    //
+    // Two children, differing only in which descriptor they write to.
+    for ([_]enum { reply, other }{ .reply, .other }) |which| {
+        var fds: [2]i32 = undefined;
+        if (linux.errno(linux.pipe2(&fds, .{})) != .SUCCESS) return error.SkipZigTest;
+        defer {
+            _ = linux.close(fds[0]);
+            _ = linux.close(fds[1]);
+        }
+
+        const fork_rc = linux.fork();
+        if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
+        const pid: i32 = @intCast(fork_rc);
+        if (pid == 0) {
+            const parked = parkDescriptor(fds[1]) orelse {
+                _ = linux.exit_group(9);
+                unreachable;
+            };
+            if (!claimDescriptor(parked, seccomp.reply_fd)) {
+                _ = linux.exit_group(9);
+                unreachable;
+            }
+            // Deliberately *not* sealed: the point is that the filter refuses
+            // the write even when the descriptor is still there to write to.
+            seccomp.install(.strict) catch {
+                _ = linux.exit_group(9);
+                unreachable;
+            };
+            const fd: i32 = switch (which) {
+                .reply => @intCast(seccomp.reply_fd),
+                // The same pipe, by the number it was opened as. Nothing
+                // about the object changes; only the integer naming it.
+                .other => parked,
+            };
+            _ = linux.write(fd, "x", 1);
+            _ = linux.exit_group(0);
+            unreachable;
+        }
+
+        const status = try waitFor(pid);
+        if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+        switch (which) {
+            .reply => {
+                try testing.expect(linux.W.IFEXITED(status));
+                try testing.expectEqual(@as(u32, 0), linux.W.EXITSTATUS(status));
+            },
+            .other => {
+                try testing.expect(linux.W.IFSIGNALED(status));
+                try testing.expectEqual(linux.SIG.SYS, linux.W.TERMSIG(status));
+            },
+        }
+    }
+}
+
+test "a child keeps no descriptor it was not given" {
+    if (!available) return error.SkipZigTest;
+
+    // `sealDescriptors` closes what the fork handed over. Proved by opening a
+    // pipe the child has no business keeping, sealing, and having the child
+    // report whether it is still there -- through the one descriptor it is
+    // allowed to keep.
+    var carrier: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&carrier, .{})) != .SUCCESS) return error.SkipZigTest;
+    defer {
+        _ = linux.close(carrier[0]);
+        _ = linux.close(carrier[1]);
+    }
+    var stray: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&stray, .{})) != .SUCCESS) return error.SkipZigTest;
+    defer {
+        _ = linux.close(stray[0]);
+        _ = linux.close(stray[1]);
+    }
+
+    const fork_rc = linux.fork();
+    if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
+    const pid: i32 = @intCast(fork_rc);
+    if (pid == 0) {
+        const parked = parkDescriptor(carrier[1]) orelse {
+            _ = linux.exit_group(9);
+            unreachable;
+        };
+        if (!claimDescriptor(parked, seccomp.reply_fd)) {
+            _ = linux.exit_group(9);
+            unreachable;
+        }
+        sealDescriptors();
+        // No filter here: what is being tested is the closing, and a filter
+        // would only make a failure harder to tell apart from a refusal.
+        var answer: [1]u8 = .{if (linux.errno(linux.write(stray[1], "x", 1)) == .SUCCESS) 1 else 0};
+        _ = linux.write(@intCast(seccomp.reply_fd), &answer, 1);
+        _ = linux.exit_group(0);
+        unreachable;
+    }
+
+    const status = try waitFor(pid);
+    if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+    var answer: [1]u8 = undefined;
+    const rc = linux.read(carrier[0], &answer, 1);
+    try testing.expectEqual(@as(usize, 1), rc);
+    // Zero: the stray descriptor was gone by the time the child tried it.
+    try testing.expectEqual(@as(u8, 0), answer[0]);
+}
+
+test "a child that stops making progress is killed by the kernel" {
+    if (!available) return error.SkipZigTest;
+
+    // The answer to a renderer stuck in a loop. Without it the parent waits
+    // for a child that is never coming back, and a timeout in the parent
+    // would be a second clock to get wrong; with it the kernel does the
+    // killing and the parent's ordinary wait returns.
+    //
+    // One second rather than the default sixty, so the test costs a second
+    // rather than a minute.
+    const fork_rc = linux.fork();
+    if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
+    const pid: i32 = @intCast(fork_rc);
+    if (pid == 0) {
+        hardenChild(.{ .cpu_seconds = 1 });
+        // Spin. `@breakpoint` is not it and a sleep would not do: this has to
+        // consume processor time, which is what the limit measures.
+        var x: u64 = 0;
+        while (true) : (x +%= 1) std.mem.doNotOptimizeAway(x);
+    }
+
+    const status = try waitFor(pid);
+    try testing.expect(linux.W.IFSIGNALED(status));
+    // `SIGXCPU` at the soft limit, whose default disposition is to end the
+    // process, or `SIGKILL` at the hard one. Which arrives first is the
+    // kernel's business; that one of them does is the claim.
+    const sig = linux.W.TERMSIG(status);
+    try testing.expect(sig == linux.SIG.XCPU or sig == linux.SIG.KILL);
 }

@@ -1245,7 +1245,7 @@ fn referenceAttribute(
     const raw = doc.tree.attributeValue(node, "", name) orelse return null;
     const t = std.mem.trim(u8, raw, " \t\r\n");
     if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
-    const open = std.mem.indexOf(u8, t, "#") orelse return error.BadReference;
+    const open = std.mem.find(u8, t, "#") orelse return error.BadReference;
     if (!std.mem.startsWith(u8, t, "url(")) return error.BadReference;
     const close = std.mem.lastIndexOfScalar(u8, t, ')') orelse return error.BadReference;
     if (close <= open + 1) return error.BadReference;

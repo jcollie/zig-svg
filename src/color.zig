@@ -119,7 +119,7 @@ pub fn parseColor(text: []const u8) Error!Color {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return error.BadColor;
     if (t[0] == '#') return parseHex(t[1..]);
-    if (std.mem.indexOfScalar(u8, t, '(') != null) return parseFunctional(t);
+    if (std.mem.findScalar(u8, t, '(') != null) return parseFunctional(t);
     return parseName(t) orelse error.BadColor;
 }
 
@@ -168,7 +168,7 @@ fn byte(pair: [2]u8) u8 {
 /// `rgb(…)` and `rgba(…)`, with the components separated by commas or by
 /// spaces, and the alpha by a comma or a slash.
 fn parseFunctional(text: []const u8) Error!Color {
-    const open = std.mem.indexOfScalar(u8, text, '(').?;
+    const open = std.mem.findScalar(u8, text, '(').?;
     if (text[text.len - 1] != ')') return error.BadColor;
     const name = std.mem.trim(u8, text[0..open], " \t\r\n");
     const is_rgba = ascii.eqlIgnoreCase(name, "rgba");

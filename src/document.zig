@@ -71,6 +71,7 @@ const color = @import("color.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const shapes = @import("shapes.zig");
+const css = @import("css.zig");
 const style = @import("style.zig");
 const transform = @import("transform.zig");
 
@@ -145,7 +146,7 @@ pub const Error = error{
     /// `<tspan>`. Each changes where the glyphs go, so ignoring one draws text
     /// that is in the wrong place and looks deliberate.
     UnsupportedTextLayout,
-} || transform.Error || color.Error || length.Error || ztree.ParseError;
+} || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
 ///
@@ -485,8 +486,13 @@ pub const Document = struct {
     /// What the root `<svg>` named, which every shape inherits unless a `<g>`
     /// or the shape itself overrides it.
     root: Inherited,
+    /// Every `<style>` element of the document, parsed into one stylesheet.
+    /// Empty when the document has none, which is the usual case and costs
+    /// nothing to ask.
+    stylesheet: css.Stylesheet,
 
     pub fn deinit(self: *Document) void {
+        self.stylesheet.deinit();
         self.tree.destroy();
         self.* = undefined;
     }
@@ -1132,10 +1138,7 @@ pub const PathIterator = struct {
         node: ztree.NodeId,
         name: []const u8,
     ) ?[]const u8 {
-        if (self.attr(node, "style")) |block| {
-            if (style.property(block, name)) |value| return value;
-        }
-        return self.attr(node, name);
+        return css.property(&self.doc.stylesheet, self.doc.tree, node, name);
     }
 
     fn lengthOf(
@@ -1336,8 +1339,10 @@ fn allWhitespace(raw: []const u8) bool {
 ///
 /// Two kinds, and they are passed over for two different reasons.
 ///
-/// `<title>`, `<desc>` and `<metadata>` carry no geometry at all. `<defs>`
-/// carries plenty and says not to draw it, which is what `<defs>` is for.
+/// `<title>`, `<desc>` and `<metadata>` carry no geometry at all, and neither
+/// does `<style>`, whose text was read into the document's stylesheet before
+/// the walk began. `<defs>` carries plenty and says not to draw it, which is
+/// what `<defs>` is for.
 ///
 /// The rest are *definitions*: a gradient, a clip path, a mask, a pattern, a
 /// symbol, a marker, a filter. §5.5 says none of them is rendered directly --
@@ -1350,9 +1355,9 @@ fn allWhitespace(raw: []const u8) bool {
 /// finds it.
 fn isIgnorable(name: []const u8) bool {
     const names = [_][]const u8{
-        "title",          "desc",           "metadata", "defs",
-        "linearGradient", "radialGradient", "pattern",  "clipPath",
-        "mask",           "symbol",         "marker",   "filter",
+        "title",          "desc",           "metadata", "defs",     "style",
+        "linearGradient", "radialGradient", "pattern",  "clipPath", "mask",
+        "symbol",         "marker",         "filter",
     };
     for (names) |n| {
         if (std.mem.eql(u8, name, n)) return true;
@@ -1484,13 +1489,18 @@ pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
         .preserve_aspect_ratio = .meet_centred,
         .shape_count = 0,
         .root = .{},
+        .stylesheet = .{},
     };
+    errdefer doc.stylesheet.deinit();
 
     const root = tree.documentElement() orelse return error.NotAnSvg;
     if (!std.mem.eql(u8, tree.node(root).name.local, "svg")) return error.NotAnSvg;
     doc.root_node = root;
 
     try indexIds(&doc);
+    // Before anything reads a property, because from here on every one of them
+    // goes through the cascade.
+    try readStylesheet(gpa, &doc);
     try readRoot(&doc, root);
 
     var it = doc.paths();
@@ -1523,6 +1533,54 @@ fn indexIds(doc: *Document) Error!void {
         const slot = try doc.ids.getOrPut(arena, value);
         if (!slot.found_existing) slot.value_ptr.* = @intCast(id);
     }
+}
+
+/// Parse every `<style>` element of the document into one stylesheet.
+///
+/// §6.2 makes them one sheet in document order, which is what breaks a
+/// specificity tie between two of them. The text of each is concatenated from
+/// its children, so a `<style>` written as CDATA -- which is how a document
+/// with a `>` in a selector has to write it -- reads the same as one written
+/// as plain text.
+fn readStylesheet(gpa: std.mem.Allocator, doc: *Document) Error!void {
+    const arena = doc.tree.alloc();
+    var sources: std.ArrayList([]const u8) = .empty;
+    defer sources.deinit(gpa);
+
+    for (doc.tree.nodes.items, 0..) |node, id| {
+        if (node.kind != .element) continue;
+        if (!std.mem.eql(u8, node.name.local, "style")) continue;
+        const elem: ztree.NodeId = @intCast(id);
+        if (!try isStyleSheet(doc.tree, elem)) continue;
+        // Into the tree's arena, so the selectors and blocks the parser slices
+        // out of it live exactly as long as the tree does.
+        const text = try doc.tree.stringValue(arena, elem);
+        if (text.len == 0) continue;
+        try sources.append(gpa, text);
+    }
+    if (sources.items.len == 0) return;
+    doc.stylesheet = try css.parse(gpa, sources.items);
+}
+
+/// Whether a `<style>` element holds CSS this should read.
+///
+/// `type` says what the content is, and a type that is not CSS means the
+/// element is not a stylesheet at all -- there is nothing being dropped by
+/// passing over it, and resvg passes over it too. `media` is the opposite
+/// case: it says the rules apply somewhere, and skipping them would lose rules
+/// the document meant, so anything but a medium this renders for is refused.
+fn isStyleSheet(tree: *const ztree.Document, node: ztree.NodeId) Error!bool {
+    if (tree.attributeValue(node, "", "type")) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len != 0 and !std.mem.eql(u8, t, "text/css")) return false;
+    }
+    if (tree.attributeValue(node, "", "media")) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len != 0 and !std.mem.eql(u8, t, "all") and !std.mem.eql(u8, t, "screen")) {
+            return error.UnsupportedAtRule;
+        }
+    }
+    return true;
 }
 
 /// The root `<svg>`'s own attributes.

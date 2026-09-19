@@ -78,6 +78,8 @@ pub const image = @import("image.zig");
 /// The `style` attribute of SVG 1.1 §6.3: one CSS declaration block, which
 /// outranks the presentation attributes beside it.
 pub const style = @import("style.zig");
+/// The `<style>` element, its selectors, and §6.4's cascade.
+pub const css = @import("css.zig");
 /// The lengths an attribute is written in, and their units.
 pub const length = @import("length.zig");
 /// The path data mini-language of SVG 1.1 §8.3.
@@ -132,6 +134,7 @@ test {
     _ = filter;
     _ = image;
     _ = style;
+    _ = css;
     _ = length;
     _ = path;
     _ = arc;

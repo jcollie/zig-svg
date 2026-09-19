@@ -23,6 +23,7 @@ const z2d = @import("z2d");
 const ztree = @import("ztree");
 
 const color = @import("color.zig");
+const css = @import("css.zig");
 const document = @import("document.zig");
 const filter = @import("filter.zig");
 const gradient = @import("gradient.zig");
@@ -746,7 +747,7 @@ fn buildFilter(
 
     var spec: filter.Filter = blk: {
         const node = doc.ids.get(name) orelse break :blk .{};
-        break :blk try filter.read(gpa, doc.tree, &doc.ids, node, doc.viewport()) orelse .{};
+        break :blk try filter.read(gpa, doc.tree, &doc.ids, &doc.stylesheet, node, doc.viewport()) orelse .{};
     };
     errdefer spec.deinit(gpa);
 
@@ -1784,13 +1785,13 @@ const MaskType = enum {
     /// spelling it does not know rather than falling back to luminance, which
     /// would draw a mask the document did not ask for.
     ///
-    /// Only the presentation attribute is read. The `style="mask-type:alpha"`
-    /// spelling needs a CSS parser, which this library does not have and which
-    /// the capability table says so about.
     alpha,
 
     fn of(doc: *const document.Document, node: ztree.NodeId) Error!MaskType {
-        const raw = doc.tree.attributeValue(node, "", "mask-type") orelse return .luminance;
+        // A presentation property like any other, so it comes through the
+        // cascade: `style="mask-type:alpha"` and a `mask-type` rule both work.
+        const raw = css.property(&doc.stylesheet, doc.tree, node, "mask-type") orelse
+            return .luminance;
         const t = std.mem.trim(u8, raw, " \t\r\n");
         if (t.len == 0 or std.mem.eql(u8, t, "luminance")) return .luminance;
         if (std.mem.eql(u8, t, "alpha")) return .alpha;
@@ -2845,6 +2846,7 @@ fn makeSource(
     const spec = (try gradient.read(
         doc.tree,
         &doc.ids,
+        &doc.stylesheet,
         node,
         doc.viewport(),
         shape.current_color orelse callerColor(opts),

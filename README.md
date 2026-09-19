@@ -238,9 +238,9 @@ plainly — `#808080` masks to an alpha of 128 where a linearized one would give
 `mask-type="alpha"` asks for the content's opacity instead of its brightness,
 and is implemented because resvg implements it; a spelling that is neither is
 refused rather than falling back to luminance, which would draw a mask the
-document did not ask for. Only the presentation attribute is read — the
-`style="mask-type:alpha"` spelling needs a CSS parser, which this does not
-have.
+document did not ask for. It is a presentation property like any other, so it
+comes through the cascade: the attribute, `style="mask-type:alpha"`, and a
+`mask-type` declaration in a `<style>` rule all reach it.
 
 `maskUnits` and `maskContentUnits` are both implemented, as is
 `clipPathUnits="objectBoundingBox"`, and all three needed the same thing: the
@@ -316,12 +316,37 @@ a renderer that skips it renders a large part of the world's SVG in the wrong
 colours. That is what it did here until it was tested, and it did it *silently*
 — which is the failure this library is meant not to have.
 
-This is not CSS. One element, one declaration block, the properties it names:
-no selectors, no `<style>` element, no cascade. Values go to the same parsers
-the attributes use, so `style="fill:wobble"` is refused exactly as
-`fill="wobble"` is. A malformed declaration is skipped and the ones after it
-are still read, which is CSS 2.1 §4.2 and what browsers do; resvg stops at the
-first one, so `style="nonsense;fill:blue"` is blue here and black there.
+Values go to the same parsers the attributes use, so `style="fill:wobble"` is
+refused exactly as `fill="wobble"` is. A malformed declaration is skipped and
+the ones after it are still read, which is CSS 2.1 §4.2 and what browsers do;
+resvg stops at the first one, so `style="nonsense;fill:blue"` is blue here and
+black there.
+
+**A `<style>` element is the rest of §6**, and the selectors it needs are CSS
+2's: `*`, a type name, `.class`, `#id`, `[attr]` with the three CSS 2
+operators, in any combination; the four combinators ` `, `>`, `+` and `~`; and
+lists of those. A type name is matched case-sensitively, because this is XML
+and `RECT` is not `rect`. Every `<style>` in the document is one sheet in
+document order, which is what breaks a tie between two of them, and a
+`<style>` whose `type` is not CSS is passed over because its content is not a
+stylesheet at all.
+
+The cascade is CSS 2.1 §6.4.3 with SVG 1.1 §6.4's addition, and written out
+for the one origin a standalone SVG has it comes to five bands: an
+`!important` `style` attribute, an `!important` rule, a `style` attribute, a
+rule, and last of all a presentation attribute. Specificity orders within a
+band and source order breaks the remaining ties. That order lives in exactly
+one function, `css.property`, and **everything** that reads a presentation
+property goes through it — the walk, a gradient's `stop-color`, a filter
+primitive's `flood-color`, a `mask-type`. A property read any other way would
+be one the cascade silently did not reach, which is the bug `style` itself had
+here until it was implemented: `<stop style="stop-color:red">`, which is how
+Inkscape writes every gradient it saves, was being ignored.
+
+What is refused rather than skipped: at-rules, pseudo-classes, pseudo-elements,
+namespace selectors, and the CSS 3 attribute operators. `@import` could not be
+implemented here in any case — fetching a stylesheet is the I/O that being
+sans-I/O rules out, exactly as it rules out `<use xlink:href="other.svg#x">`.
 
 A **definition** is never drawn where it stands. A `<linearGradient>` or a
 `<clipPath>` written straight into the document body rather than into `<defs>`
@@ -421,7 +446,10 @@ short of the specification.
 | `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style` | yes — §6.3's declaration block, which outranks the attributes |
-| CSS: a `<style>` element, selectors, a cascade | **no** |
+| `<style>` | yes — every one of them, as one sheet in document order |
+| Selectors | `*`, type, `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`, `[attr\|=v]`; ` `, `>`, `+`, `~`; lists |
+| The cascade | yes — §6.4's five bands, specificity, source order, `!important` |
+| At-rules, pseudo-classes, namespace selectors | **no** — refused, not skipped |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -632,7 +660,12 @@ CSS colour keywords resvg knows as a grid aligned to whole pixels, so there is
 no antialiasing anywhere in it, and the two renderers agree on every pixel:
 `mean 0.000  worst 0`.
 
-Four differences are deliberate, and `src/color.zig` says why for each. This
+One selector is deliberate too: the general sibling combinator, `~`, selects
+here and does not in resvg. Like the colours below, nothing in the corpus uses
+it, because a fixture that did would be measuring resvg's gap rather than this
+code.
+
+Four differences in colour are deliberate, and `src/color.zig` says why for each. This
 library **refuses** a value it cannot read where resvg falls back to the
 initial one; and it accepts three things CSS Color 4 defines that resvg 0.48.1
 paints black — `rebeccapurple`, the slash alpha separator `rgb(255 0 0 / 0.5)`,
@@ -737,12 +770,12 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-CSS proper — a `<style>` element, selectors, a cascade — is next, and after
-that the filter primitives this does not yet have: `feColorMatrix`,
+Next are the filter primitives this does not yet have: `feColorMatrix`,
 `feComposite`, `feBlend`, `feComponentTransfer`, `feTile`, `feMorphology`,
-`feImage`, and the three that need a light model. The `spacingAndGlyphs` form
-of `lengthAdjust` is the remaining gap outside those two. Each is refused
-rather than ignored, so a document needing one says so.
+`feImage`, and the three that need a light model. Outside those, what SVG 1.1
+has that this does not is `@media`, the CSS pseudo-classes, and the
+`spacingAndGlyphs` form of `lengthAdjust`. Each is refused rather than ignored,
+so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

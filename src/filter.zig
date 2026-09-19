@@ -67,9 +67,9 @@ const ztree = @import("ztree");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
+const css = @import("css.zig");
 const document = @import("document.zig");
 const length = @import("length.zig");
-const style = @import("style.zig");
 
 pub const Error = error{
     /// A `filterUnits` or `primitiveUnits` that is neither `userSpaceOnUse`
@@ -209,6 +209,7 @@ pub fn read(
     gpa: Allocator,
     tree: *const ztree.Document,
     ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
+    sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
 ) Error!?Filter {
@@ -244,7 +245,7 @@ pub fn read(
     // has any is the one they come from.
     for (chain[0..links]) |n| {
         if (hasPrimitive(tree, n)) {
-            try readPrimitives(gpa, tree, n, viewport, &result);
+            try readPrimitives(gpa, tree, sheet, n, viewport, &result);
             break;
         }
     }
@@ -292,13 +293,14 @@ fn applyAttributes(
 fn readPrimitives(
     gpa: Allocator,
     tree: *const ztree.Document,
+    sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
     out: *Filter,
 ) Error!void {
     // `color-interpolation-filters` is inherited, so what the `<filter>`
     // itself says is the default for every primitive in it.
-    const inherited = try colorSpaceOf(tree, node) orelse ColorSpace.linear_rgb;
+    const inherited = try colorSpaceOf(tree, sheet, node) orelse ColorSpace.linear_rgb;
 
     var prims: std.ArrayList(Primitive) = .empty;
     defer prims.deinit(gpa);
@@ -334,8 +336,8 @@ fn readPrimitives(
             } };
         } else if (std.mem.eql(u8, name, "feFlood")) blk: {
             break :blk .{ .flood = .{
-                .color = try floodColor(tree, child),
-                .opacity = if (presentation(tree, child, "flood-opacity")) |raw|
+                .color = try floodColor(tree, sheet, child),
+                .opacity = if (css.property(sheet, tree, child, "flood-opacity")) |raw|
                     try color.parseOpacity(raw)
                 else
                     1.0,
@@ -357,7 +359,7 @@ fn readPrimitives(
         try prims.append(gpa, .{
             .kind = kind,
             .result = trimmedAttr(tree, child, "result"),
-            .color_space = try colorSpaceOf(tree, child) orelse inherited,
+            .color_space = try colorSpaceOf(tree, sheet, child) orelse inherited,
             .x = try coord(tree, child, "x", .x, out.primitive_units, viewport),
             .y = try coord(tree, child, "y", .y, out.primitive_units, viewport),
             .width = try coord(tree, child, "width", .x, out.primitive_units, viewport),
@@ -381,8 +383,12 @@ fn inputOf(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) In
     return .{ .named = raw };
 }
 
-fn floodColor(tree: *const ztree.Document, node: ztree.NodeId) Error!?color.Color {
-    const raw = presentation(tree, node, "flood-color") orelse return color.Color.black;
+fn floodColor(
+    tree: *const ztree.Document,
+    sheet: *const css.Stylesheet,
+    node: ztree.NodeId,
+) Error!?color.Color {
+    const raw = css.property(sheet, tree, node, "flood-color") orelse return color.Color.black;
     const t = std.mem.trim(u8, raw, " \t\r\n");
     // Resolved against the filtered element rather than against the filter,
     // which has no colour of its own.
@@ -390,8 +396,12 @@ fn floodColor(tree: *const ztree.Document, node: ztree.NodeId) Error!?color.Colo
     return try color.parseColor(t);
 }
 
-fn colorSpaceOf(tree: *const ztree.Document, node: ztree.NodeId) Error!?ColorSpace {
-    const raw = presentation(tree, node, "color-interpolation-filters") orelse return null;
+fn colorSpaceOf(
+    tree: *const ztree.Document,
+    sheet: *const css.Stylesheet,
+    node: ztree.NodeId,
+) Error!?ColorSpace {
+    const raw = css.property(sheet, tree, node, "color-interpolation-filters") orelse return null;
     const t = std.mem.trim(u8, raw, " \t\r\n");
     if (t.len == 0) return null;
     if (std.mem.eql(u8, t, "linearRGB")) return .linear_rgb;
@@ -402,20 +412,6 @@ fn colorSpaceOf(tree: *const ztree.Document, node: ztree.NodeId) Error!?ColorSpa
     if (std.mem.eql(u8, t, "auto")) return .linear_rgb;
     if (std.mem.eql(u8, t, "inherit")) return null;
     return error.BadColorInterpolation;
-}
-
-/// A presentation property: the `style` block first, then the attribute, which
-/// is §6.3's order and the same one `document.zig` applies to every other
-/// element.
-fn presentation(
-    tree: *const ztree.Document,
-    node: ztree.NodeId,
-    name: []const u8,
-) ?[]const u8 {
-    if (tree.attributeValue(node, "", "style")) |block| {
-        if (style.property(block, name)) |value| return value;
-    }
-    return tree.attributeValue(node, "", name);
 }
 
 fn attr(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) ?[]const u8 {

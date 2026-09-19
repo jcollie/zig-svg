@@ -43,6 +43,7 @@ const ztree = @import("ztree");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
+const css = @import("css.zig");
 const length = @import("length.zig");
 const transform = @import("transform.zig");
 
@@ -132,6 +133,7 @@ pub const Gradient = struct {
 pub fn read(
     tree: *const ztree.Document,
     ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
+    sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
     current_color: color.Color,
@@ -167,7 +169,7 @@ pub fn read(
     var i = links;
     while (i > 0) {
         i -= 1;
-        try applyOne(tree, chain[i], viewport, current_color, &result);
+        try applyOne(tree, sheet, chain[i], viewport, current_color, &result);
     }
     return result;
 }
@@ -191,6 +193,7 @@ const xlink_ns = "http://www.w3.org/1999/xlink";
 /// Lay one gradient of the chain over what has been gathered so far.
 fn applyOne(
     tree: *const ztree.Document,
+    sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
     current_color: color.Color,
@@ -260,7 +263,7 @@ fn applyOne(
         offset = @max(offset, highest);
         highest = offset;
 
-        var value: color.Color = if (tree.attributeValue(child, "", "stop-color")) |c|
+        var value: color.Color = if (css.property(sheet, tree, child, "stop-color")) |c|
             switch (try color.parsePaint(c)) {
                 .color => |named| named,
                 // `currentColor` here is the `color` in force, like anywhere
@@ -272,7 +275,7 @@ fn applyOne(
             }
         else
             color.Color.black;
-        if (tree.attributeValue(child, "", "stop-opacity")) |o| {
+        if (css.property(sheet, tree, child, "stop-opacity")) |o| {
             value.alpha *= try color.parseOpacity(o);
         }
 
@@ -334,9 +337,14 @@ fn readDoc(gpa: std.mem.Allocator, src: []const u8) !Read {
     return .{ .doc = doc, .ids = ids };
 }
 
+/// No document to carry one, so the tests that read a gradient out of a bare
+/// tree read it against an empty stylesheet. `document.zig`'s own tests cover
+/// a `stop-color` that comes from a rule.
+const no_stylesheet: css.Stylesheet = .{};
+
 fn gradientNamed(r: *Read, id: []const u8) !Gradient {
     const node = r.ids.get(id).?;
-    return (try read(r.doc, &r.ids, node, .{ .width = 100, .height = 100 }, .black)).?;
+    return (try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 100, .height = 100 }, .black)).?;
 }
 
 test "a linear gradient runs left to right unless told otherwise" {
@@ -472,7 +480,7 @@ test "an element that is not a gradient is not read as one" {
         const node = r.ids.get(id).?;
         try testing.expectEqual(
             @as(?Gradient, null),
-            try read(r.doc, &r.ids, node, .{ .width = 10, .height = 10 }, .black),
+            try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 10, .height = 10 }, .black),
         );
     }
 }

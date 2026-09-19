@@ -117,7 +117,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "emx0.5" ++
     "textPathstOf%" ++
     "style:;!importan" ++
-    "filterGausinBlurOfetMrgNodFlvyUS";
+    "filterGausinBlurOfetMrgNodFlvyUS" ++
+    "<style>{}#.*~|[]=:,>+/**/!important ";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -786,6 +787,31 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"1em\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\" font-size=\"2em\"><rect width=\"1\" height=\"1\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><g font-size=\"0\"><rect width=\"1em\" height=\"1\"/></g></svg>",
+    // §6's `<style>`: selectors, the cascade, and the ways a stylesheet can
+    // be malformed.
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>.a{fill:red}#b{fill:blue}*{stroke:lime}</style><rect id=\"b\" class=\"a\" width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>g rect{fill:red}g>rect{fill:blue}text+rect{fill:lime}text~rect{fill:teal}</style><g><rect width=\"8\" height=\"8\"/></g></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect[a]{fill:red}rect[a=\"b\"]{fill:blue}rect[a~=b]{fill:lime}rect[a|=b]{fill:teal}</style><rect a=\"b\" width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:red!important}</style><rect width=\"8\" height=\"8\" style=\"fill:blue\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>/* c */rect/* c */{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style><![CDATA[rect{fill:red}]]></style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:red}</style><style>rect{fill:blue}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style type=\"text/css\">rect{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style type=\"text/plain\">rect{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>stop{stop-color:red}</style><linearGradient id=\"g\"><stop offset=\"0\"/><stop offset=\"1\"/></linearGradient><rect width=\"8\" height=\"8\" fill=\"url(#g)\"/></svg>",
+    // What a stylesheet can be that is not one.
+    "<svg viewBox=\"0 0 8 8\"><style></style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:red</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect>{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect:first-child{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>@media screen{rect{fill:red}}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>@import url(x.css);</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>svg|rect{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:\"{\"}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style>rect{fill:wobble}</style><rect width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><style media=\"print\">rect{fill:red}</style><rect width=\"8\" height=\"8\"/></svg>",
     // §15's `<filter>`: the region, the primitives, and the ways a chain can
     // be wired up.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feGaussianBlur stdDeviation=\"1\"/></filter><rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",

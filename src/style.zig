@@ -31,16 +31,30 @@
 const std = @import("std");
 const testing = std.testing;
 
+/// A declaration as written: its value, and whether it carried `!important`.
+pub const Declaration = struct {
+    value: []const u8,
+    /// Which band of CSS 2.1 §6.4.3's cascade this belongs to. Meaningless
+    /// for a `style` attribute read on its own, and the whole of the ordering
+    /// once there is a stylesheet to disagree with.
+    important: bool,
+};
+
 /// The value of `name` in a declaration block, or null when it is not there.
 ///
-/// `!important` is stripped: it decides which of two declarations wins a
-/// cascade, and there is no cascade here, so by the time a value is being read
-/// it has already won.
+/// `!important` is stripped, because a value being read has already won
+/// whatever it was going to win. Use `declaration` where the cascade still has
+/// to be decided.
 pub fn property(block: []const u8, name: []const u8) ?[]const u8 {
+    return (declaration(block, name) orelse return null).value;
+}
+
+/// The value of `name` in a declaration block, with its importance.
+pub fn declaration(block: []const u8, name: []const u8) ?Declaration {
     // The *last* declaration of a name wins, which is what a cascade of one
     // block comes to -- so the whole block is read rather than stopping at the
     // first match.
-    var found: ?[]const u8 = null;
+    var found: ?Declaration = null;
     var it = std.mem.splitScalar(u8, block, ';');
     while (it.next()) |raw| {
         const decl = std.mem.trim(u8, raw, " \t\r\n");
@@ -51,11 +65,13 @@ pub fn property(block: []const u8, name: []const u8) ?[]const u8 {
         if (!std.mem.eql(u8, key, name)) continue;
 
         var value = std.mem.trim(u8, decl[colon + 1 ..], " \t\r\n");
+        var important = false;
         if (std.mem.endsWith(u8, value, "!important")) {
             value = std.mem.trim(u8, value[0 .. value.len - "!important".len], " \t\r\n");
+            important = true;
         }
         if (value.len == 0) continue;
-        found = value;
+        found = .{ .value = value, .important = important };
     }
     return found;
 }

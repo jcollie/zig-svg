@@ -769,6 +769,15 @@ pub const PathIterator = struct {
     depth: usize = 0,
     started: bool = false,
 
+    /// Whitespace across the runs of one `<text>`: which element the runs
+    /// belong to, whether any has had anything in it yet, whether the last
+    /// one ended with a space it kept, and whether whitespace has been seen
+    /// since that has not yet become one. See `shapes.Text.lead_space`.
+    ws_owner: ?ztree.NodeId = null,
+    ws_seen: bool = false,
+    ws_ended: bool = false,
+    ws_pending: bool = false,
+
     /// One open container, and where the walk has got to inside it.
     pub const Frame = struct {
         node: ztree.NodeId,
@@ -854,7 +863,7 @@ pub const PathIterator = struct {
             // own, in the order it appears among that element's `<tspan>`
             // children. The generic walk only visits *elements*, so this is
             // where text gets to be content rather than markup.
-            if (tree.node(child).kind == .text and isTextish(tree, top.node)) {
+            if (tree.node(child).kind == .text and self.carriesText()) {
                 if (try self.runFrom(child, top.*)) |item| return item;
                 continue;
             }
@@ -894,9 +903,29 @@ pub const PathIterator = struct {
             return error.UnsupportedTextLayout;
         }
         const raw = tree.node(child).value;
-        if (allWhitespace(raw)) return null;
-
         const owner = self.textOwnerOf(parent.node);
+
+        // The whitespace between runs belongs to the whole `<text>`, so it is
+        // decided here, in order, rather than run by run. A run that is only
+        // whitespace yields nothing and leaves a space owed to the next one --
+        // `a<tspan> </tspan>b` is two words.
+        if (self.ws_owner != owner) {
+            self.ws_owner = owner;
+            self.ws_seen = false;
+            self.ws_ended = false;
+            self.ws_pending = false;
+        }
+        if (allWhitespace(raw)) {
+            if (self.ws_seen) self.ws_pending = true;
+            return null;
+        }
+        const lead_space = self.ws_seen and !self.ws_ended and
+            (isXmlSpace(raw[0]) or self.ws_pending);
+        const trail_space = isXmlSpace(raw[raw.len - 1]) and self.hasLaterText(owner, child);
+        self.ws_seen = true;
+        self.ws_pending = false;
+        self.ws_ended = trail_space;
+
         const first = parent.first_run;
         // A frame is shared, so the flag has to be written back to the real
         // one rather than to the copy this was handed.
@@ -913,6 +942,8 @@ pub const PathIterator = struct {
                     .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
                     .owner = owner,
                     .starts_element = owner == parent.node and first,
+                    .lead_space = lead_space,
+                    .trail_space = trail_space,
                     .rotate = rotate,
                     .text_length = text_length,
                     .on_path = on_path,
@@ -1001,12 +1032,57 @@ pub const PathIterator = struct {
         return node;
     }
 
+    /// Whether any text that will be drawn follows `after` inside `owner`, in
+    /// document order: a trailing space is only the space between two words
+    /// when there is a word after it.
+    fn hasLaterText(self: *const PathIterator, owner: ztree.NodeId, after: ztree.NodeId) bool {
+        var passed = false;
+        return self.textAfter(owner, after, &passed);
+    }
+
+    fn textAfter(self: *const PathIterator, node: ztree.NodeId, after: ztree.NodeId, passed: *bool) bool {
+        const tree = self.doc.tree;
+        for (tree.node(node).children.items) |c| {
+            if (c == after) {
+                passed.* = true;
+                continue;
+            }
+            const n = tree.node(c);
+            switch (n.kind) {
+                .text => if (passed.* and !allWhitespace(n.value)) return true,
+                .element => {
+                    if (!(isTextish(tree, c) or localIs(tree, c, "a"))) continue;
+                    if (self.displayNone(c)) continue;
+                    if (self.textAfter(c, after, passed)) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
+    }
+
     /// Whether an element says `display: none`. The only value that matters
     /// here: every other one draws the element, and CSS has a great many of
     /// them, so none is refused.
     fn displayNone(self: *const PathIterator, node: ztree.NodeId) bool {
         const raw = self.presentation(node, "display") orelse return false;
         return std.mem.eql(u8, std.mem.trim(u8, raw, " \t\r\n"), "none");
+    }
+
+    /// Whether character data inside the innermost open element is text to
+    /// draw: it is when that element is a `<text>`, a `<tspan>` or a
+    /// `<textPath>`, and when it is an `<a>` inside one of those -- a link in
+    /// the middle of a sentence is part of the sentence.
+    fn carriesText(self: *const PathIterator) bool {
+        const tree = self.doc.tree;
+        var i = self.depth + 1;
+        while (i > 0) {
+            i -= 1;
+            const node = self.stack[i].node;
+            if (isTextish(tree, node)) return true;
+            if (!localIs(tree, node, "a")) return false;
+        }
+        return false;
     }
 
     /// An element's own `opacity`, which is not inherited.
@@ -1485,6 +1561,10 @@ fn referenceId(t: []const u8) ?[]const u8 {
 /// one.
 fn isContainer(name: []const u8) bool {
     return std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "g") or
+        // A link is a group as far as drawing goes: §17.1 gives it nothing to
+        // paint and nothing to change, and what is inside it is drawn as
+        // though it were not there.
+        std.mem.eql(u8, name, "a") or
         isTextishName(name);
 }
 
@@ -1501,6 +1581,11 @@ fn isTextishName(name: []const u8) bool {
 
 fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
     return isTextishName(tree.node(node).name.local);
+}
+
+/// XML's whitespace characters.
+fn isXmlSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
 }
 
 /// Whether a piece of character data is only the whitespace between markup.
@@ -2824,4 +2909,61 @@ test "visibility is inherited, overridable, and hides without removing" {
     try testing.expectError(error.BadVisibility, read(testing.allocator,
         \\<svg viewBox="0 0 10 10"><rect width="1" height="1" visibility="invisible"/></svg>
     ));
+}
+
+test "a link is a group, and inside text it carries the text" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <a href="https://example.com" fill="red"><rect width="1" height="1"/></a>
+        \\  <text x="1" y="5">see <a href="#x">here</a> now</text>
+        \\</svg>
+    );
+    defer doc.deinit();
+    var it = doc.paths();
+    const rect = (try it.next()).?.shape;
+    try testing.expectEqual(@as(f64, 1), rect.geometry.rect.width);
+    try testing.expect(rect.fill != null);
+    // The three runs, the middle one the link's.
+    try testing.expectEqualStrings("see ", (try it.next()).?.shape.geometry.text.utf8);
+    try testing.expectEqualStrings("here", (try it.next()).?.shape.geometry.text.utf8);
+    try testing.expectEqualStrings(" now", (try it.next()).?.shape.geometry.text.utf8);
+    try testing.expectEqual(@as(?Item, null), try it.next());
+}
+
+/// The runs of the first `<text>` in `src`, with the space each is to begin
+/// and end with.
+fn runSpaces(src: []const u8) ![8][2]bool {
+    var doc = try read(testing.allocator, src);
+    defer doc.deinit();
+    var out: [8][2]bool = undefined;
+    var it = doc.paths();
+    var i: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.geometry == .text) {
+            out[i] = .{ sh.geometry.text.lead_space, sh.geometry.text.trail_space };
+            i += 1;
+        },
+        else => {},
+    };
+    return out;
+}
+
+test "the spaces between runs belong to the whole text element" {
+    // A space at the edge of a `<tspan>` is the space between two words;
+    // only the element's first and last are dropped.
+    const a = try runSpaces("<svg viewBox=\"0 0 9 9\"><text>  a <tspan>b</tspan> c  </text></svg>");
+    try testing.expectEqual([2]bool{ false, true }, a[0]); // "a "
+    try testing.expectEqual([2]bool{ false, false }, a[1]); // "b"
+    try testing.expectEqual([2]bool{ true, false }, a[2]); // " c", last
+    // Two spaces meeting at a boundary are one.
+    const b = try runSpaces("<svg viewBox=\"0 0 9 9\"><text>a <tspan> b</tspan></text></svg>");
+    try testing.expectEqual([2]bool{ false, true }, b[0]);
+    try testing.expectEqual([2]bool{ false, false }, b[1]);
+    // A run of nothing but whitespace is still a space between words.
+    const c = try runSpaces("<svg viewBox=\"0 0 9 9\"><text>a<tspan> </tspan>b</text></svg>");
+    try testing.expectEqual([2]bool{ false, false }, c[0]);
+    try testing.expectEqual([2]bool{ true, false }, c[1]);
+    // A trailing space with only hidden text after it is the last one.
+    const d = try runSpaces("<svg viewBox=\"0 0 9 9\"><text>a <tspan display=\"none\">b</tspan></text></svg>");
+    try testing.expectEqual([2]bool{ false, false }, d[0]);
 }

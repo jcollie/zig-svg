@@ -916,6 +916,8 @@ const document_corpus = [_][]const u8{
     // are laid out and not painted.
     "<svg viewBox=\"0 0 8 8\"><g display=\"none\"><foo/><rect width=\"8\" height=\"8\"/></g><rect width=\"4\" height=\"4\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><g visibility=\"hidden\"><rect width=\"8\" height=\"8\"/><rect width=\"4\" height=\"4\" visibility=\"visible\"/></g></svg>",
+    // `<a>`, and the whitespace between runs, which belongs to the element.
+    "<svg viewBox=\"0 0 8 8\"><a href=\"#x\"><rect width=\"4\" height=\"4\"/></a><text> a <a>b</a><tspan> </tspan>c </text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

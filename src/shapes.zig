@@ -156,6 +156,19 @@ pub const Text = struct {
     /// renderer to start a fresh pen rather than carry one on.
     starts_element: bool,
 
+    /// Whether the run begins and ends with a space once its whitespace is
+    /// collapsed.
+    ///
+    /// SVG's default `xml:space` collapses the whitespace of the whole
+    /// `<text>`, not of each run: a space at the edge of a `<tspan>` or an
+    /// `<a>` is the space between two words, and only the element's first
+    /// and last are dropped. Whether a run's edge keeps its space depends on
+    /// the runs around it, which only the walk sees, so the walk decides and
+    /// says so here. Every run's inner whitespace collapses the same way
+    /// whatever these say.
+    lead_space: bool = false,
+    trail_space: bool = false,
+
     /// §10.4's `rotate`, as the document wrote it: a list of angles in
     /// degrees, one per character, the last repeating for whatever is left.
     /// Kept as text for the same reason `stroke-dasharray` is -- it is a list,

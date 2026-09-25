@@ -2567,7 +2567,7 @@ fn buildText(
     var font = try faceFor(shape, opts);
     const size = shape.font_size orelse 16;
 
-    const collapsed = try collapseWhitespace(gpa, run.utf8);
+    const collapsed = try collapseWhitespace(gpa, run.utf8, run.lead_space, run.trail_space);
     defer gpa.free(collapsed);
 
     // §10.4: `x` and `y` are absolute and start a new *chunk*; `dx` and `dy`
@@ -3076,7 +3076,7 @@ fn chunkWidth(
         const size = shape.font_size orelse 16;
         if (!(size > 0)) continue;
         var font = try faceFor(shape, opts);
-        const collapsed = try collapseWhitespace(gpa, run.utf8);
+        const collapsed = try collapseWhitespace(gpa, run.utf8, run.lead_space, run.trail_space);
         defer gpa.free(collapsed);
         total += run.dx;
         if (collapsed.len == 0) continue;
@@ -3101,22 +3101,30 @@ fn chunkWidth(
 /// `xml:space="preserve"` asks for the other treatment and is not implemented;
 /// the reader refuses nothing for it yet because the attribute is rare and its
 /// absence is the case that matters.
-fn collapseWhitespace(gpa: Allocator, raw: []const u8) Error![]u8 {
+///
+/// The edges are the whole `<text>`'s business rather than the run's, so
+/// `lead` and `trail` say whether this run begins and ends with a space --
+/// `shapes.Text.lead_space` says how the walk decides.
+fn collapseWhitespace(gpa: Allocator, raw: []const u8, lead: bool, trail: bool) Error![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(gpa);
+    if (lead) try out.append(gpa, ' ');
     var pending_space = false;
+    var any = false;
     for (raw) |c| {
         switch (c) {
             ' ', '\t', '\r', '\n' => {
-                if (out.items.len != 0) pending_space = true;
+                if (any) pending_space = true;
             },
             else => {
                 if (pending_space) try out.append(gpa, ' ');
                 pending_space = false;
+                any = true;
                 try out.append(gpa, c);
             },
         }
     }
+    if (trail and any) try out.append(gpa, ' ');
     return out.toOwnedSlice(gpa);
 }
 
@@ -4970,7 +4978,21 @@ test "whitespace in a text run is collapsed" {
         .{ .raw = "   ", .want = "" },
         .{ .raw = "one", .want = "one" },
     }) |case| {
-        const got = try collapseWhitespace(gpa, case.raw);
+        const got = try collapseWhitespace(gpa, case.raw, false, false);
+        defer gpa.free(got);
+        try testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "a run keeps the spaces at its edges it is told to" {
+    const gpa = testing.allocator;
+    for ([_]struct { raw: []const u8, lead: bool, trail: bool, want: []const u8 }{
+        .{ .raw = "  a  b  ", .lead = true, .trail = true, .want = " a b " },
+        .{ .raw = "a", .lead = true, .trail = false, .want = " a" },
+        // A trailing space needs something to trail.
+        .{ .raw = "   ", .lead = false, .trail = true, .want = "" },
+    }) |case| {
+        const got = try collapseWhitespace(gpa, case.raw, case.lead, case.trail);
         defer gpa.free(got);
         try testing.expectEqualStrings(case.want, got);
     }

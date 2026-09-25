@@ -128,6 +128,13 @@ DIVERGENCES = {
     # faint one in this one. The one place resvg is the worse picture, and so
     # the one entry with outliers to allow for. Measured at 0.972 and 1.556%.
     "image-downscale": (1.5, 0.025, "a box prefilter where resvg has none, so resvg aliases"),
+    # A `<tspan>` holding nothing but a space, between two letters. SVG 1.1
+    # §10.15's default `xml:space` collapses the characters of the whole
+    # `<text>`, and that space is one of them, so "d e" is two words -- which
+    # is what this draws and what browsers draw. resvg drops a text node that
+    # is only whitespace and draws "de". The whole of the difference is the
+    # "e" sitting one space further right. Measured at 7.187 and 3.259%.
+    "text-space-only-tspan": (8.0, 0.04, "a whitespace-only run is a space; resvg drops it"),
 }
 
 

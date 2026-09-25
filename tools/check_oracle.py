@@ -110,6 +110,12 @@ DIVERGENCES = {
     "filter-linear": (1.5, 0.0025, "blur kernel, in linearRGB"),
     "filter-srgb": (1.5, 0.0025, "blur kernel, in sRGB"),
     "filter-region": (4.0, 0.09, "region-edge clip, which this fixture exists to exercise"),
+    # A blur on a `<use>`, which is there to prove the filter reaches the
+    # group a `<use>` is drawn as; the whole of its difference is the kernel,
+    # at a `stdDeviation` of one where resvg's is most peaked. Measured at
+    # 0.375 and 0.25% -- the same `<use>` with a mask or a clip instead is
+    # exact to a level.
+    "use-filter": (0.6, 0.005, "blur kernel, on a <use>"),
     # The `<image>` fixtures, for three reasons, each measured.
     #
     # **The kernel.** A picture drawn larger than its own size is sampled

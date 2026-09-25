@@ -5436,3 +5436,15 @@ test "a region in user space defaults to percentages of the viewport" {
         try testing.expect(sfc.getPixel(4, 10).?.rgba.a > 0);
     }
 }
+
+test "a use's own opacity and clip apply to what it draws" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 20 10\"><defs><rect id=\"r\" width=\"8\" height=\"8\" fill=\"black\"/>" ++
+        "<clipPath id=\"c\"><rect width=\"4\" height=\"8\"/></clipPath></defs>" ++
+        "<use href=\"#r\" opacity=\"0.5\"/><use href=\"#r\" x=\"10\" clip-path=\"url(#c)\"/></svg>", .{ .width = 20, .height = 10 });
+    defer sfc.deinit(gpa);
+    try testing.expect(@abs(@as(i32, sfc.getPixel(4, 4).?.rgba.a) - 128) <= 1);
+    // The clip moves with the `<use>`'s `x`: the left half of the second one.
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(11, 4).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(16, 4).?.rgba.a);
+}

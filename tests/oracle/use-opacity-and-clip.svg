@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><defs><g id="pair"><rect width="8" height="8" fill="crimson"/><rect x="4" y="4" width="8" height="8" fill="steelblue"/></g><clipPath id="c"><circle cx="6" cy="6" r="5"/></clipPath></defs><use href="#pair" opacity="0.5"/><use href="#pair" x="8" y="8" clip-path="url(#c)"/></svg>

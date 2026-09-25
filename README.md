@@ -412,6 +412,7 @@ short of the specification.
 | `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
 | `<use>`, `<defs>` | yes — `href` and `xlink:href`, forward references, chains |
+| `opacity`, `clip-path`, `mask`, `filter` on a `<use>` | yes — on the group §5.6 draws it as, with its `x` and `y` |
 | `<linearGradient>`, `<radialGradient>` | yes, on `fill` and `stroke`, with `<stop>` and `href` inheritance |
 | `gradientUnits`, `gradientTransform` | yes — both unit systems |
 | `spreadMethod` | all three — `pad`, `reflect`, `repeat` |
@@ -747,7 +748,7 @@ code.
 
 Some fixtures are held to their own tolerances, named in `DIVERGENCES` at the
 top of `tools/check_oracle.py` with the reason beside each and printed as
-*diff* rather than *ok* so they stay visible. Four are `<filter>`, for two
+*diff* rather than *ok* so they stay visible. Five are `<filter>`, for two
 separate reasons.
 
 The first is the **blur kernel**. §15.17 defines `feGaussianBlur` as a Gaussian

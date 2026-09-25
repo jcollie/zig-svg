@@ -588,8 +588,23 @@ pub const Document = struct {
             .next_child = 0,
             .inherited = .{},
             .transform = ctm,
+            // A `<use>` drawn as a group is measured as one: what is inside
+            // it is what it names, not the children it does not have.
+            .only_child = if (localIs(self.tree, root, "use")) self.useTarget(root) else null,
         };
         return it;
+    }
+
+    /// What a `<use>` names, or null when it names nothing this document
+    /// has. The walk has already refused a `<use>` like that by the time
+    /// anything asks this, so null only ever means "nothing to measure".
+    fn useTarget(self: *const Document, use: ztree.NodeId) ?ztree.NodeId {
+        const raw = self.tree.attributeValue(use, "", "href") orelse
+            self.tree.attributeValue(use, xlink_ns, "href") orelse
+            return null;
+        const target = std.mem.trim(u8, raw, " \t\r\n");
+        if (target.len < 2 or target[0] != '#') return null;
+        return self.ids.get(target[1..]);
     }
 
     /// The runs of one `<text>`, for measuring.
@@ -757,6 +772,10 @@ pub const PathIterator = struct {
         first_run: bool = true,
         /// Whether that close has already been reported.
         closed: bool = false,
+        /// For a `<use>` drawn as a group, the one element inside it: what
+        /// the `<use>` names, walked as though it were the `<use>`'s only
+        /// child. Null for every other frame, whose children are its own.
+        only_child: ?ztree.NodeId = null,
     };
 
     pub fn next(self: *PathIterator) Error!?Item {
@@ -795,7 +814,10 @@ pub const PathIterator = struct {
 
         while (true) {
             const top = &self.stack[self.depth];
-            const children = tree.node(top.node).children.items;
+            const children: []const ztree.NodeId = if (top.only_child) |*only|
+                @as(*const [1]ztree.NodeId, only)
+            else
+                tree.node(top.node).children.items;
             if (top.next_child >= children.len) {
                 if (top.opens_layer and !top.closed) {
                     top.closed = true;
@@ -1026,7 +1048,34 @@ pub const PathIterator = struct {
             if (dx != 0 or dy != 0) {
                 ctm = ctm.mul(.{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = dx, .ty = dy });
             }
-            node = try self.resolve(node);
+            const target = try self.resolve(node);
+
+            // §5.6 draws a `<use>` as a `<g>` holding what it names, so its
+            // own `opacity`, `clip-path`, `mask` and `filter` belong to that
+            // group rather than being lost on the way to the target. One that
+            // asks for any of them is opened as a container whose only child
+            // is the target, and the walk carries on inside it -- which also
+            // means a chain of such `<use>` elements nests a group apiece.
+            //
+            // The group's matrix includes the `<use>`'s `x` and `y`, because
+            // the generated `<g>` carries them as a translation: a clip on a
+            // `<use>` moves with it, as resvg's does.
+            const opacity = try self.opacityOf(node);
+            const refs = try self.refsOf(node);
+            if (opacity < 1.0 or refs.any()) {
+                try self.push(node, inherited, ctm, true);
+                self.stack[self.depth].only_child = target;
+                return .{ .open_group = .{
+                    .node = node,
+                    .opacity = opacity,
+                    .clip_path = refs.clip_path,
+                    .mask = refs.mask,
+                    .filter = refs.filter,
+                    .current_color = inherited.current_color,
+                    .transform = ctm,
+                } };
+            }
+            node = target;
         }
 
         const name = tree.node(node).name.local;
@@ -2640,5 +2689,44 @@ test "a value a style names is read by the same parser an attribute uses" {
     try testing.expectError(error.BadFillRule, read(
         gpa,
         "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill-rule:sideways\"/></svg>",
+    ));
+}
+
+test "a use with its own opacity, clip, mask or filter is drawn as a group around its target" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <defs><rect id="r" width="2" height="2"/><clipPath id="c"><rect width="1" height="1"/></clipPath></defs>
+        \\  <use href="#r" x="3" opacity="0.5" clip-path="url(#c)"/>
+        \\  <use href="#r" x="6"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    var it = doc.paths();
+    // The first opens a group carrying what the `<use>` said, with its `x`
+    // in the group's matrix, around the rect; the second has nothing of its
+    // own and is the plain shape it always was.
+    const open = (try it.next()).?.open_group;
+    try testing.expectEqual(@as(f64, 0.5), open.opacity);
+    try testing.expectEqualStrings("c", open.clip_path.?);
+    try testing.expectEqual(@as(f64, 3), open.transform.tx);
+    try testing.expectEqualStrings("use", doc.tree.node(open.node).name.local);
+    const inner = (try it.next()).?.shape;
+    try testing.expectEqual(@as(f64, 3), inner.transform.tx);
+    try testing.expect((try it.next()).? == .close_group);
+    try testing.expectEqual(@as(f64, 6), (try it.next()).?.shape.transform.tx);
+    try testing.expectEqual(@as(?Item, null), try it.next());
+
+    // Measured as a group, it holds what it names.
+    var sub = doc.subtree(open.node, .identity);
+    try testing.expect((try sub.next()).? == .shape);
+    try testing.expectEqual(@as(?Item, null), try sub.next());
+}
+
+test "a use drawn as a group that contains itself is still recursion" {
+    try testing.expectError(error.RecursiveUse, read(testing.allocator,
+        \\<svg viewBox="0 0 10 10"><g id="g"><rect width="1" height="1"/><use href="#g" opacity="0.5"/></g></svg>
+    ));
+    try testing.expectError(error.RecursiveUse, read(testing.allocator,
+        \\<svg viewBox="0 0 10 10"><use id="u" href="#u" opacity="0.5"/></svg>
     ));
 }

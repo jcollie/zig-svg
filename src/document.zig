@@ -142,6 +142,9 @@ pub const Error = error{
     BadImageRendering,
     /// A `visibility` that is none of `visible`, `hidden` and `collapse`.
     BadVisibility,
+    /// A `paint-order` that is not `normal` or a list of `fill`, `stroke`
+    /// and `markers`, each at most once.
+    BadPaintOrder,
     /// A `font-weight` that is neither a number in range nor `normal` or
     /// `bold`.
     BadFontWeight,
@@ -323,6 +326,10 @@ pub const Inherited = struct {
     /// the one thing that tells it apart from `display="none"`.
     visible: ?bool = null,
 
+    /// SVG 2's `paint-order`: which of the fill, the stroke and the markers
+    /// is painted first. Inherited.
+    paint_order: ?[3]PaintLayer = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -346,8 +353,20 @@ pub const Inherited = struct {
             .text_anchor = child.text_anchor orelse self.text_anchor,
             .image_rendering = child.image_rendering orelse self.image_rendering,
             .visible = child.visible orelse self.visible,
+            .paint_order = child.paint_order orelse self.paint_order,
         };
     }
+};
+
+/// One of the three things a shape paints, in the order `paint-order` puts
+/// them.
+pub const PaintLayer = enum {
+    fill,
+    stroke,
+    markers,
+
+    /// §11.3's order, which is `paint-order: normal`.
+    pub const normal: [3]PaintLayer = .{ .fill, .stroke, .markers };
 };
 
 /// §10.9's `text-anchor`: which end of the text sits at the given point.
@@ -516,6 +535,8 @@ pub const Shape = struct {
     /// The id of a `<mask>` this shape is cut to, or null. Not inherited
     /// either, and a shape may carry both.
     mask: ?[]const u8,
+    /// The order the fill, the stroke and the markers are painted in.
+    paint_order: [3]PaintLayer,
     /// False under `visibility: hidden` or `collapse`.
     ///
     /// A hidden shape is still yielded rather than dropped, because it still
@@ -1000,6 +1021,7 @@ pub const PathIterator = struct {
                 .font_italic = parent.inherited.font_italic,
                 .text_anchor = parent.inherited.text_anchor,
                 .visible = parent.inherited.visible orelse true,
+                .paint_order = parent.inherited.paint_order orelse PaintLayer.normal,
                 // A run has no `opacity` of its own: the element it sits in does,
                 // and that element opened a layer for it if it needed one.
                 .opacity = 1.0,
@@ -1348,6 +1370,7 @@ pub const PathIterator = struct {
                 .font_italic = effective.font_italic,
                 .text_anchor = effective.text_anchor,
                 .visible = effective.visible orelse true,
+                .paint_order = effective.paint_order orelse PaintLayer.normal,
                 .opacity = try self.opacityOf(node),
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
@@ -1633,6 +1656,7 @@ pub const PathIterator = struct {
             .text_anchor = if (self.presentation(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
             .image_rendering = if (self.presentation(node, "image-rendering")) |v| try parseImageRendering(v) else null,
             .visible = if (self.presentation(node, "visibility")) |v| try parseVisibility(v) else null,
+            .paint_order = if (self.presentation(node, "paint-order")) |v| try parsePaintOrder(v) else null,
         };
     }
 
@@ -1848,6 +1872,32 @@ fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
     // leaving the attribute out already does here.
     if (std.mem.eql(u8, t, "inherit")) return error.BadTextAnchor;
     return error.BadTextAnchor;
+}
+
+/// SVG 2's `paint-order`: `normal`, or up to three of `fill`, `stroke` and
+/// `markers`, each at most once, the ones not named following in their normal
+/// order. So `stroke` alone is stroke, fill, markers.
+fn parsePaintOrder(raw: []const u8) Error![3]PaintLayer {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "normal")) return PaintLayer.normal;
+    var out: [3]PaintLayer = undefined;
+    var n: usize = 0;
+    var seen = std.EnumSet(PaintLayer).initEmpty();
+    var it = std.mem.tokenizeAny(u8, t, " \t\r\n");
+    while (it.next()) |word| {
+        const layer = std.meta.stringToEnum(PaintLayer, word) orelse return error.BadPaintOrder;
+        if (seen.contains(layer)) return error.BadPaintOrder;
+        seen.insert(layer);
+        out[n] = layer;
+        n += 1;
+    }
+    if (n == 0) return error.BadPaintOrder;
+    for (PaintLayer.normal) |layer| {
+        if (seen.contains(layer)) continue;
+        out[n] = layer;
+        n += 1;
+    }
+    return out;
 }
 
 /// §11.5's `visibility`. `collapse` is `hidden` for anything that is not a
@@ -3273,4 +3323,13 @@ test "a symbol is drawn only through a use, sized by it" {
     try testing.expectEqual(@as(f64, 30), rect.transform.ax);
     try testing.expectEqual(@as(f64, 5), rect.transform.tx);
     try testing.expectEqual(@as(?Item, null), try it.next());
+}
+
+test "paint-order names what goes first, and the rest follow in order" {
+    try testing.expectEqual(PaintLayer.normal, try parsePaintOrder("normal"));
+    try testing.expectEqual([3]PaintLayer{ .stroke, .fill, .markers }, try parsePaintOrder("stroke"));
+    try testing.expectEqual([3]PaintLayer{ .markers, .stroke, .fill }, try parsePaintOrder(" markers  stroke "));
+    try testing.expectError(error.BadPaintOrder, parsePaintOrder("stroke stroke"));
+    try testing.expectError(error.BadPaintOrder, parsePaintOrder("outline"));
+    try testing.expectError(error.BadPaintOrder, parsePaintOrder(""));
 }

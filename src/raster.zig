@@ -567,14 +567,7 @@ fn drawItems(
         // starts from, so the run is laid out as though it were drawn --
         // built and thrown away -- and nothing else happens.
         if (!shape.visible) {
-            if (shape.geometry == .text) {
-                var p: z2d.Path = .empty;
-                defer p.deinit(gpa);
-                try buildGeometry(gpa, &p, shape, ctm, .{
-                    .max_nodes = pass.nodes_left.*,
-                }, doc, &pen, opts);
-                try spendNodes(pass, p.nodes.items.len);
-            }
+            if (shape.geometry == .text) try advancePen(gpa, shape, ctm, pass, doc, &pen, opts);
             continue;
         }
 
@@ -623,148 +616,34 @@ fn drawItems(
         }
 
         const surface = layers.target();
-        // Kept so the stroke can start from the same place the fill did: both
-        // draw the same run, and the fill leaves the pen past it.
-        const pen_before_fill = pen;
         const fill_paint = resolveFill(shape, opts);
         const stroke = try resolveStroke(shape, opts);
 
-        // §11.3: fill first, then stroke over it, per element.
-        if (fill_paint) |paint| {
-            var p: z2d.Path = .empty;
-            defer p.deinit(gpa);
-
-            // The viewBox mapping outside, the shape's own `transform` chain
-            // inside, so that a `transform` is in user units like the path
-            // data it applies to.
-            try buildGeometry(gpa, &p, shape, ctm, .{
-                .max_nodes = pass.nodes_left.*,
-            }, doc, &pen, opts);
-            try spendNodes(pass, p.nodes.items.len);
-
-            // A shape with no geometry draws nothing, which is not an error;
-            // `painter.fill` would take it too, but this says so on purpose.
-            if (p.nodes.items.len != 0) {
-                var built: Source = try makeSource(gpa, doc, shape, paint, ctm, opts);
-                defer built.deinit(gpa);
-                const fill_rule = shape.fill_rule orelse opts.fill_rule;
-                switch (built) {
-                    // A `<pattern>` is drawn rather than sampled, so what it
-                    // needs is the region rather than a source: the same fill,
-                    // into an alpha mask, which then cuts the lattice.
-                    .tiled => |t| {
-                        var region = try fillCoverage(gpa, surface, p.nodes.items, .{
-                            .fill_rule = fill_rule,
-                            .anti_aliasing_mode = opts.anti_aliasing_mode,
-                            .tolerance = opts.tolerance,
-                        });
-                        defer region.deinit(gpa);
-                        try paintTiled(
-                            gpa,
-                            doc,
-                            surface,
-                            t,
-                            &region,
-                            pathBox(p.nodes.items),
-                            .{ .shape = shape },
-                            ctm,
-                            pass,
-                            opts,
-                        );
-                    },
-                    else => if (built.pattern()) |source| {
-                        try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
-                            .fill_rule = fill_rule,
-                            .anti_aliasing_mode = opts.anti_aliasing_mode,
-                            .tolerance = opts.tolerance,
-                        });
-                    },
-                }
-            }
-        }
-
-        if (stroke) |*s| stroking: {
-            // Built a second time, because the subpaths have to be left as
-            // the document wrote them: a stroked open subpath is capped at its
-            // ends rather than joined back to its start.
-            //
-            // The points are transformed exactly as the fill's are. z2d takes
-            // the matrix *as well*, and uses it only to shape the pen -- which
-            // is Cairo's model, and is what makes the pen warp under a
-            // non-uniform scale as SVG says it must. Passing untransformed
-            // points and relying on the matrix to place them draws the whole
-            // document in the top-left corner at user-space coordinates.
-            var p: z2d.Path = .empty;
-            defer p.deinit(gpa);
-
-            // The same pen the fill used, rewound: a run is filled and then
-            // stroked, and both have to land in the same place.
-            var stroke_pen = pen_before_fill;
-            try buildGeometry(gpa, &p, shape, ctm, .{
-                .max_nodes = pass.nodes_left.*,
-                // Glyph outlines are closed contours whatever this says, so a
-                // stroked `<text>` is outlined rather than having its letters
-                // capped at their ends.
-                .close_subpaths = false,
-            }, doc, &stroke_pen, opts);
-            try spendNodes(pass, p.nodes.items.len);
-
-            if (p.nodes.items.len != 0) {
-                // Where the matrix is a similarity, the pen is scaled here and
-                // z2d is handed the identity; where it is not, z2d is handed
-                // the matrix and shapes the pen itself. `uniformScale` says
-                // why the two are not interchangeable in practice even though
-                // they are in geometry.
-                var nib = s.*;
-                var pen_ctm: z2d.Transformation = ctm;
-                if (uniformScale(ctm)) |factor| {
-                    nib.scaleBy(factor);
-                    pen_ctm = .identity;
-                }
-
-                var built: Source = try makeSource(gpa, doc, shape, nib.paint, ctm, opts);
-                defer built.deinit(gpa);
-                const stroke_opts: z2d.painter.StrokeOptions = .{
-                    .line_width = nib.width,
-                    .line_cap_mode = nib.cap,
-                    .line_join_mode = nib.join,
-                    .miter_limit = nib.miter_limit,
-                    .dashes = nib.dashes(),
-                    .dash_offset = nib.dash_offset,
-                    .transformation = pen_ctm,
-                    .anti_aliasing_mode = opts.anti_aliasing_mode,
-                    .tolerance = opts.tolerance,
-                };
-                // A pattern on a `stroke` covers the stroked outline rather
-                // than the filled one, and that outline is the only thing that
-                // differs from the fill case -- so the mask is stroked and
-                // everything after it is the same.
-                if (built == .tiled) {
-                    var region = try strokeCoverage(gpa, surface, p.nodes.items, stroke_opts);
-                    defer region.deinit(gpa);
-                    try paintTiled(
-                        gpa,
-                        doc,
-                        surface,
-                        built.tiled,
-                        &region,
-                        strokeBox(pathBox(p.nodes.items), nib.width, ctm),
-                        .{ .shape = shape },
-                        ctm,
-                        pass,
-                        opts,
-                    );
-                    break :stroking;
-                }
-                const source = built.pattern() orelse break :stroking;
-                z2d.painter.stroke(gpa, surface, &source, p.nodes.items, stroke_opts) catch |err| switch (err) {
-                    // A `transform` that collapses the plane -- `scale(0)` --
-                    // has nothing to stroke through. Filling it draws nothing
-                    // and stroking it should too, rather than failing.
-                    error.InvalidMatrix => {},
-                    else => |e| return e,
-                };
-            }
+        // §11.3's painting order is fill, then stroke, then markers, per
+        // element, and SVG 2's `paint-order` rearranges it. Every pass lays a
+        // run of text out from where the pen was before any of them, since
+        // all of them draw the same run; afterwards the pen is where that run
+        // ends, which every pass agrees on.
+        const pen_before = pen;
+        var pen_after: ?Pen = null;
+        for (shape.paint_order) |layer| switch (layer) {
+            .fill => if (fill_paint) |paint| {
+                var fill_pen = pen_before;
+                try paintFill(gpa, surface, doc, shape, paint, ctm, pass, &fill_pen, opts);
+                pen_after = fill_pen;
+            },
+            .stroke => if (stroke) |*s| {
+                var stroke_pen = pen_before;
+                try paintStroke(gpa, surface, doc, shape, s, ctm, pass, &stroke_pen, opts);
+                if (pen_after == null) pen_after = stroke_pen;
+            },
+            .markers => {},
+        };
+        // Text that is neither filled nor stroked still takes up its room.
+        if (pen_after) |after| {
+            pen = after;
+        } else if (shape.geometry == .text) {
+            try advancePen(gpa, shape, ctm, pass, doc, &pen, opts);
         }
 
         // Closed here rather than from a `defer`, because closing a layer can
@@ -772,6 +651,186 @@ fn drawItems(
         // `drawDocument` unwinds the whole stack when a draw gives up.
         if (shape_layer) try layers.close(gpa);
     }
+}
+
+/// Fills one shape onto `surface`: SVG 1.1 §11.3's first painting pass.
+///
+/// `pen` is where a run of text starts, and is left where it ends.
+fn paintFill(
+    gpa: Allocator,
+    surface: *z2d.Surface,
+    doc: *const document.Document,
+    shape: document.Shape,
+    paint: Paint,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    pen: *Pen,
+    opts: Options,
+) Error!void {
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+
+    // The viewBox mapping outside, the shape's own `transform` chain
+    // inside, so that a `transform` is in user units like the path
+    // data it applies to.
+    try buildGeometry(gpa, &p, shape, ctm, .{
+        .max_nodes = pass.nodes_left.*,
+    }, doc, pen, opts);
+    try spendNodes(pass, p.nodes.items.len);
+
+    // A shape with no geometry draws nothing, which is not an error;
+    // `painter.fill` would take it too, but this says so on purpose.
+    if (p.nodes.items.len != 0) {
+        var built: Source = try makeSource(gpa, doc, shape, paint, ctm, opts);
+        defer built.deinit(gpa);
+        const fill_rule = shape.fill_rule orelse opts.fill_rule;
+        switch (built) {
+            // A `<pattern>` is drawn rather than sampled, so what it
+            // needs is the region rather than a source: the same fill,
+            // into an alpha mask, which then cuts the lattice.
+            .tiled => |t| {
+                var region = try fillCoverage(gpa, surface, p.nodes.items, .{
+                    .fill_rule = fill_rule,
+                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .tolerance = opts.tolerance,
+                });
+                defer region.deinit(gpa);
+                try paintTiled(
+                    gpa,
+                    doc,
+                    surface,
+                    t,
+                    &region,
+                    pathBox(p.nodes.items),
+                    .{ .shape = shape },
+                    ctm,
+                    pass,
+                    opts,
+                );
+            },
+            else => if (built.pattern()) |source| {
+                try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
+                    .fill_rule = fill_rule,
+                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .tolerance = opts.tolerance,
+                });
+            },
+        }
+    }
+}
+
+/// Strokes one shape onto `surface`: SVG 1.1 §11.3's second painting pass.
+///
+/// `pen` is where a run of text starts, and is left where it ends.
+fn paintStroke(
+    gpa: Allocator,
+    surface: *z2d.Surface,
+    doc: *const document.Document,
+    shape: document.Shape,
+    s: *const Stroke,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    pen: *Pen,
+    opts: Options,
+) Error!void {
+    // Built a second time, because the subpaths have to be left as
+    // the document wrote them: a stroked open subpath is capped at its
+    // ends rather than joined back to its start.
+    //
+    // The points are transformed exactly as the fill's are. z2d takes
+    // the matrix *as well*, and uses it only to shape the pen -- which
+    // is Cairo's model, and is what makes the pen warp under a
+    // non-uniform scale as SVG says it must. Passing untransformed
+    // points and relying on the matrix to place them draws the whole
+    // document in the top-left corner at user-space coordinates.
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+
+    try buildGeometry(gpa, &p, shape, ctm, .{
+        .max_nodes = pass.nodes_left.*,
+        // Glyph outlines are closed contours whatever this says, so a
+        // stroked `<text>` is outlined rather than having its letters
+        // capped at their ends.
+        .close_subpaths = false,
+    }, doc, pen, opts);
+    try spendNodes(pass, p.nodes.items.len);
+
+    if (p.nodes.items.len != 0) {
+        // Where the matrix is a similarity, the pen is scaled here and
+        // z2d is handed the identity; where it is not, z2d is handed
+        // the matrix and shapes the pen itself. `uniformScale` says
+        // why the two are not interchangeable in practice even though
+        // they are in geometry.
+        var nib = s.*;
+        var pen_ctm: z2d.Transformation = ctm;
+        if (uniformScale(ctm)) |factor| {
+            nib.scaleBy(factor);
+            pen_ctm = .identity;
+        }
+
+        var built: Source = try makeSource(gpa, doc, shape, nib.paint, ctm, opts);
+        defer built.deinit(gpa);
+        const stroke_opts: z2d.painter.StrokeOptions = .{
+            .line_width = nib.width,
+            .line_cap_mode = nib.cap,
+            .line_join_mode = nib.join,
+            .miter_limit = nib.miter_limit,
+            .dashes = nib.dashes(),
+            .dash_offset = nib.dash_offset,
+            .transformation = pen_ctm,
+            .anti_aliasing_mode = opts.anti_aliasing_mode,
+            .tolerance = opts.tolerance,
+        };
+        // A pattern on a `stroke` covers the stroked outline rather
+        // than the filled one, and that outline is the only thing that
+        // differs from the fill case -- so the mask is stroked and
+        // everything after it is the same.
+        if (built == .tiled) {
+            var region = try strokeCoverage(gpa, surface, p.nodes.items, stroke_opts);
+            defer region.deinit(gpa);
+            try paintTiled(
+                gpa,
+                doc,
+                surface,
+                built.tiled,
+                &region,
+                strokeBox(pathBox(p.nodes.items), nib.width, ctm),
+                .{ .shape = shape },
+                ctm,
+                pass,
+                opts,
+            );
+            return;
+        }
+        const source = built.pattern() orelse return;
+        z2d.painter.stroke(gpa, surface, &source, p.nodes.items, stroke_opts) catch |err| switch (err) {
+            // A `transform` that collapses the plane -- `scale(0)` --
+            // has nothing to stroke through. Filling it draws nothing
+            // and stroking it should too, rather than failing.
+            error.InvalidMatrix => {},
+            else => |e| return e,
+        };
+    }
+}
+
+/// Lays a run of text out without painting it, so that the run after it
+/// starts where it would have: what a hidden run, or one with neither fill nor
+/// stroke, still has to do.
+fn advancePen(
+    gpa: Allocator,
+    shape: document.Shape,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    doc: *const document.Document,
+    pen: *Pen,
+    opts: Options,
+) Error!void {
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    try buildGeometry(gpa, &p, shape, ctm, .{
+        .max_nodes = pass.nodes_left.*,
+    }, doc, pen, opts);
+    try spendNodes(pass, p.nodes.items.len);
 }
 
 // -- images ------------------------------------------------------------------

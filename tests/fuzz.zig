@@ -127,7 +127,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=" ++
     "displaynoneinlinevisibilityhiddencollapsevisible" ++
     "switchsystemLanguagerequiredExtensionsrequiredFeaturesen-USfr," ++
-    "symboloverflowvisiblehiddenauto";
+    "symboloverflowvisiblehiddenauto" ++
+    "paint-orderstrokefillmarkersnormal";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -925,6 +926,8 @@ const document_corpus = [_][]const u8{
     // Viewports: a nested `<svg>`, and a `<symbol>` through a `<use>`.
     "<svg viewBox=\"0 0 8 8\"><svg x=\"1\" width=\"50%\" height=\"4\" viewBox=\"0 0 2 1\" preserveAspectRatio=\"xMinYMid slice\"><rect width=\"50%\" height=\"1\"/></svg></svg>",
     "<svg viewBox=\"0 0 8 8\"><symbol id=\"s\" viewBox=\"0 0 1 1\" overflow=\"visible\"><rect width=\"1\" height=\"1\"/></symbol><use href=\"#s\" width=\"4\" height=\"4\" opacity=\"0.5\"/></svg>",
+    // `paint-order`, on a shape and on a run of text.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"4\" height=\"4\" stroke=\"red\" style=\"paint-order: stroke\"/><text style=\"paint-order: markers stroke\" stroke=\"red\">a</text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

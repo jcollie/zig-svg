@@ -435,6 +435,7 @@ short of the specification.
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
 | `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
+| `paint-order` | yes, inherited — `fill`, `stroke` and `markers` in any order; as an attribute once zig-css lists it as one, through `style` today |
 | `viewBox`, `width`, `height` | yes — the document's own size is what it is drawn at |
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | Entity references in attribute values | yes, resolved as the document is parsed |

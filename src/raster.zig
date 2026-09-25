@@ -232,6 +232,11 @@ pub const Options = struct {
     /// A `data:` URL needs no resolver: the picture is in the document. Any
     /// other `href` without one is refused, like `<text>` without a font.
     images: ?ImageResolver = null,
+
+    /// The reader's languages, most preferred first, which a `<switch>` or a
+    /// `systemLanguage` attribute is tested against. Borrowed for the render.
+    /// See `document.ReadOptions.languages`.
+    languages: []const []const u8 = document.ReadOptions.default_languages,
 };
 
 /// How the caller supplies a picture an `<image>` names by URL. See
@@ -356,7 +361,7 @@ pub const Box = struct {
 ///
 /// The caller owns the surface and releases it with `z2d.Surface.deinit`.
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface {
-    var doc = try document.read(gpa, src);
+    var doc = try document.readWith(gpa, src, .{ .languages = opts.languages });
     defer doc.deinit();
 
     // The document's own size, which is what `width` and `height` say when it
@@ -391,7 +396,7 @@ pub fn draw(
     box: Box,
     opts: Options,
 ) Error!void {
-    var doc = try document.read(gpa, src);
+    var doc = try document.readWith(gpa, src, .{ .languages = opts.languages });
     defer doc.deinit();
     return drawDocument(gpa, surface, &doc, box, opts);
 }

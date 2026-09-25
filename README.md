@@ -438,6 +438,8 @@ short of the specification.
 | Entity references in attribute values | yes, resolved as the document is parsed |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
 | `<a>` | yes, drawn as a group — including inside `<text>`, where it carries its words |
+| `<switch>` | yes — the first child whose conditions pass, so Illustrator's `<foreignObject>` wrapper falls through to the drawing |
+| `systemLanguage`, `requiredExtensions`, `requiredFeatures` | yes, on any element — languages from `Options.languages` (default `en`), by §5.8.5's prefix rule; no extensions |
 | `display` | yes — `none` removes an element and everything in it; any other value draws it |
 | `visibility` | yes, inherited — `hidden` and `collapse` paint nothing but still take up room, and a `visible` child of a hidden group is drawn |
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, `em`, `ex`, and a bare number |

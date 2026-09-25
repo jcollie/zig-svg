@@ -125,7 +125,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "<style>{}#.*~|[]=:,>+/**/!important " ++
     "imagehrefdata:;base64,/pngjpegwebpgifsvg+xmlimage-renderingoptimizeSpeedpixelatedauto" ++
     "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=" ++
-    "displaynoneinlinevisibilityhiddencollapsevisible";
+    "displaynoneinlinevisibilityhiddencollapsevisible" ++
+    "switchsystemLanguagerequiredExtensionsrequiredFeaturesen-USfr,";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -918,6 +919,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><g visibility=\"hidden\"><rect width=\"8\" height=\"8\"/><rect width=\"4\" height=\"4\" visibility=\"visible\"/></g></svg>",
     // `<a>`, and the whitespace between runs, which belongs to the element.
     "<svg viewBox=\"0 0 8 8\"><a href=\"#x\"><rect width=\"4\" height=\"4\"/></a><text> a <a>b</a><tspan> </tspan>c </text></svg>",
+    // `<switch>` and the conditional attributes.
+    "<svg viewBox=\"0 0 8 8\"><switch><foreignObject requiredExtensions=\"x\"/><rect systemLanguage=\"fr\" width=\"8\" height=\"8\"/><rect systemLanguage=\"en-US\" width=\"4\" height=\"4\"/></switch></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

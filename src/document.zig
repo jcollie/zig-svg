@@ -548,6 +548,9 @@ pub const Document = struct {
     /// Empty when the document has none, which is the usual case and costs
     /// nothing to ask.
     stylesheet: css.Stylesheet,
+    /// The reader's languages, most preferred first, which `systemLanguage`
+    /// is tested against. Borrowed from `ReadOptions`; see there.
+    languages: []const []const u8 = ReadOptions.default_languages,
 
     pub fn deinit(self: *Document) void {
         self.stylesheet.deinit();
@@ -1061,6 +1064,39 @@ pub const PathIterator = struct {
         return false;
     }
 
+    /// §5.8's conditional processing attributes, all of which must hold.
+    ///
+    /// `requiredExtensions` names extensions, and this implements none, so
+    /// naming any at all is false. `requiredFeatures` is true when it says
+    /// anything: SVG 2 dropped the feature strings, and resvg and the
+    /// browsers take them as satisfied. `systemLanguage` is true when one of
+    /// the reader's languages is one of those listed or a prefix of one. An
+    /// attribute present and empty is false for all three, as §5.8.4 says.
+    fn conditionsPass(self: *const PathIterator, node: ztree.NodeId) bool {
+        if (self.attr(node, "requiredExtensions") != null) return false;
+        if (self.attr(node, "requiredFeatures")) |raw| {
+            if (std.mem.trim(u8, raw, " \t\r\n").len == 0) return false;
+        }
+        if (self.attr(node, "systemLanguage")) |raw| {
+            return languageMatches(self.doc.languages, raw);
+        }
+        return true;
+    }
+
+    /// The child a `<switch>` draws: the first element child that is SVG
+    /// content, would be drawn at all, and whose conditions pass.
+    fn switchChoice(self: *const PathIterator, node: ztree.NodeId) ?ztree.NodeId {
+        const tree = self.doc.tree;
+        for (tree.node(node).children.items) |c| {
+            if (tree.node(c).kind != .element) continue;
+            if (!self.isSvgContent(c)) continue;
+            if (isIgnorable(tree.node(c).name.local)) continue;
+            if (!self.conditionsPass(c)) continue;
+            return c;
+        }
+        return null;
+    }
+
     /// Whether an element says `display: none`. The only value that matters
     /// here: every other one draws the element, and CSS has a great many of
     /// them, so none is refused.
@@ -1138,6 +1174,10 @@ pub const PathIterator = struct {
             // every hop, because a `<use>` can be hidden and so can what it
             // names.
             if (self.displayNone(node)) return null;
+            // §5.8.2: an element whose conditions fail is not rendered, and
+            // neither is anything in it -- wherever it is, not only in a
+            // `<switch>`.
+            if (!self.conditionsPass(node)) return null;
             if (!localIs(tree, node, "use")) break;
 
             hops += 1;
@@ -1239,13 +1279,27 @@ pub const PathIterator = struct {
 
         if (std.mem.eql(u8, name, "image")) return self.readImage(node, effective, refs, own_ctm);
 
-        if (isContainer(name)) {
+        const is_switch = std.mem.eql(u8, name, "switch");
+        if (isContainer(name) or is_switch) {
             // A container's `opacity` applies to it once it is flattened, so
             // it needs a surface of its own to flatten into. One that does not
             // ask for that is invisible here, as it always was.
             const opacity = try self.opacityOf(node);
             const needs_layer = opacity < 1.0 or refs.any();
             try self.push(node, effective, own_ctm, needs_layer);
+            // §5.8.3: a `<switch>` draws its first direct child whose
+            // conditions pass, and none of the others -- which is how an
+            // Illustrator file offers a `<foreignObject>` it knows nothing
+            // else can draw and a `<g>` for everything else. Its one child is
+            // walked as though it were its only one; with none, it is empty.
+            if (is_switch) {
+                const top = &self.stack[self.depth];
+                if (self.switchChoice(node)) |chosen| {
+                    top.only_child = chosen;
+                } else {
+                    top.next_child = std.math.maxInt(usize);
+                }
+            }
             if (needs_layer) return .{ .open_group = .{
                 .node = node,
                 .opacity = opacity,
@@ -1583,6 +1637,26 @@ fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
     return isTextishName(tree.node(node).name.local);
 }
 
+/// Whether any of the reader's `languages` satisfies a `systemLanguage` list.
+///
+/// §5.8.5: a match is a language equal to one in the list, or equal to a
+/// prefix of one that is followed by `-`. So a reader of `en` is satisfied
+/// by `en-US`, and a reader of `en-US` is not satisfied by `en`. Compared
+/// without regard to case, as language tags are.
+fn languageMatches(languages: []const []const u8, list: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| {
+        const tag = std.mem.trim(u8, raw, " \t\r\n");
+        if (tag.len == 0) continue;
+        for (languages) |lang| {
+            if (lang.len > tag.len) continue;
+            if (!std.ascii.eqlIgnoreCase(lang, tag[0..lang.len])) continue;
+            if (tag.len == lang.len or tag[lang.len] == '-') return true;
+        }
+    }
+    return false;
+}
+
 /// XML's whitespace characters.
 fn isXmlSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\r' or c == '\n';
@@ -1773,7 +1847,29 @@ fn parseMiterLimit(text: []const u8) Error!f64 {
 /// `shape_count` is the number it produced rather than a number counted
 /// alongside it. Agreement is not tested for here, it is the only thing that
 /// can happen.
+/// What a caller can say about how a document is to be read.
+pub const ReadOptions = struct {
+    /// The reader's languages, as BCP 47 tags, most preferred first. §5.8.5's
+    /// `systemLanguage` is true when one of these is one of the document's
+    /// languages or a prefix of one: `en` matches `en-US`, and `en-US` does
+    /// not match `en`, which is the specification's rule.
+    ///
+    /// Borrowed, and it must outlive the `Document`. The default is English,
+    /// as resvg's is, because a document that offers a `<switch>` of
+    /// languages almost always offers English, and something has to be
+    /// chosen when the caller says nothing.
+    languages: []const []const u8 = default_languages,
+
+    pub const default_languages: []const []const u8 = &.{"en"};
+};
+
+/// `readWith` with every option at its default.
 pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
+    return readWith(gpa, src, .{});
+}
+
+/// Reads a document, checking as it goes that everything in it can be drawn.
+pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) Error!Document {
     // `.strict` on entities, so a name the document never declared is an error
     // rather than text that survives into a parser which will call it
     // something less helpful. Nothing external is fetched under any setting.
@@ -1791,6 +1887,7 @@ pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
         .shape_count = 0,
         .root = .{},
         .stylesheet = .{},
+        .languages = options.languages,
     };
     errdefer doc.stylesheet.deinit();
 
@@ -2159,8 +2256,10 @@ test "an element with geometry this reader cannot draw is refused" {
         error.UnsupportedElement,
         read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><foreignObject/></svg>"),
     );
+    // A `<switch>` is drawn now, and an empty one draws nothing, which
+    // leaves a document with nothing in it.
     try testing.expectError(
-        error.UnsupportedElement,
+        error.NoPath,
         read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><switch/></svg>"),
     );
 }
@@ -2966,4 +3065,61 @@ test "the spaces between runs belong to the whole text element" {
     // A trailing space with only hidden text after it is the last one.
     const d = try runSpaces("<svg viewBox=\"0 0 9 9\"><text>a <tspan display=\"none\">b</tspan></text></svg>");
     try testing.expectEqual([2]bool{ false, false }, d[0]);
+}
+
+test "a switch draws its first child whose conditions pass" {
+    // Illustrator's shape: an extension nothing implements, then the drawing.
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <switch>
+        \\    <foreignObject requiredExtensions="http://ns.adobe.com/AdobeIllustrator/10.0/"/>
+        \\    <title>skipped: not drawn at all</title>
+        \\    <rect width="1" height="1"/>
+        \\    <rect width="2" height="2"/>
+        \\  </switch>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+    var it = doc.paths();
+    try testing.expectEqual(@as(f64, 1), (try it.next()).?.shape.geometry.rect.width);
+    try testing.expectEqual(@as(?Item, null), try it.next());
+}
+
+test "systemLanguage is matched against the reader's languages, by prefix" {
+    const src =
+        \\<svg viewBox="0 0 10 10">
+        \\  <switch>
+        \\    <rect systemLanguage="fr, de" width="1" height="1"/>
+        \\    <rect systemLanguage="en-GB" width="2" height="2"/>
+        \\    <rect width="3" height="3"/>
+        \\  </switch>
+        \\</svg>
+    ;
+    const Case = struct { langs: []const []const u8, want: f64 };
+    for ([_]Case{
+        .{ .langs = &.{"en"}, .want = 2 },
+        .{ .langs = &.{"de"}, .want = 1 },
+        .{ .langs = &.{ "ja", "fr" }, .want = 1 },
+        // `en-US` is not a prefix of `en-GB`, and nothing else matches.
+        .{ .langs = &.{"en-US"}, .want = 3 },
+    }) |case| {
+        var doc = try readWith(testing.allocator, src, .{ .languages = case.langs });
+        defer doc.deinit();
+        var it = doc.paths();
+        try testing.expectEqual(case.want, (try it.next()).?.shape.geometry.rect.width);
+    }
+}
+
+test "a condition that fails hides an element outside a switch too" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <rect width="1" height="1" requiredExtensions="x"/>
+        \\  <rect width="2" height="2" systemLanguage=""/>
+        \\  <rect width="3" height="3" requiredFeatures="http://www.w3.org/TR/SVG11/feature#Shape"/>
+        \\  <switch><rect width="4" height="4" requiredFeatures=""/></switch>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
 }

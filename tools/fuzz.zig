@@ -142,7 +142,12 @@ pub fn main(init: std.process.Init) !void {
     var timeout_s: u32 = 10;
     var alloc_fail = false;
 
-    var args: std.process.Args.Iterator = .init(init.minimal.args);
+    // The allocating form, which is the one that works everywhere: Windows
+    // hands a program its command line as one string to be split. The
+    // strings it hands out live in it, and are used long after parsing, so
+    // it lives to the end.
+    var args: std.process.Args.Iterator = try .initAllocator(init.minimal.args, gpa);
+    defer args.deinit();
     _ = args.skip();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--seconds")) {

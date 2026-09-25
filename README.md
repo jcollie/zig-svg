@@ -421,6 +421,8 @@ short of the specification.
 | `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
 | `<use>`, `<defs>` | yes — `href` and `xlink:href`, forward references, chains |
+| Nested `<svg>` | yes — its own viewport: `x`, `y`, `width`, `height`, `viewBox`, `preserveAspectRatio`, percentages of it, and a clip unless `overflow` is visible |
+| `<symbol>` | yes, through a `<use>`, which sizes it — `viewBox`, `preserveAspectRatio` and `overflow` as a nested `<svg>` |
 | `opacity`, `clip-path`, `mask`, `filter` on a `<use>` | yes — on the group §5.6 draws it as, with its `x` and `y` |
 | `<linearGradient>`, `<radialGradient>` | yes, on `fill` and `stroke`, with `<stop>` and `href` inheritance |
 | `gradientUnits`, `gradientTransform` | yes — both unit systems |

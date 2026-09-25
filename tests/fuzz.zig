@@ -126,7 +126,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "imagehrefdata:;base64,/pngjpegwebpgifsvg+xmlimage-renderingoptimizeSpeedpixelatedauto" ++
     "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=" ++
     "displaynoneinlinevisibilityhiddencollapsevisible" ++
-    "switchsystemLanguagerequiredExtensionsrequiredFeaturesen-USfr,";
+    "switchsystemLanguagerequiredExtensionsrequiredFeaturesen-USfr," ++
+    "symboloverflowvisiblehiddenauto";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -921,6 +922,9 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><a href=\"#x\"><rect width=\"4\" height=\"4\"/></a><text> a <a>b</a><tspan> </tspan>c </text></svg>",
     // `<switch>` and the conditional attributes.
     "<svg viewBox=\"0 0 8 8\"><switch><foreignObject requiredExtensions=\"x\"/><rect systemLanguage=\"fr\" width=\"8\" height=\"8\"/><rect systemLanguage=\"en-US\" width=\"4\" height=\"4\"/></switch></svg>",
+    // Viewports: a nested `<svg>`, and a `<symbol>` through a `<use>`.
+    "<svg viewBox=\"0 0 8 8\"><svg x=\"1\" width=\"50%\" height=\"4\" viewBox=\"0 0 2 1\" preserveAspectRatio=\"xMinYMid slice\"><rect width=\"50%\" height=\"1\"/></svg></svg>",
+    "<svg viewBox=\"0 0 8 8\"><symbol id=\"s\" viewBox=\"0 0 1 1\" overflow=\"visible\"><rect width=\"1\" height=\"1\"/></symbol><use href=\"#s\" width=\"4\" height=\"4\" opacity=\"0.5\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

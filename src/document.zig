@@ -436,6 +436,30 @@ pub const Group = struct {
     /// The user-space matrix in force on the container, which is the space the
     /// clip path's own coordinates are in.
     transform: z2d.Transformation,
+    /// The rectangle a nested `<svg>` or a `<symbol>` clips what is inside it
+    /// to, in the space `transform` maps to the device, or null when the
+    /// container is not one or its `overflow` is visible.
+    viewport: ?ViewportClip = null,
+};
+
+/// What `viewportOf` works out.
+const Viewport = struct {
+    /// Takes the viewport's content to the element's own user space.
+    content: z2d.Transformation,
+    /// The rectangle to clip to, or null when `overflow` is visible.
+    clip: ?ViewportClip,
+    /// What a percentage inside is of: the `viewBox` when there is one, the
+    /// viewport's own size when not.
+    width: f64,
+    height: f64,
+};
+
+/// A viewport's clip rectangle, in its parent's user space.
+pub const ViewportClip = struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 };
 
 /// What an element's `clip-path`, `mask` and `filter` attributes name.
@@ -805,6 +829,11 @@ pub const PathIterator = struct {
         /// the `<use>` names, walked as though it were the `<use>`'s only
         /// child. Null for every other frame, whose children are its own.
         only_child: ?ztree.NodeId = null,
+        /// The size of the viewport a percentage inside this frame is of,
+        /// when a nested `<svg>` or a `<symbol>` established one; null for
+        /// the document's own.
+        viewport_width: ?f64 = null,
+        viewport_height: ?f64 = null,
     };
 
     pub fn next(self: *PathIterator) Error!?Item {
@@ -885,6 +914,7 @@ pub const PathIterator = struct {
     /// anchor -- is what the element came to, which the frame already holds.
     fn runFrom(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
+        self.enterViewport(parent);
         // `lengthAdjust="spacingAndGlyphs"` stretches the glyphs themselves
         // rather than the gaps between them, which is a different drawing and
         // not one this does. The initial value is `spacing`, which is.
@@ -1097,6 +1127,47 @@ pub const PathIterator = struct {
         return null;
     }
 
+    /// What a nested `<svg>`, or a `<symbol>` reached through `use`, makes of
+    /// its viewport: where its content goes, what it clips to, and what a
+    /// percentage inside it is of. Null when its size disables it.
+    ///
+    /// A nested `<svg>` is placed by its own `x`, `y`, `width` and `height`,
+    /// the last two `100%` when absent. A `<symbol>` takes its size from the
+    /// `<use>` -- whose `x` and `y` are already in the matrix -- and is placed
+    /// at the origin. Both fit their content by §7.8 when they have a
+    /// `viewBox`, and are measured in their parent's viewport.
+    fn viewportOf(self: *PathIterator, node: ztree.NodeId, via_use: ?ztree.NodeId) Error!?Viewport {
+        const tree = self.doc.tree;
+        const sizer = if (localIs(tree, node, "symbol")) via_use.? else node;
+        const is_svg = localIs(tree, node, "svg");
+        const x: f64 = if (is_svg) try self.lengthOf(node, "x", .x, 0) else 0;
+        const y: f64 = if (is_svg) try self.lengthOf(node, "y", .y, 0) else 0;
+        const width = (try self.autoLengthOf(sizer, "width", .x)) orelse self.viewport.width;
+        const height = (try self.autoLengthOf(sizer, "height", .y)) orelse self.viewport.height;
+        if (!(width > 0) or !(height > 0)) return null;
+
+        const par: PreserveAspectRatio = if (self.attr(node, "preserveAspectRatio")) |v|
+            try PreserveAspectRatio.parse(v)
+        else
+            .meet_centred;
+        const vb: ?ViewBox = if (self.attr(node, "viewBox")) |v| try parseViewBox(v) else null;
+        const place: z2d.Transformation = z2d.Transformation.identity.translate(x, y);
+        const content = if (vb) |b| place.mul(viewBoxTransform(b, par, 0, 0, width, height)) else place;
+
+        // §7.9: the initial `overflow` of an element that establishes a
+        // viewport clips it, and `visible` and `auto` are the two that do
+        // not. `hidden` and `scroll` both clip, which is all a static picture
+        // can do with them.
+        const overflow = if (self.presentation(node, "overflow")) |v| std.mem.trim(u8, v, " \t\r\n") else "hidden";
+        const clips = !(std.mem.eql(u8, overflow, "visible") or std.mem.eql(u8, overflow, "auto"));
+        return .{
+            .content = content,
+            .clip = if (clips) .{ .x = x, .y = y, .width = width, .height = height } else null,
+            .width = if (vb) |b| b.width else width,
+            .height = if (vb) |b| b.height else height,
+        };
+    }
+
     /// Whether an element says `display: none`. The only value that matters
     /// here: every other one draws the element, and CSS has a great many of
     /// them, so none is refused.
@@ -1157,6 +1228,7 @@ pub const PathIterator = struct {
     fn visit(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
         if (tree.node(child).kind != .element) return null;
+        self.enterViewport(parent);
 
         // Follow a chain of `<use>`, gathering what each contributes on the
         // way. A cycle is caught by `push` noticing the target is already
@@ -1166,6 +1238,9 @@ pub const PathIterator = struct {
         var inherited = parent.inherited;
         var ctm = parent.transform;
         var hops: usize = 0;
+        // The `<use>` that led here, if one did: a `<symbol>` is only drawn
+        // through one, and takes its size from it.
+        var via_use: ?ztree.NodeId = if (localIs(tree, parent.node, "use")) parent.node else null;
         while (true) {
             if (!self.isSvgContent(node)) return null;
             // §11.5: `display="none"` takes the element and everything in it
@@ -1226,11 +1301,15 @@ pub const PathIterator = struct {
                     .transform = ctm,
                 } };
             }
+            via_use = node;
             node = target;
         }
 
         const name = tree.node(node).name.local;
-        if (isIgnorable(name)) return null;
+        // A `<symbol>` is a definition wherever it stands, and drawn only
+        // where a `<use>` names it.
+        const is_symbol = std.mem.eql(u8, name, "symbol") and via_use != null;
+        if (isIgnorable(name) and !is_symbol) return null;
         const own_ctm = ctm.mul(try self.readTransform(node));
         if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
@@ -1280,13 +1359,31 @@ pub const PathIterator = struct {
         if (std.mem.eql(u8, name, "image")) return self.readImage(node, effective, refs, own_ctm);
 
         const is_switch = std.mem.eql(u8, name, "switch");
-        if (isContainer(name) or is_switch) {
+        if (isContainer(name) or is_switch or is_symbol) {
+            // A nested `<svg>`, and a `<symbol>` drawn through a `<use>`,
+            // establish a viewport of their own (§7.9, §5.5): the content is
+            // fitted into it by its `viewBox`, percentages inside are of it,
+            // and it clips unless its `overflow` is visible. A size of zero
+            // disables the element.
+            const is_viewport = is_symbol or
+                (std.mem.eql(u8, name, "svg") and node != self.doc.root_node);
+            const vp: ?Viewport = if (is_viewport)
+                (try self.viewportOf(node, via_use)) orelse return null
+            else
+                null;
+            const content_ctm = if (vp) |v| own_ctm.mul(v.content) else own_ctm;
+
             // A container's `opacity` applies to it once it is flattened, so
             // it needs a surface of its own to flatten into. One that does not
             // ask for that is invisible here, as it always was.
             const opacity = try self.opacityOf(node);
-            const needs_layer = opacity < 1.0 or refs.any();
-            try self.push(node, effective, own_ctm, needs_layer);
+            const clip: ?ViewportClip = if (vp) |v| v.clip else null;
+            const needs_layer = opacity < 1.0 or refs.any() or clip != null;
+            try self.push(node, effective, content_ctm, needs_layer);
+            if (vp) |v| {
+                self.stack[self.depth].viewport_width = v.width;
+                self.stack[self.depth].viewport_height = v.height;
+            }
             // §5.8.3: a `<switch>` draws its first direct child whose
             // conditions pass, and none of the others -- which is how an
             // Illustrator file offers a `<foreignObject>` it knows nothing
@@ -1308,6 +1405,7 @@ pub const PathIterator = struct {
                 .filter = refs.filter,
                 .current_color = effective.current_color,
                 .transform = own_ctm,
+                .viewport = clip,
             } };
             return null;
         }
@@ -1395,6 +1493,7 @@ pub const PathIterator = struct {
             if (frame.node == node) return error.RecursiveUse;
         }
         if (self.depth == max_container_depth) return error.TooDeeplyNested;
+        const parent = self.stack[self.depth];
         self.depth += 1;
         self.stack[self.depth] = .{
             .node = node,
@@ -1402,7 +1501,19 @@ pub const PathIterator = struct {
             .inherited = inherited,
             .transform = ctm,
             .opens_layer = opens_layer,
+            // Inherited from the frame it is opened in, unless it opens a
+            // viewport of its own and says so afterwards.
+            .viewport_width = parent.viewport_width,
+            .viewport_height = parent.viewport_height,
         };
+    }
+
+    /// Points `self.viewport` at the viewport `frame` is inside, so that a
+    /// percentage read next is of the right one.
+    fn enterViewport(self: *PathIterator, frame: Frame) void {
+        const doc_vp = self.doc.viewport();
+        self.viewport.width = frame.viewport_width orelse doc_vp.width;
+        self.viewport.height = frame.viewport_height orelse doc_vp.height;
     }
 
     /// What a `<use>` names, as a node of this document.
@@ -3122,4 +3233,44 @@ test "a condition that fails hides an element outside a switch too" {
     );
     defer doc.deinit();
     try testing.expectEqual(@as(usize, 1), doc.shape_count);
+}
+
+test "a nested svg places its content in a viewport of its own" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 100 100">
+        \\  <svg x="10" y="20" width="40" height="40" viewBox="0 0 4 4">
+        \\    <rect width="50%" height="1"/>
+        \\  </svg>
+        \\  <svg width="0" height="10"><rect width="1" height="1"/></svg>
+        \\</svg>
+    );
+    defer doc.deinit();
+    // The zero-sized one is disabled, and its content with it.
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+    var it = doc.paths();
+    // It clips, so it opens a group for the viewport.
+    const group = (try it.next()).?.open_group;
+    try testing.expectEqual(@as(f64, 40), group.viewport.?.width);
+    const rect = (try it.next()).?.shape;
+    // A percentage of the nested viewBox, not the document's.
+    try testing.expectEqual(@as(f64, 2), rect.geometry.rect.width);
+    // viewBox 4 into 40 is a scale of ten, after the move to (10, 20).
+    try testing.expectEqual(@as(f64, 10), rect.transform.ax);
+    try testing.expectEqual(@as(f64, 20), rect.transform.ty);
+}
+
+test "a symbol is drawn only through a use, sized by it" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 100 100">
+        \\  <symbol id="s" viewBox="0 0 1 1" overflow="visible"><rect width="1" height="1"/></symbol>
+        \\  <use href="#s" x="5" width="30" height="30"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+    var it = doc.paths();
+    const rect = (try it.next()).?.shape;
+    try testing.expectEqual(@as(f64, 30), rect.transform.ax);
+    try testing.expectEqual(@as(f64, 5), rect.transform.tx);
+    try testing.expectEqual(@as(?Item, null), try it.next());
 }

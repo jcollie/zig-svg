@@ -516,7 +516,7 @@ fn drawItems(
             .shape => |sh| sh,
             .open_group => |g| {
                 const group_ctm = view_box.mul(g.transform);
-                const cut = try buildCut(
+                const cut = try clipToViewport(gpa, try buildCut(
                     gpa,
                     doc,
                     .{ .clip_path = g.clip_path, .mask = g.mask },
@@ -526,7 +526,7 @@ fn drawItems(
                     width,
                     height,
                     opts,
-                );
+                ), g.viewport, group_ctm, width, height, opts);
                 // `cut` is this caller's until `layers.open` takes it, and `open`
                 // frees what it was handed when it fails -- so it is released here
                 // only if the filter fails first, and never by an `errdefer` that
@@ -2451,6 +2451,55 @@ fn paintTiled(
     }
     plane.composite(mask, .dst_in, 0, 0, precision);
     target.composite(&plane, .src_over, 0, 0, precision);
+}
+
+/// `cut` further cut to a viewport's rectangle, when there is one.
+///
+/// A nested `<svg>` or a `<symbol>` clips its content to its viewport unless
+/// its `overflow` is visible. That is an alpha mask like any clip path's, and
+/// it goes through the same `dst_in` as one: intersected with a `clip-path`
+/// or a `mask` on the same element when there is one of those as well, and
+/// the whole of the cut when there is not. `cut` is consumed either way.
+fn clipToViewport(
+    gpa: Allocator,
+    cut: ?z2d.Surface,
+    viewport: ?document.ViewportClip,
+    ctm: z2d.Transformation,
+    width: i32,
+    height: i32,
+    opts: Options,
+) Error!?z2d.Surface {
+    const rect = viewport orelse return cut;
+    var owned = cut;
+    errdefer if (owned) |*c| c.deinit(gpa);
+
+    var mask = try z2d.Surface.init(.image_surface_alpha8, gpa, width, height);
+    errdefer mask.deinit(gpa);
+    {
+        var outline: z2d.Path = .empty;
+        defer outline.deinit(gpa);
+        try document.buildShape(&outline, gpa, .{ .rect = .{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width,
+            .height = rect.height,
+            .rx = null,
+            .ry = null,
+        } }, ctm, .{ .max_nodes = 16 });
+        if (outline.nodes.items.len != 0) {
+            const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+            try z2d.painter.fill(gpa, &mask, &white, outline.nodes.items, .{
+                .anti_aliasing_mode = opts.anti_aliasing_mode,
+                .tolerance = opts.tolerance,
+            });
+        }
+    }
+    if (owned) |*c| {
+        c.composite(&mask, .dst_in, 0, 0, .{ .precision = .float });
+        mask.deinit(gpa);
+        return c.*;
+    }
+    return mask;
 }
 
 /// The region a fill would cover, as an alpha mask the size of the picture.

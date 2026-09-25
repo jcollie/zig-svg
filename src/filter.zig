@@ -235,10 +235,23 @@ pub fn read(
     errdefer result.deinit(gpa);
 
     // The attributes, far end first so the nearest wins.
+    var named: Named = .{};
     var i = links;
     while (i > 0) {
         i -= 1;
-        try applyAttributes(tree, chain[i], viewport, &result);
+        try applyAttributes(tree, chain[i], viewport, &result, &named);
+    }
+    // §15.7.5's defaults are percentages, `-10%` and `120%`, and what a
+    // percentage is of depends on the units the chain settled on: a fraction
+    // of the bounding box, or of the viewport in user space. So a coordinate
+    // nothing named is filled in only now that the units are known -- taking
+    // the fractions as user units would put the region a tenth of a unit
+    // from the origin, whatever size the document is.
+    if (result.units == .user_space) {
+        if (!named.x) result.x = -0.1 * viewport.width;
+        if (!named.y) result.y = -0.1 * viewport.height;
+        if (!named.width) result.width = 1.2 * viewport.width;
+        if (!named.height) result.height = 1.2 * viewport.height;
     }
 
     // The primitives, nearest end first so the first filter in the chain that
@@ -276,18 +289,39 @@ fn hasPrimitive(tree: *const ztree.Document, node: ztree.NodeId) bool {
     return false;
 }
 
+/// Which of the region's coordinates some filter in the chain named.
+const Named = struct {
+    x: bool = false,
+    y: bool = false,
+    width: bool = false,
+    height: bool = false,
+};
+
 fn applyAttributes(
     tree: *const ztree.Document,
     node: ztree.NodeId,
     viewport: length.Viewport,
     out: *Filter,
+    named: *Named,
 ) Error!void {
     if (try unitsOf(tree, node, "filterUnits")) |u| out.units = u;
     if (try unitsOf(tree, node, "primitiveUnits")) |u| out.primitive_units = u;
-    if (try coord(tree, node, "x", .x, out.units, viewport)) |v| out.x = v;
-    if (try coord(tree, node, "y", .y, out.units, viewport)) |v| out.y = v;
-    if (try coord(tree, node, "width", .x, out.units, viewport)) |v| out.width = v;
-    if (try coord(tree, node, "height", .y, out.units, viewport)) |v| out.height = v;
+    if (try coord(tree, node, "x", .x, out.units, viewport)) |v| {
+        out.x = v;
+        named.x = true;
+    }
+    if (try coord(tree, node, "y", .y, out.units, viewport)) |v| {
+        out.y = v;
+        named.y = true;
+    }
+    if (try coord(tree, node, "width", .x, out.units, viewport)) |v| {
+        out.width = v;
+        named.width = true;
+    }
+    if (try coord(tree, node, "height", .y, out.units, viewport)) |v| {
+        out.height = v;
+        named.height = true;
+    }
 }
 
 fn readPrimitives(

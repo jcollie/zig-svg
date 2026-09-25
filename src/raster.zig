@@ -2008,9 +2008,16 @@ fn maskRegion(
             vp: length.Viewport,
             default: f64,
         ) Error!f64 {
-            const raw = d.tree.attributeValue(n, "", name) orelse return default;
+            // The default is a percentage, so in user space it is of the
+            // viewport like any other; taking the fraction as user units
+            // would put the region a tenth of a unit from the origin.
+            const fallback = if (u == .user_space)
+                default * (if (axis == .y) vp.height else vp.width)
+            else
+                default;
+            const raw = d.tree.attributeValue(n, "", name) orelse return fallback;
             const t = std.mem.trim(u8, raw, " \t\r\n");
-            if (t.len == 0) return default;
+            if (t.len == 0) return fallback;
             if (u == .user_space) return length.parse(t, axis, vp);
             // A fraction of the box, so there is no viewport in it: a bare
             // number is the fraction and a percentage is that over a hundred.
@@ -5400,5 +5407,32 @@ test "an element whose layer is refused frees its clip once" {
             error.TooManyLayers,
             render(gpa, src, .{ .width = 8, .height = 8, .limits = .{ .max_layers = 0 } }),
         );
+    }
+}
+
+test "a region in user space defaults to percentages of the viewport" {
+    const gpa = testing.allocator;
+    // §14.4's and §15.7.5's `-10%`, `-10%`, `120%`, `120%` are percentages
+    // in user space as much as in bounding-box units. Taken as the fractions
+    // they are stored as, the region was a tenth of a unit from the origin
+    // and a little over one unit across -- masking nearly everything away and
+    // cutting a blur down to a speck.
+    {
+        var sfc = try render(gpa, "<svg viewBox=\"0 0 20 20\"><mask id=\"m\" maskUnits=\"userSpaceOnUse\">" ++
+            "<rect width=\"20\" height=\"20\" fill=\"#808080\"/></mask>" ++
+            "<rect width=\"20\" height=\"20\" fill=\"black\" mask=\"url(#m)\"/></svg>", .{ .width = 20, .height = 20 });
+        defer sfc.deinit(gpa);
+        try testing.expect(@abs(@as(i32, sfc.getPixel(10, 10).?.rgba.a) - 128) <= 1);
+        try testing.expect(@abs(@as(i32, sfc.getPixel(18, 18).?.rgba.a) - 128) <= 1);
+    }
+    {
+        var sfc = try render(gpa, "<svg viewBox=\"0 0 20 20\"><filter id=\"f\" filterUnits=\"userSpaceOnUse\">" ++
+            "<feGaussianBlur stdDeviation=\"1.5\"/></filter>" ++
+            "<rect x=\"5\" y=\"5\" width=\"10\" height=\"10\" filter=\"url(#f)\"/></svg>", .{ .width = 20, .height = 20 });
+        defer sfc.deinit(gpa);
+        // The middle of the square, far from the origin, and the blur
+        // spilling past its edge.
+        try testing.expect(sfc.getPixel(10, 10).?.rgba.a > 200);
+        try testing.expect(sfc.getPixel(4, 10).?.rgba.a > 0);
     }
 }

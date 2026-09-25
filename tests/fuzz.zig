@@ -128,7 +128,9 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "displaynoneinlinevisibilityhiddencollapsevisible" ++
     "switchsystemLanguagerequiredExtensionsrequiredFeaturesen-USfr," ++
     "symboloverflowvisiblehiddenauto" ++
-    "paint-orderstrokefillmarkersnormal";
+    "paint-orderstrokefillmarkersnormal" ++
+    "markermarker-startmarker-midmarker-endurl(#)orientauto-start-reverseturnradgraddeg" ++
+    "markerUnitsstrokeWidthuserSpaceOnUsemarkerWidthmarkerHeightrefXrefY";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -928,6 +930,10 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><symbol id=\"s\" viewBox=\"0 0 1 1\" overflow=\"visible\"><rect width=\"1\" height=\"1\"/></symbol><use href=\"#s\" width=\"4\" height=\"4\" opacity=\"0.5\"/></svg>",
     // `paint-order`, on a shape and on a run of text.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"4\" height=\"4\" stroke=\"red\" style=\"paint-order: stroke\"/><text style=\"paint-order: markers stroke\" stroke=\"red\">a</text></svg>",
+    // Markers: every placement on a path with an arc and a close, a viewBox,
+    // and one reaching its own content through inheritance.
+    "<svg viewBox=\"0 0 8 8\"><marker id=\"m\" viewBox=\"0 0 2 2\" refX=\"1\" refY=\"1\" orient=\"auto-start-reverse\" preserveAspectRatio=\"xMinYMin slice\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></marker><path d=\"M1 1 L4 1 A2 2 0 0 1 4 5 Q1 5 1 3 Z\" stroke=\"red\" style=\"marker: url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g style=\"marker: url(#m)\"><marker id=\"m\" markerUnits=\"userSpaceOnUse\" orient=\"0.1turn\" overflow=\"visible\"><path d=\"M0 0 L2 2\" stroke=\"blue\"/></marker><polyline points=\"1 1 4 4 7 1\"/><line x2=\"8\" y2=\"8\" marker-mid=\"none\"/></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

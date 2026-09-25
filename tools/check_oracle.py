@@ -135,6 +135,27 @@ DIVERGENCES = {
     # is only whitespace and draws "de". The whole of the difference is the
     # "e" sitting one space further right. Measured at 7.187 and 3.259%.
     "text-space-only-tspan": (8.0, 0.04, "a whitespace-only run is a space; resvg drops it"),
+    # Three marker fixtures, each where resvg departs from §11.6 and from
+    # Firefox's marker code, and each kept apart from the fixtures that agree
+    # so that those still hold markers to the ordinary tolerance.
+    #
+    # An arc is one path command, so it makes one vertex and gets no
+    # `marker-mid` along its length. resvg turns arcs into cubics before it
+    # places markers, and puts one on every join between them: here a square
+    # at the top of the half circle that the document never asked for.
+    # Measured at 1.370 and 1.050%.
+    "marker-arc": (1.6, 0.012, "resvg marks the joins of the cubics an arc became"),
+    # A closed subpath's first vertex faces the bisector of the closing
+    # segment and the first one, at its start and again at the `Z` that
+    # returns to it. resvg faces the start along the first segment and the end
+    # along the closing one, so each corner marker points a different way.
+    # Measured at 2.411 and 2.635%.
+    "marker-closed": (2.7, 0.029, "resvg does not bisect at a closed subpath's start"),
+    # §11.6.2 clips a marker whose `overflow` is hidden to its viewport,
+    # `markerWidth` by `markerHeight`; a `slice` fit overhangs that, and is
+    # cut to it here. resvg clips to the `viewBox` instead, and draws the
+    # whole overhang. Measured at 14.509 and 7.807%.
+    "marker-viewbox-clip": (15.5, 0.085, "resvg clips a marker to its viewBox, not its viewport"),
 }
 
 

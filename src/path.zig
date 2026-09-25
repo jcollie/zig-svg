@@ -82,6 +82,16 @@ pub const Options = struct {
     /// An explicit `Z` closes either way -- that is the data saying so.
     close_subpaths: bool = true,
 
+    /// Where each command's nodes end, when the caller wants to know.
+    ///
+    /// After every command the node count is appended here, so the nodes
+    /// between two entries are one command's -- which an arc needs, because
+    /// it comes out as up to four cubics and is still one segment of the
+    /// path. Markers are what ask: §11.6 puts one at every vertex the
+    /// document wrote, and the joins between an arc's cubics are not
+    /// vertices. Null asks for nothing.
+    command_ends: ?*std.ArrayList(usize) = null,
+
     /// Nothing is refused. For a program drawing files it produced itself.
     pub const unlimited: Options = .{ .max_nodes = std.math.maxInt(usize) };
 };
@@ -107,6 +117,7 @@ pub fn build(
         // one's nodes.
         .node_ceiling = std.math.add(usize, path.nodes.items.len, opts.max_nodes) catch
             std.math.maxInt(usize),
+        .command_ends = opts.command_ends,
     };
 
     p.skipWsAndCommas();
@@ -176,6 +187,8 @@ const State = struct {
     node_ceiling: usize,
     /// See `Options.close_subpaths`.
     close_subpaths: bool,
+    /// See `Options.command_ends`.
+    command_ends: ?*std.ArrayList(usize) = null,
 
     /// The current point, in user units.
     x: f64 = 0,
@@ -325,6 +338,7 @@ const State = struct {
             else => return error.UnknownCommand,
         }
         try self.checkBudget();
+        if (self.command_ends) |ends| try ends.append(self.alloc, self.path.nodes.items.len);
     }
 
     fn cubic(self: *State, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) BuildError!void {
@@ -575,4 +589,19 @@ test "the empty string is a path with nothing in it" {
     var path = try buildOne(testing.allocator, "   ");
     defer path.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), path.nodes.items.len);
+}
+
+test "a command's nodes can be told apart, an arc's included" {
+    const gpa = std.testing.allocator;
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    var ends: std.ArrayList(usize) = .empty;
+    defer ends.deinit(gpa);
+    try build(&p, gpa, "M0 0 L10 0 A5 5 0 0 1 0 10 Z", .{ .close_subpaths = false, .command_ends = &ends });
+    // A moveto, a line, an arc of however many cubics, and a close.
+    try std.testing.expectEqual(@as(usize, 4), ends.items.len);
+    try std.testing.expectEqual(@as(usize, 1), ends.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), ends.items[1]);
+    try std.testing.expect(ends.items[2] > 3);
+    try std.testing.expectEqual(p.nodes.items.len, ends.items[3]);
 }

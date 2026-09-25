@@ -145,6 +145,10 @@ pub const Error = error{
     /// A `paint-order` that is not `normal` or a list of `fill`, `stroke`
     /// and `markers`, each at most once.
     BadPaintOrder,
+    /// A `marker-start`, `marker-mid` or `marker-end` naming something that
+    /// is not a `<marker>`, or a `<marker>` whose `orient` or `markerUnits`
+    /// is none of the values those take.
+    BadMarker,
     /// A `font-weight` that is neither a number in range nor `normal` or
     /// `bold`.
     BadFontWeight,
@@ -330,6 +334,13 @@ pub const Inherited = struct {
     /// is painted first. Inherited.
     paint_order: ?[3]PaintLayer = null,
 
+    /// §11.6's `marker-start`, `marker-mid` and `marker-end`, as the id each
+    /// names. Inherited; an empty id is `none`, which a child can set to stop
+    /// what it would otherwise inherit.
+    marker_start: ?[]const u8 = null,
+    marker_mid: ?[]const u8 = null,
+    marker_end: ?[]const u8 = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -354,6 +365,9 @@ pub const Inherited = struct {
             .image_rendering = child.image_rendering orelse self.image_rendering,
             .visible = child.visible orelse self.visible,
             .paint_order = child.paint_order orelse self.paint_order,
+            .marker_start = child.marker_start orelse self.marker_start,
+            .marker_mid = child.marker_mid orelse self.marker_mid,
+            .marker_end = child.marker_end orelse self.marker_end,
         };
     }
 };
@@ -537,6 +551,13 @@ pub const Shape = struct {
     mask: ?[]const u8,
     /// The order the fill, the stroke and the markers are painted in.
     paint_order: [3]PaintLayer,
+    /// The ids of the `<marker>` elements for the start, the middle vertices
+    /// and the end, or null for none. Only a `<path>`, `<line>`,
+    /// `<polyline>` or `<polygon>` has markers; §11.6 gives none to anything
+    /// else.
+    marker_start: ?[]const u8 = null,
+    marker_mid: ?[]const u8 = null,
+    marker_end: ?[]const u8 = null,
     /// False under `visibility: hidden` or `collapse`.
     ///
     /// A hidden shape is still yielded rather than dropped, because it still
@@ -670,6 +691,65 @@ pub const Document = struct {
         const target = std.mem.trim(u8, raw, " \t\r\n");
         if (target.len < 2 or target[0] != '#') return null;
         return self.ids.get(target[1..]);
+    }
+
+    /// A `<marker>`'s attributes, read.
+    pub fn markerSpec(self: *const Document, node: ztree.NodeId) Error!MarkerSpec {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        var spec: MarkerSpec = .{};
+        spec.width = try it.lengthOf(node, "markerWidth", .x, 3);
+        spec.height = try it.lengthOf(node, "markerHeight", .y, 3);
+        spec.ref_x = try it.lengthOf(node, "refX", .x, 0);
+        spec.ref_y = try it.lengthOf(node, "refY", .y, 0);
+        if (it.attr(node, "orient")) |raw| spec.orient = try parseOrient(raw);
+        if (it.attr(node, "markerUnits")) |raw| {
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            if (std.mem.eql(u8, t, "userSpaceOnUse")) {
+                spec.stroke_width_units = false;
+            } else if (!std.mem.eql(u8, t, "strokeWidth")) return error.BadMarker;
+        }
+        if (it.attr(node, "viewBox")) |raw| spec.view_box = try parseViewBox(raw);
+        if (it.attr(node, "preserveAspectRatio")) |raw| spec.preserve_aspect_ratio = try PreserveAspectRatio.parse(raw);
+        if (it.presentation(node, "overflow")) |raw| {
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            spec.clips = !(std.mem.eql(u8, t, "visible") or std.mem.eql(u8, t, "auto"));
+        }
+        return spec;
+    }
+
+    /// A walk of what is inside `node` -- a `<marker>` -- under `ctm`, with
+    /// the properties it inherits from where it is written.
+    ///
+    /// §11.6.2: a marker's content inherits from the `<marker>` and its
+    /// ancestors, not from the shape it is drawn on, so an arrowhead is the
+    /// same arrowhead on a red line and a blue one. `subtree` starts from
+    /// nothing, which is right for a clip path and wrong for this.
+    pub fn contentOf(self: *const Document, node: ztree.NodeId, ctm: z2d.Transformation) Error!PathIterator {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        it.started = true;
+        var chain: [max_container_depth + 1]ztree.NodeId = undefined;
+        var count: usize = 0;
+        var at: ?ztree.NodeId = node;
+        while (at) |n| : (at = self.tree.node(n).parent) {
+            if (self.tree.node(n).kind != .element) continue;
+            if (count == chain.len) return error.TooDeeplyNested;
+            chain[count] = n;
+            count += 1;
+        }
+        var inherited: Inherited = .{};
+        it.viewport.font_size = null;
+        while (count > 0) {
+            count -= 1;
+            inherited = inherited.with(try it.readInherited(chain[count]));
+            it.viewport.font_size = inherited.font_size;
+        }
+        it.stack[0] = .{
+            .node = node,
+            .next_child = 0,
+            .inherited = inherited,
+            .transform = ctm,
+        };
+        return it;
     }
 
     /// The runs of one `<text>`, for measuring.
@@ -1220,6 +1300,23 @@ pub const PathIterator = struct {
         return color.parseOpacity(raw);
     }
 
+    /// The `<marker>` one of `marker-start`, `marker-mid` and `marker-end`
+    /// names on this element: its id, "" for `none`, and null when neither
+    /// the property nor the `marker` shorthand says anything.
+    ///
+    /// The shorthand sets all three. It is not an attribute -- SVG 2 lists
+    /// only the three longhands as presentation attributes -- so it reaches
+    /// this only from `style` or a `<style>`, and a longhand on the same
+    /// element wins over it.
+    fn markerOf(self: *const PathIterator, node: ztree.NodeId, name: []const u8) Error!?[]const u8 {
+        const raw = self.presentation(node, name) orelse
+            self.presentation(node, "marker") orelse
+            return null;
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (std.mem.eql(u8, t, "none")) return "";
+        return referenceId(t) orelse error.BadReference;
+    }
+
     /// What an element's `clip-path`, `mask` and `filter` name, or null for
     /// each.
     fn refsOf(self: *const PathIterator, node: ztree.NodeId) Error!Refs {
@@ -1371,6 +1468,9 @@ pub const PathIterator = struct {
                 .text_anchor = effective.text_anchor,
                 .visible = effective.visible orelse true,
                 .paint_order = effective.paint_order orelse PaintLayer.normal,
+                .marker_start = if (takesMarkers(geometry)) nonEmpty(effective.marker_start) else null,
+                .marker_mid = if (takesMarkers(geometry)) nonEmpty(effective.marker_mid) else null,
+                .marker_end = if (takesMarkers(geometry)) nonEmpty(effective.marker_end) else null,
                 .opacity = try self.opacityOf(node),
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
@@ -1657,6 +1757,9 @@ pub const PathIterator = struct {
             .image_rendering = if (self.presentation(node, "image-rendering")) |v| try parseImageRendering(v) else null,
             .visible = if (self.presentation(node, "visibility")) |v| try parseVisibility(v) else null,
             .paint_order = if (self.presentation(node, "paint-order")) |v| try parsePaintOrder(v) else null,
+            .marker_start = try self.markerOf(node, "marker-start"),
+            .marker_mid = try self.markerOf(node, "marker-mid"),
+            .marker_end = try self.markerOf(node, "marker-end"),
         };
     }
 
@@ -1726,6 +1829,20 @@ pub const PathIterator = struct {
         return null;
     }
 };
+
+/// Whether a shape is one §11.6 puts markers on.
+fn takesMarkers(geometry: shapes.Geometry) bool {
+    return switch (geometry) {
+        .path, .line, .poly => true,
+        else => false,
+    };
+}
+
+/// An id, or null when it is empty -- `none`, as `Inherited` spells it.
+fn nonEmpty(id: ?[]const u8) ?[]const u8 {
+    const v = id orelse return null;
+    return if (v.len == 0) null else v;
+}
 
 /// Whether an attribute value names a resource rather than saying `none`.
 fn namesSomething(raw: ?[]const u8) bool {
@@ -1874,6 +1991,32 @@ fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
     return error.BadTextAnchor;
 }
 
+/// A `<marker>`'s `orient`: `auto`, `auto-start-reverse`, or an angle --
+/// degrees when it has no unit, or `deg`, `rad`, `grad` or `turn`.
+fn parseOrient(raw: []const u8) Error!MarkerSpec.Orient {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "auto")) return .auto;
+    if (std.mem.eql(u8, t, "auto-start-reverse")) return .auto_start_reverse;
+    const units = [_]struct { suffix: []const u8, degrees: f64 }{
+        .{ .suffix = "deg", .degrees = 1 },
+        .{ .suffix = "grad", .degrees = 0.9 },
+        .{ .suffix = "rad", .degrees = 180.0 / std.math.pi },
+        .{ .suffix = "turn", .degrees = 360 },
+    };
+    var number = t;
+    var scale: f64 = 1;
+    for (units) |u| {
+        if (std.mem.endsWith(u8, t, u.suffix)) {
+            number = t[0 .. t.len - u.suffix.len];
+            scale = u.degrees;
+            break;
+        }
+    }
+    const v = std.fmt.parseFloat(f64, number) catch return error.BadMarker;
+    if (!std.math.isFinite(v)) return error.BadMarker;
+    return .{ .angle = v * scale };
+}
+
 /// SVG 2's `paint-order`: `normal`, or up to three of `fill`, `stroke` and
 /// `markers`, each at most once, the ones not named following in their normal
 /// order. So `stroke` alone is stroke, fill, markers.
@@ -2008,6 +2151,36 @@ fn parseMiterLimit(text: []const u8) Error!f64 {
 /// `shape_count` is the number it produced rather than a number counted
 /// alongside it. Agreement is not tested for here, it is the only thing that
 /// can happen.
+/// A `<marker>` element, read: §11.6.2's attributes.
+pub const MarkerSpec = struct {
+    /// The marker's viewport, in its own units before any `viewBox`.
+    width: f64 = 3,
+    height: f64 = 3,
+    /// The point placed on the vertex, in the `viewBox`'s coordinates when
+    /// there is one.
+    ref_x: f64 = 0,
+    ref_y: f64 = 0,
+    orient: Orient = .{ .angle = 0 },
+    /// `strokeWidth`, the default, scales the marker by the stroke's width;
+    /// `userSpaceOnUse` does not.
+    stroke_width_units: bool = true,
+    view_box: ?ViewBox = null,
+    preserve_aspect_ratio: PreserveAspectRatio = .meet_centred,
+    /// Whether the viewport clips, which it does unless `overflow` is
+    /// visible or auto.
+    clips: bool = true,
+
+    pub const Orient = union(enum) {
+        /// Along the path.
+        auto,
+        /// Along the path, and turned about at the start: SVG 2's, for an
+        /// arrow at each end that points outwards.
+        auto_start_reverse,
+        /// A fixed angle, in degrees.
+        angle: f64,
+    };
+};
+
 /// What a caller can say about how a document is to be read.
 pub const ReadOptions = struct {
     /// The reader's languages, as BCP 47 tags, most preferred first. §5.8.5's
@@ -3332,4 +3505,53 @@ test "paint-order names what goes first, and the rest follow in order" {
     try testing.expectError(error.BadPaintOrder, parsePaintOrder("stroke stroke"));
     try testing.expectError(error.BadPaintOrder, parsePaintOrder("outline"));
     try testing.expectError(error.BadPaintOrder, parsePaintOrder(""));
+}
+
+test "orient is auto, auto-start-reverse, or an angle in any of its units" {
+    try testing.expectEqual(MarkerSpec.Orient.auto, try parseOrient(" auto "));
+    try testing.expectEqual(MarkerSpec.Orient.auto_start_reverse, try parseOrient("auto-start-reverse"));
+    try testing.expectEqual(@as(f64, 30), (try parseOrient("30")).angle);
+    try testing.expectEqual(@as(f64, 90), (try parseOrient("0.25turn")).angle);
+    try testing.expectApproxEqAbs(@as(f64, 90), (try parseOrient("100grad")).angle, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 180), (try parseOrient("3.141592653589793rad")).angle, 1e-9);
+    try testing.expectError(error.BadMarker, parseOrient("sideways"));
+    try testing.expectError(error.BadMarker, parseOrient("nan"));
+}
+
+test "markers reach paths, lines and polys, from a longhand or the shorthand" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 10 10\"><marker id=\"m\"/>" ++
+        "<g style=\"marker: url(#m)\"><path d=\"M0 0 L1 1\" marker-mid=\"none\"/>" ++
+        "<rect width=\"1\" height=\"1\"/></g>" ++
+        // `marker` is a property and not an attribute, as in resvg.
+        "<line x2=\"1\" marker=\"url(#m)\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const p = (try it.next()).?.shape;
+    try testing.expectEqualStrings("m", p.marker_start.?);
+    try testing.expectEqual(@as(?[]const u8, null), p.marker_mid);
+    try testing.expectEqualStrings("m", p.marker_end.?);
+    const r = (try it.next()).?.shape;
+    try testing.expectEqual(@as(?[]const u8, null), r.marker_start);
+    const l = (try it.next()).?.shape;
+    try testing.expectEqual(@as(?[]const u8, null), l.marker_end);
+}
+
+test "a marker's attributes default as SVG says" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 10 10\"><marker id=\"a\"/>" ++
+        "<marker id=\"b\" markerWidth=\"6\" refX=\"1\" orient=\"auto\" markerUnits=\"userSpaceOnUse\" viewBox=\"0 0 2 2\" overflow=\"visible\"/>" ++
+        "<marker id=\"c\" markerUnits=\"pixels\"/><rect width=\"1\" height=\"1\"/></svg>");
+    defer doc.deinit();
+    const a = try doc.markerSpec(doc.ids.get("a").?);
+    try testing.expectEqual(@as(f64, 3), a.width);
+    try testing.expectEqual(@as(f64, 3), a.height);
+    try testing.expectEqual(@as(f64, 0), a.orient.angle);
+    try testing.expect(a.stroke_width_units and a.clips and a.view_box == null);
+    const b = try doc.markerSpec(doc.ids.get("b").?);
+    try testing.expectEqual(@as(f64, 6), b.width);
+    try testing.expectEqual(@as(f64, 1), b.ref_x);
+    try testing.expectEqual(MarkerSpec.Orient.auto, b.orient);
+    try testing.expect(!b.stroke_width_units and !b.clips and b.view_box != null);
+    try testing.expectError(error.BadMarker, doc.markerSpec(doc.ids.get("c").?));
 }

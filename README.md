@@ -436,6 +436,8 @@ short of the specification.
 | `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
 | `paint-order` | yes, inherited — `fill`, `stroke` and `markers` in any order |
+| `<marker>`, `marker-start`, `marker-mid`, `marker-end` | yes, inherited, on `<path>`, `<line>`, `<polyline>` and `<polygon>`; `marker` as the shorthand in CSS — `orient` (`auto`, `auto-start-reverse`, an angle), both `markerUnits`, `viewBox`, `preserveAspectRatio` and `overflow` |
+| Markers in one document | to `Limits.max_markers` (16384), counted before any is drawn |
 | `viewBox`, `width`, `height` | yes — the document's own size is what it is drawn at |
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | Entity references in attribute values | yes, resolved as the document is parsed |
@@ -631,6 +633,15 @@ nothing, so the decoded size needs a budget of its own — shared by every
 picture in the document, and paid for again by each reduction made to draw one
 small. `max_images` bounds the number of decodes, which a thousand one-pixel
 pictures would otherwise get for free.
+
+`max_markers` is the node budget's counterpart for markers: each vertex of
+every marked path draws the whole of a `<marker>`'s content again, so a
+polyline of a few thousand points is a few thousand drawings. The vertices are
+counted before any marker is drawn, and a document past the budget is refused
+whole rather than drawn part of the way. A marker drawn inside a marker counts
+against `max_mask_depth`, and one met again inside itself — which a `marker`
+property on a group around the `<marker>` does, since its content inherits from
+there — draws nothing, as in resvg.
 
 `max_layers` and `max_mask_depth` bound the *memory* rather than the work.
 Every composited group, every clip and every mask is a surface the size of the

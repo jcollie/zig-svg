@@ -13,9 +13,12 @@
 //!
 //! ## What it draws, and what it does not
 //!
-//! The static half of SVG 1.1: paths and the basic shapes, `<g>` and `<use>`,
-//! transforms, fills and strokes with every property that goes with them,
-//! gradients and patterns, clipping and masking, the commonest `<filter>`
+//! The static half of SVG 1.1: paths and the basic shapes, `<g>`, `<a>`,
+//! `<use>` and `<symbol>`, nested `<svg>` viewports, `<switch>` and the
+//! conditional attributes, `display` and `visibility`, transforms, fills and
+//! strokes with every property that goes with them, markers and
+//! `paint-order`, gradients and patterns, clipping and masking, the commonest
+//! `<filter>`
 //! primitives, CSS in a `style` attribute or a `<style>` element, `<text>` and
 //! `<tspan>` with the fonts the caller supplies, and `<image>` with the
 //! pictures z2dimg decodes. The path data grammar of §8.3 is complete,
@@ -86,6 +89,8 @@ pub const image = @import("image.zig");
 pub const bitmap = @import("bitmap.zig");
 /// Drawing a decoded picture under a matrix.
 pub const resample = @import("resample.zig");
+/// Where a path's markers go and which way each faces: SVG 1.1 §11.6.
+pub const marker = @import("marker.zig");
 /// SVG 1.1 §6: the `style` attribute, a `<style>` element's rules, and the
 /// cascade that decides between them.
 ///
@@ -155,6 +160,7 @@ test {
     _ = image;
     _ = bitmap;
     _ = resample;
+    _ = marker;
     _ = css;
     _ = length;
     _ = path;

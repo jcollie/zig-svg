@@ -29,6 +29,7 @@ const document = @import("document.zig");
 const filter = @import("filter.zig");
 const gradient = @import("gradient.zig");
 const image = @import("image.zig");
+const marker = @import("marker.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const pattern = @import("pattern.zig");
@@ -136,6 +137,16 @@ pub const Limits = struct {
     /// thousand one-pixel images, which `max_image_pixels` would not.
     max_images: usize = 1 << 8,
 
+    /// The most markers to draw, over the whole document.
+    ///
+    /// A marker is drawn at every vertex of every path that names one, and
+    /// each is a walk of the `<marker>`'s content -- so a path of a few
+    /// thousand short segments with a marker of a few hundred shapes is a
+    /// great deal of drawing from a small file. The vertices of a path are
+    /// counted before any of its markers is drawn, and the whole path is
+    /// refused rather than drawn in part.
+    max_markers: usize = 1 << 14,
+
     /// Nothing is refused. For a program drawing files it produced itself, on
     /// a machine it is not sharing.
     pub const unlimited: Limits = .{
@@ -148,6 +159,7 @@ pub const Limits = struct {
         .max_input_bytes = math.maxInt(u64),
         .max_image_pixels = math.maxInt(u64),
         .max_images = math.maxInt(usize),
+        .max_markers = math.maxInt(usize),
     };
 
     /// Refuses a picture this budget will not pay for.
@@ -347,6 +359,8 @@ pub const Error = document.Error || document.BuildError || path.BuildError || z2
     /// `<mask>` whose content is itself masked, or a `<clipPath>` carrying a
     /// `clip-path` of its own, repeated past any sense.
     TooManyMaskHops,
+    /// More markers than `Limits.max_markers`.
+    TooManyMarkers,
 } || gradient.Error || pattern.Error || filter.Error || image.Error || bitmap.Error;
 
 /// Where in a surface to draw, in pixels.
@@ -441,12 +455,15 @@ fn drawDocument(
     });
     defer images.deinit(gpa);
 
+    var markers_left = opts.limits.max_markers;
+
     var walk = doc.paths();
     return drawItems(gpa, &layers, doc, &walk, .{
         .base = doc.transformFor(box.x, box.y, box.width, box.height),
         .nodes_left = &nodes_left,
         .depth = 0,
         .images = &images,
+        .markers_left = &markers_left,
     }, opts);
 }
 
@@ -486,6 +503,18 @@ const Pass = struct {
     /// the node budget is: an `<image>` inside a mask or a pattern tile is
     /// the same picture as one outside it.
     images: *bitmap.Cache,
+    /// The document's marker budget; see `Limits.max_markers`.
+    markers_left: *usize,
+    /// The markers this pass is drawing the content of, innermost first. A
+    /// marker met again inside itself draws nothing, as resvg's does: its
+    /// content inherits from the marker's ancestors, so a `marker` property
+    /// on an enclosing group reaches the marker's own paths.
+    drawing: ?*const MarkerLink = null,
+};
+
+const MarkerLink = struct {
+    node: ztree.NodeId,
+    outer: ?*const MarkerLink,
 };
 
 /// Draw whatever a walk yields onto the top of a layer stack.
@@ -637,7 +666,7 @@ fn drawItems(
                 try paintStroke(gpa, surface, doc, shape, s, ctm, pass, &stroke_pen, opts);
                 if (pen_after == null) pen_after = stroke_pen;
             },
-            .markers => {},
+            .markers => try paintMarkers(gpa, surface, doc, shape, ctm, pass, opts),
         };
         // Text that is neither filled nor stroked still takes up its room.
         if (pen_after) |after| {
@@ -811,6 +840,179 @@ fn paintStroke(
             else => |e| return e,
         };
     }
+}
+
+/// Draws a shape's markers onto `surface`: SVG 1.1 §11.6, the third
+/// painting pass.
+///
+/// The shape is built again in its own user space, with a note of where each
+/// of the document's commands ended, because a marker goes at every vertex
+/// the document wrote and faces the path's direction there -- `marker.zig`
+/// works that out. Each vertex's marker is then drawn from the `<marker>`'s
+/// content, under a matrix that puts its reference point on the vertex.
+fn paintMarkers(
+    gpa: Allocator,
+    surface: *z2d.Surface,
+    doc: *const document.Document,
+    shape: document.Shape,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    if (shape.marker_start == null and shape.marker_mid == null and shape.marker_end == null) return;
+
+    var p: z2d.Path = .empty;
+    defer p.deinit(gpa);
+    var ends: std.ArrayList(usize) = .empty;
+    defer ends.deinit(gpa);
+    switch (shape.geometry) {
+        .path => |d| try path.build(&p, gpa, d, .{
+            .max_nodes = pass.nodes_left.*,
+            .close_subpaths = false,
+            .command_ends = &ends,
+        }),
+        .line, .poly => {
+            try document.buildShape(&p, gpa, shape.geometry, .identity, .{
+                .max_nodes = pass.nodes_left.*,
+                .close_subpaths = false,
+            });
+            // Every node of a line or a polyline is a vertex of its own,
+            // except that a close is two nodes -- the close and the move
+            // back to the start -- and one vertex.
+            var i: usize = 0;
+            while (i < p.nodes.items.len) : (i += 1) {
+                if (p.nodes.items[i] == .close_path) i += 1;
+                try ends.append(gpa, @min(i + 1, p.nodes.items.len));
+            }
+        },
+        else => return,
+    }
+    try spendNodes(pass, p.nodes.items.len);
+
+    var vertices: std.ArrayList(marker.Vertex) = .empty;
+    defer vertices.deinit(gpa);
+    try marker.vertices(gpa, p.nodes.items, ends.items, &vertices);
+
+    // Counted before anything is drawn, so that a path past the budget is
+    // refused whole.
+    var count: usize = 0;
+    for (vertices.items) |v| {
+        if (v.start and shape.marker_start != null) count += 1;
+        if (v.end and shape.marker_end != null) count += 1;
+        if (!v.start and !v.end and shape.marker_mid != null) count += 1;
+    }
+    if (count > pass.markers_left.*) return error.TooManyMarkers;
+    pass.markers_left.* -= count;
+
+    // `strokeWidth` units are the stroke's width whether or not the shape is
+    // stroked: §11.6.2 scales by the computed `stroke-width`.
+    const stroke_width = shape.stroke_width orelse opts.stroke_width;
+    for (vertices.items) |v| {
+        if (v.start) if (shape.marker_start) |id| try drawMarker(gpa, surface, doc, id, v, true, ctm, stroke_width, pass, opts);
+        if (!v.start and !v.end) if (shape.marker_mid) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, pass, opts);
+        if (v.end) if (shape.marker_end) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, pass, opts);
+    }
+}
+
+/// Draws one marker at one vertex.
+///
+/// The marker's viewport is `markerWidth` by `markerHeight`, scaled by the
+/// stroke's width in `strokeWidth` units, turned by `orient`, and placed so
+/// that `refX`, `refY` -- in the `viewBox`'s coordinates -- is on the vertex.
+/// Its content is fitted into that viewport by the `viewBox`, as a nested
+/// `<svg>`'s is, and clipped to it unless `overflow` is visible: into a
+/// surface the size of its footprint and composited down, as a pattern cell
+/// is.
+fn drawMarker(
+    gpa: Allocator,
+    target: *z2d.Surface,
+    doc: *const document.Document,
+    id: []const u8,
+    v: marker.Vertex,
+    is_start: bool,
+    ctm: z2d.Transformation,
+    stroke_width: f64,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    // A marker's content can carry markers of its own, and so on: bounded
+    // like a mask inside a mask.
+    if (pass.depth >= opts.limits.max_mask_depth) return error.TooManyMaskHops;
+    const node = doc.ids.get(id) orelse return error.UnknownReference;
+    if (!std.mem.eql(u8, doc.tree.node(node).name.local, "marker")) return error.BadMarker;
+    var outer = pass.drawing;
+    while (outer) |link| : (outer = link.outer) if (link.node == node) return;
+    const spec = try doc.markerSpec(node);
+    if (!(spec.width > 0) or !(spec.height > 0)) return;
+
+    const angle = switch (spec.orient) {
+        .auto => v.angle,
+        .auto_start_reverse => if (is_start) v.angle + std.math.pi else v.angle,
+        .angle => |degrees| std.math.degreesToRadians(degrees),
+    };
+    const scale = if (spec.stroke_width_units) stroke_width else 1.0;
+    const fit: z2d.Transformation = if (spec.view_box) |vb|
+        document.viewBoxTransform(vb, spec.preserve_aspect_ratio, 0, 0, spec.width, spec.height)
+    else
+        .identity;
+    var ref_x = spec.ref_x;
+    var ref_y = spec.ref_y;
+    fit.userToDevice(&ref_x, &ref_y);
+    // Where the viewport goes: its reference point on the vertex, turned and
+    // scaled about it.
+    const place = ctm.translate(v.x, v.y).rotate(angle).scale(scale, scale).translate(-ref_x, -ref_y);
+    const content = place.mul(fit);
+    if (!transform.isFinite(content)) return;
+
+    const link: MarkerLink = .{ .node = node, .outer = pass.drawing };
+    const deeper: Pass = .{
+        .base = .identity,
+        .nodes_left = pass.nodes_left,
+        .depth = pass.depth + 1,
+        .images = pass.images,
+        .markers_left = pass.markers_left,
+        .drawing = &link,
+    };
+
+    if (!spec.clips) {
+        var layers: Layers = .{ .bottom = target };
+        defer layers.deinit(gpa);
+        var it = try doc.contentOf(node, content);
+        return drawItems(gpa, &layers, doc, &it, deeper, opts);
+    }
+
+    const viewport: Box = .{ .width = spec.width, .height = spec.height };
+    const canvas: Box = .{
+        .width = @floatFromInt(target.getWidth()),
+        .height = @floatFromInt(target.getHeight()),
+    };
+    const footprint = intersect(mappedBounds(place, viewport), canvas) orelse return;
+    const fx: i32 = @intFromFloat(@floor(footprint.x));
+    const fy: i32 = @intFromFloat(@floor(footprint.y));
+    const fw: i32 = @intFromFloat(@ceil(footprint.x + footprint.width) - @floor(footprint.x));
+    const fh: i32 = @intFromFloat(@ceil(footprint.y + footprint.height) - @floor(footprint.y));
+    if (fw <= 0 or fh <= 0) return;
+    const to_cell = z2d.Transformation.identity
+        .translate(-@as(f64, @floatFromInt(fx)), -@as(f64, @floatFromInt(fy)));
+
+    var ink = try z2d.Surface.init(.image_surface_rgba, gpa, fw, fh);
+    defer ink.deinit(gpa);
+    {
+        var layers: Layers = .{ .bottom = &ink };
+        defer layers.deinit(gpa);
+        var it = try doc.contentOf(node, to_cell.mul(content));
+        try drawItems(gpa, &layers, doc, &it, deeper, opts);
+    }
+    var cut = (try clipToViewport(gpa, null, .{
+        .x = 0,
+        .y = 0,
+        .width = spec.width,
+        .height = spec.height,
+    }, to_cell.mul(place), fw, fh, opts)).?;
+    defer cut.deinit(gpa);
+    const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
+    ink.composite(&cut, .dst_in, 0, 0, precision);
+    target.composite(&ink, .src_over, fx, fy, precision);
 }
 
 /// Lays a run of text out without painting it, so that the run after it
@@ -2063,6 +2265,8 @@ fn buildMask(
             .nodes_left = pass.nodes_left,
             .depth = pass.depth + 1,
             .images = pass.images,
+            .markers_left = pass.markers_left,
+            .drawing = pass.drawing,
         }, opts);
     }
 
@@ -2485,6 +2689,8 @@ fn paintTiled(
                     .nodes_left = pass.nodes_left,
                     .depth = pass.depth + 1,
                     .images = pass.images,
+                    .markers_left = pass.markers_left,
+                    .drawing = pass.drawing,
                 }, opts);
             }
 
@@ -5633,4 +5839,55 @@ test "a hidden child of a clip path cuts nothing" {
     defer sfc.deinit(gpa);
     try testing.expectEqual(@as(u8, 255), sfc.getPixel(5, 5).?.rgba.a);
     try testing.expectEqual(@as(u8, 0), sfc.getPixel(15, 5).?.rgba.a);
+}
+
+test "markers go on every vertex, facing the path" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 30 10\"><marker id=\"m\" markerUnits=\"userSpaceOnUse\" " ++
+        "markerWidth=\"4\" markerHeight=\"4\" refX=\"0\" refY=\"2\" orient=\"auto\"><rect width=\"4\" height=\"4\"/></marker>" ++
+        "<path d=\"M5 5 L15 5 L25 5\" style=\"marker: url(#m)\"/></svg>", .{ .width = 30, .height = 10 });
+    defer sfc.deinit(gpa);
+    // Each one starts on its vertex and runs along the line.
+    for ([_]i32{ 6, 16, 26 }) |x| try testing.expectEqual(@as(u8, 255), sfc.getPixel(x, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(3, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(11, 5).?.rgba.a);
+}
+
+test "a marker scales with the stroke in strokeWidth units" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 20 20\"><marker id=\"m\" markerWidth=\"2\" markerHeight=\"2\" refX=\"1\" refY=\"1\">" ++
+        "<rect width=\"2\" height=\"2\"/></marker>" ++
+        "<path d=\"M10 10 L10 10\" stroke-width=\"4\" marker-start=\"url(#m)\"/></svg>", .{ .width = 20, .height = 20 });
+    defer sfc.deinit(gpa);
+    // Two by two, four times over: eight across, centered on the vertex.
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(6, 10).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(13, 10).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 10).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(15, 10).?.rgba.a);
+}
+
+test "a marker met again inside itself draws nothing more" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 30 10\"><g style=\"marker: url(#m)\"><marker id=\"m\" markerUnits=\"userSpaceOnUse\" " ++
+        "markerWidth=\"4\" markerHeight=\"4\" refX=\"2\" refY=\"2\"><path d=\"M0 2 L4 2\" stroke=\"black\" stroke-width=\"4\"/></marker>" ++
+        "<path d=\"M5 5 L25 5\"/></g></svg>", .{ .width = 30, .height = 10 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(5, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(24, 5).?.rgba.a);
+}
+
+test "markers are refused past the budget, and from anything but a marker" {
+    const gpa = testing.allocator;
+    const doc = "<svg viewBox=\"0 0 10 10\"><marker id=\"m\"><rect width=\"1\" height=\"1\"/></marker>" ++
+        "<polyline points=\"0 0 1 1 2 2 3 3\" style=\"marker: url(#m)\"/></svg>";
+    var limits: Limits = .{};
+    limits.max_markers = 3;
+    try testing.expectError(error.TooManyMarkers, render(gpa, doc, .{ .width = 10, .height = 10, .limits = limits }));
+    limits.max_markers = 4;
+    var sfc = try render(gpa, doc, .{ .width = 10, .height = 10, .limits = limits });
+    sfc.deinit(gpa);
+    try testing.expectError(error.BadMarker, render(gpa, "<svg viewBox=\"0 0 10 10\"><rect id=\"r\" width=\"1\" height=\"1\"/>" ++
+        "<path d=\"M0 0 L5 5\" marker-end=\"url(#r)\"/></svg>", .{ .width = 10, .height = 10 }));
+    try testing.expectError(error.UnknownReference, render(gpa, "<svg viewBox=\"0 0 10 10\">" ++
+        "<path d=\"M0 0 L5 5\" marker-end=\"url(#nothing)\"/></svg>", .{ .width = 10, .height = 10 }));
 }

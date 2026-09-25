@@ -9,7 +9,8 @@ SVG rendering onto [z2d](https://github.com/vancluever/z2d) surfaces, for Zig
 0.16. A document arrives as a byte slice and pixels come back as memory; the
 library performs no I/O of its own — and because rendering is therefore a pure
 function over memory, it can be run in a forked process that seccomp has
-reduced to four system calls.
+reduced to four system calls on Linux, or that Capsicum has cut off from
+everything but its reply pipe on FreeBSD.
 
 The API documentation is generated from the doc comments and published at
 **<https://jeff.jcollie.page/zig-svg/>**.
@@ -692,10 +693,60 @@ the child's job. What the parent validates is the shape of the reply: that the
 buffer is inside the mapping, correctly aligned, and exactly the length the
 stated dimensions require.
 
-Linux and 64-bit only. `svg.sandbox.available` says so at compile time, and
-`render` returns `error.SandboxUnavailable` at run time rather than silently
-rendering unsandboxed — a security feature that quietly turns itself off is
-worse than one that was never there.
+### On FreeBSD
+
+The same design, with [Capsicum](https://www.cl.cam.ac.uk/research/security/capsicum/)
+in place of seccomp; the design came from [z2dimg](https://git.jcollie.dev/jeff/z2dimg),
+whose decoders are sandboxed the same way. Capsicum is not a system call
+filter. It takes away every global namespace at once when a process calls
+`cap_enter`, so that no path can be opened, no address reached and no other
+process signalled, and it limits each descriptor the process still holds to
+the rights it was given. The child arrives at `cap_enter` holding exactly this:
+
+| descriptor | rights |
+| --- | --- |
+| the reply pipe | `CAP_WRITE` |
+| standard input, output and error, under `strict` | none |
+
+— everything else having been closed with `closefrom`, exactly as on Linux.
+The shared mapping is anonymous rather than a `memfd`, so there is no
+descriptor behind it to inherit at all.
+
+Capsicum's own answer to a forbidden call is an error, which would leave a
+subverted renderer looking like one that failed quietly. `PROC_TRAPCAP_CTL`
+turns that error into a `SIGTRAP`, so a refused call ends the child and the
+parent reports `error.SandboxViolation`, as it does for `SIGSYS` on Linux.
+`PROC_TRACE_CTL` stands in for `PR_SET_DUMPABLE`, though a process may turn its
+own tracing back on, which the seccomp filter leaves no way to do; that helps
+only another process of the same user already waiting to attach, and such a
+process could attach to the parent instead.
+
+**What it does not refuse that seccomp does.** Capsicum permits `fork`, which
+names nothing global. The child sets `RLIMIT_NPROC` to zero, which refuses
+`fork` to any user but root, so a program rendering as root has only
+capability mode between a subverted renderer and a fork bomb. It also permits
+the long tail of calls that touch only the process itself — `getpid`,
+anonymous `mmap`, `sigaction` — none of which reaches anything outside.
+
+FreeBSD's system call interface is its libc, so the `svg` module asks for libc
+when it is built for FreeBSD, and nowhere else.
+
+The same tests run on both. On FreeBSD they were run by cross-compiling
+`zig build test -Dtarget=x86_64-freebsd` and running the test executables in a
+FreeBSD 14.5 virtual machine as an unprivileged user — root is exempt from
+`RLIMIT_NPROC`, so testing as root would test less. Everything passes there
+but the three tests that are claims about seccomp's filter alone, which skip;
+and `svgdump --sandbox` draws the same bytes there as unsandboxed, and as on
+Linux.
+
+### Elsewhere
+
+64-bit Linux and 64-bit FreeBSD only. `svg.sandbox.available` says so at
+compile time, and `render` returns `error.SandboxUnavailable` at run time
+rather than silently rendering unsandboxed — a security feature that quietly
+turns itself off is worse than one that was never there. On macOS or Windows,
+render with `svg.render` and decide for yourself what isolation the program
+around it needs.
 
 ## resvg as the oracle
 
@@ -1004,6 +1055,22 @@ Kept in the Zotero collection **zig-svg**.
   <https://man7.org/linux/man-pages/man2/memfd_create.2.html>
 - Kerrisk, M. *prctl(2)*. Linux man-pages.
   <https://man7.org/linux/man-pages/man2/prctl.2.html>
+- Watson, R. N. M., Anderson, J., Laurie, B., & Kennaway, K. (2010, August).
+  Capsicum: Practical Capabilities for UNIX. In *Proceedings of the 19th USENIX
+  Security Symposium* (pp. 29–46). USENIX Association.
+  <https://www.usenix.org/legacy/event/sec10/tech/full_papers/Watson.pdf> —
+  the design `src/sandbox/capsicum.zig` locks the FreeBSD child down with.
+- The FreeBSD Project. *capsicum(4)*. FreeBSD Manual Pages.
+  <https://man.freebsd.org/cgi/man.cgi?query=capsicum&sektion=4>
+- The FreeBSD Project. *cap_enter(2)*. FreeBSD Manual Pages.
+  <https://man.freebsd.org/cgi/man.cgi?query=cap_enter&sektion=2>
+- The FreeBSD Project. *cap_rights_limit(2)*. FreeBSD Manual Pages.
+  <https://man.freebsd.org/cgi/man.cgi?query=cap_rights_limit&sektion=2>
+- The FreeBSD Project. *procctl(2)*. FreeBSD Manual Pages.
+  <https://man.freebsd.org/cgi/man.cgi?query=procctl&sektion=2> —
+  `PROC_TRAPCAP_CTL`, which makes a refused call fatal, and `PROC_TRACE_CTL`.
+- The FreeBSD Project. *closefrom(2)*. FreeBSD Manual Pages.
+  <https://man.freebsd.org/cgi/man.cgi?query=closefrom&sektion=2>
 - McCanne, S., & Jacobson, V. (1993, January). The BSD Packet Filter: A New
   Architecture for User-level Packet Capture. In *Proceedings of the USENIX
   Winter 1993 Conference* (pp. 259–269). USENIX Association.

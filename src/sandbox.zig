@@ -15,11 +15,15 @@
 //! This follows [glycin](https://gitlab.gnome.org/GNOME/glycin), GNOME's image
 //! loading library, which runs each format's loader as a separate sandboxed
 //! process and passes the pixels back through shared memory. The mechanism
-//! here is smaller — one `fork`, one seccomp filter, one `memfd` — because the
+//! here is smaller — one `fork`, one lock, one shared mapping — because the
 //! renderer it is protecting is already pure: it is handed a byte slice and a
 //! buffer, so there is nothing to permit.
 //!
 //! ## How it works
+//!
+//! As it runs on Linux; FreeBSD is the same with an anonymous shared mapping
+//! for the `memfd` and Capsicum for the filter, and "Where it runs" says what
+//! that changes.
 //!
 //! ```text
 //!   parent                              child
@@ -115,9 +119,9 @@
 //! **Core dumps**, through `RLIMIT_CORE`, so that a crash does not write the
 //! shared mapping out to disk.
 //!
-//! **Dumpability**, through `PR_SET_DUMPABLE`, which also stops another
-//! process of the same user attaching with `ptrace` and reading the mapping
-//! out from under the parent.
+//! **Dumpability**, through `PR_SET_DUMPABLE` on Linux and `PROC_TRACE_CTL` on
+//! FreeBSD, which also stops another process of the same user attaching with
+//! `ptrace` and reading the mapping out from under the parent.
 //!
 //! It is not a replacement for the limits. A child cannot exhaust the parent's
 //! memory, but it can touch every page of the mapping, so the mapping is sized
@@ -133,13 +137,33 @@
 //!
 //! ## Where it runs
 //!
-//! Linux only, and only on 64-bit. `available` says so at compile time, and
-//! `render` returns `error.SandboxUnavailable` at run time rather than
-//! silently rendering unsandboxed — a security feature that quietly turns
+//! On 64-bit Linux, under seccomp, and on 64-bit FreeBSD, under Capsicum. The
+//! process design is the same on both --- fork, a shared mapping, the reply
+//! pipe on a fixed descriptor, everything else closed --- and only the lock
+//! differs, which is why everything kernel-specific lives in
+//! `sandbox/linux.zig` and `sandbox/freebsd.zig` behind the same handful of
+//! functions, and everything else lives here once.
+//!
+//! seccomp is an allowlist of system calls. Capsicum is not a filter at all:
+//! `cap_enter` takes away every global namespace, so that no path can be
+//! opened, no address reached and no other process signalled, and each
+//! descriptor the child still holds is limited to the rights it was given ---
+//! `CAP_WRITE` on the reply pipe, nothing on the standard streams under
+//! `strict`. A call either one refuses kills the child, and the parent reports
+//! `error.SandboxViolation` for both: `SIGSYS` from the filter, `SIGTRAP` from
+//! Capsicum once `PROC_TRAPCAP_CTL` has turned its refusals into a signal.
+//! `capsicum` says what it does not refuse that seccomp does, which is short
+//! but not empty: `fork`, which `RLIMIT_NPROC` refuses to anyone but root.
+//!
+//! `available` says at compile time whether this target is one of them.
+//! Elsewhere `render` returns `error.SandboxUnavailable` at run time rather
+//! than silently rendering unsandboxed — a security feature that quietly turns
 //! itself off is worse than one that was never there.
 
 const std = @import("std");
 const builtin = @import("builtin");
+/// For the one test that is a claim about seccomp alone; everything else goes
+/// through `os`.
 const linux = std.os.linux;
 const math = std.math;
 const mem = std.mem;
@@ -151,14 +175,33 @@ const ztree = @import("ztree");
 
 const raster = @import("raster.zig");
 
-/// The seccomp filter the child runs under.
+/// The seccomp filter the child runs under on Linux. Its `Profile` is also
+/// what `Options.profile` takes on FreeBSD.
 pub const seccomp = @import("sandbox/seccomp.zig");
+
+/// How the child is locked down on FreeBSD.
+pub const capsicum = @import("sandbox/capsicum.zig");
+
+/// The process plumbing for this target: `sandbox/linux.zig`,
+/// `sandbox/freebsd.zig`, or nothing at all where neither applies. The two
+/// have the same functions with the same meanings, and everything that
+/// differs between the kernels is in them; everything that does not -- the
+/// wire, the validation, the order the child does things in -- is here, once.
+const os = switch (builtin.os.tag) {
+    .linux => @import("sandbox/linux.zig"),
+    .freebsd => @import("sandbox/freebsd.zig"),
+    else => struct {
+        pub const supported = false;
+        pub const Fd = i32;
+    },
+};
 
 /// Whether this target can sandbox anything.
 ///
-/// A 32-bit address space cannot hold the reservation this design makes, and
-/// seccomp is Linux's. Everywhere else, `render` fails rather than pretending.
-pub const available = builtin.os.tag == .linux and @bitSizeOf(usize) == 64 and seccomp.supported;
+/// A 32-bit address space cannot hold the reservation this design makes,
+/// seccomp is Linux's and Capsicum is FreeBSD's. Everywhere else, `render`
+/// fails rather than pretending.
+pub const available = os.supported;
 
 /// The most address space the mapping may reserve. Far above any plausible
 /// picture, and low enough that a `Limits` with nothing in it is caught here
@@ -170,7 +213,7 @@ const max_reservation: u64 = 1 << 40;
 /// A superset of `raster.Error`: everything an ordinary render can fail with,
 /// plus what can go wrong with the sandbox itself.
 pub const Error = raster.Error || Allocator.Error || error{
-    /// Not Linux, or not 64-bit.
+    /// Neither Linux nor FreeBSD, or not 64-bit.
     SandboxUnavailable,
 
     /// `Limits` does not bound the picture tightly enough to reserve memory
@@ -183,7 +226,8 @@ pub const Error = raster.Error || Allocator.Error || error{
     /// The document is larger than `Limits.max_input_bytes`.
     InputTooLarge,
 
-    /// The child was killed for making a system call the filter refused.
+    /// The child was killed for making a system call the filter refused, or
+    /// one capability mode refused on FreeBSD.
     ///
     /// This means the renderer tried to do something other than render. It is
     /// either an exploit or a bug, and under `seccomp.Profile.strict` it is
@@ -201,8 +245,9 @@ pub const Error = raster.Error || Allocator.Error || error{
     /// mapping on the strength of a reply that failed this check.
     SandboxProtocolError,
 
-    /// The sandbox could not be set up: `memfd_create`, `mmap`, `pipe2` or
-    /// `fork` was refused. Not a property of the document.
+    /// The sandbox could not be set up: the shared mapping, a pipe or the
+    /// `fork` was refused, or the kernel would not lock the child down. Not a
+    /// property of the document.
     SandboxFailed,
 
     /// z2d refused to rasterize for a reason the wire has no narrower
@@ -260,7 +305,10 @@ pub const Image = struct {
 
     /// Unmaps the pixels. The surface is invalid afterwards.
     pub fn deinit(self: *Image) void {
-        _ = linux.munmap(self.mapping.ptr, self.mapping.len);
+        // No `Image` is ever made where there is no sandbox, and there is no
+        // mapping to give back either.
+        if (comptime !available) unreachable;
+        os.unmap(self.mapping.ptr, self.mapping.len);
         self.* = undefined;
     }
 
@@ -299,7 +347,9 @@ pub const Image = struct {
 /// parent is only safe if that code is async-signal-safe. It is: the child
 /// installs a filter, renders out of a fixed buffer it was given, writes a
 /// struct to a pipe and exits, taking no lock and allocating nothing from the
-/// parent's heap. Nothing here calls into libc.
+/// parent's heap. On Linux nothing it does calls into libc; on FreeBSD, where
+/// libc is the system call interface, every call it makes is one POSIX lists
+/// as async-signal-safe or a thin wrapper around a single system call.
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
     if (!available) return error.SandboxUnavailable;
 
@@ -327,46 +377,39 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
     const input = try gpa.dupe(u8, src);
     defer gpa.free(input);
 
-    const fd = try makeMemfd(cap);
-    defer _ = linux.close(fd);
-
-    const base = try mapShared(fd, cap);
+    const base = os.mapShared(cap) orelse return error.SandboxFailed;
     // Unmapped on every path out but the successful one, where ownership
     // passes to the `Image`.
     var mapped = true;
-    defer if (mapped) {
-        _ = linux.munmap(base, cap);
-    };
+    defer if (mapped) os.unmap(base, cap);
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, .{ .CLOEXEC = true })) != .SUCCESS) return error.SandboxFailed;
+    var pipe_fds: [2]os.Fd = undefined;
+    if (!os.pipe(&pipe_fds)) return error.SandboxFailed;
     // The write end is closed early on the successful path, so that the pipe
     // reaches end of stream when the child is gone; this flag is what keeps
     // the cleanup from closing it a second time and shutting whatever
     // descriptor number has since been handed out.
     var pipe_open = [2]bool{ true, true };
     defer for (pipe_fds, pipe_open) |pfd, open| {
-        if (open) _ = linux.close(pfd);
+        if (open) os.close(pfd);
     };
 
     const arena = base[0..cap];
 
-    const fork_rc = linux.fork();
-    if (linux.errno(fork_rc) != .SUCCESS) return error.SandboxFailed;
-    const pid: i32 = @intCast(fork_rc);
+    const pid = os.fork() orelse return error.SandboxFailed;
 
     if (pid == 0) {
         // The child. Nothing below this line returns.
-        _ = linux.close(pipe_fds[0]);
+        os.close(pipe_fds[0]);
         childMain(pipe_fds[1], arena, input, opts);
     }
 
     // The parent keeps only the read end, so that the pipe reaches end of
     // stream when the child is gone.
-    _ = linux.close(pipe_fds[1]);
+    os.close(pipe_fds[1]);
     pipe_open[1] = false;
 
-    const status = try waitFor(pid);
+    const status = os.wait(pid) orelse return error.SandboxFailed;
     const reply = readReply(pipe_fds[0]);
 
     try checkExit(status);
@@ -382,7 +425,7 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
     // giving it back is the difference between a live mapping the size of the
     // picture and one the size of the budget.
     const keep = mem.alignForward(usize, @intCast(r.offset + r.len), page);
-    if (keep < cap) _ = linux.munmap(base + keep, cap - keep);
+    if (keep < cap) os.unmap(@alignCast(base + keep), cap - keep);
 
     mapped = false;
     return .{
@@ -397,9 +440,10 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
 ///
 /// Async-signal-safe throughout, because a `fork` from a threaded parent gives
 /// a child holding whatever locks the other threads held at the moment of the
-/// fork, forever. Nothing here takes a lock, allocates from the parent's heap,
-/// or calls libc.
-fn childMain(write_fd: i32, arena: []u8, input: []const u8, opts: Options) noreturn {
+/// fork, forever. Nothing here takes a lock or allocates from the parent's
+/// heap, and nothing calls into libc but the handful of single-system-call
+/// wrappers FreeBSD has no other way to reach.
+fn childMain(write_fd: os.Fd, arena: []u8, input: []const u8, opts: Options) noreturn {
     var reply: Reply = .{
         .magic = reply_magic,
         .status = @intFromEnum(WireError.protocol),
@@ -412,23 +456,23 @@ fn childMain(write_fd: i32, arena: []u8, input: []const u8, opts: Options) noret
 
     result: {
         // The reply pipe onto the number the filter knows, and then every
-        // other descriptor the child inherited shut. Both before the filter
-        // exists, which is why neither needs permitting.
-        const parked = parkDescriptor(write_fd) orelse {
+        // other descriptor the child inherited shut. Both before the lock
+        // goes on, which is why neither needs permitting.
+        const parked = os.park(write_fd, first_closable) orelse {
             reply.status = @intFromEnum(WireError.sandbox);
             break :result;
         };
-        if (!claimDescriptor(parked, seccomp.reply_fd)) {
+        if (!os.claim(parked, reply_fd)) {
             reply.status = @intFromEnum(WireError.sandbox);
             break :result;
         }
-        sealDescriptors();
-        hardenChild(opts);
+        os.closeFrom(first_closable);
+        os.harden(opts.cpu_seconds);
 
         // The point of no return: after this the process can report a result
         // and stop, and that is all.
         switch (opts.profile) {
-            inline else => |p| seccomp.install(p) catch {
+            inline else => |p| os.confine(p) catch {
                 reply.status = @intFromEnum(WireError.sandbox);
                 break :result;
             },
@@ -454,9 +498,8 @@ fn childMain(write_fd: i32, arena: []u8, input: []const u8, opts: Options) noret
         reply.len = bytes.len;
     }
 
-    writeAll(@intCast(seccomp.reply_fd), mem.asBytes(&reply));
-    _ = linux.exit_group(0);
-    unreachable;
+    writeAll(reply_fd, mem.asBytes(&reply));
+    os.exit(0);
 }
 
 /// The surface's pixel buffer as bytes, wherever in the union it lives.
@@ -466,99 +509,40 @@ fn surfaceBytes(sfc: z2d.Surface) []const u8 {
     };
 }
 
-/// `write` until it is all gone, which is the child's only system call in
-/// ordinary operation.
+/// The descriptor the child writes its reply to. A fixed number, because the
+/// seccomp filter compares it as a constant; see `seccomp.reply_fd`. Capsicum
+/// has no such need, and uses the same number so that the child is arranged
+/// the same way on both.
+const reply_fd: os.Fd = @intCast(seccomp.reply_fd);
+
 /// The lowest descriptor number the child may close: everything at or above
 /// this is something it inherited and has no business keeping.
-const first_closable: i32 = @intCast(seccomp.reply_fd + 1);
-
-/// Moves a descriptor out of the way, to a number at or above
-/// `first_closable`, so that the fixed number can be claimed without the move
-/// closing the descriptor it was going to use.
 ///
-/// One pipe needs no ordering care, but the parking step is what makes the
-/// case safe where the pipe is already sitting on the number it is about to
-/// claim: `dup3` refuses a descriptor onto itself.
-fn parkDescriptor(fd: i32) ?i32 {
-    if (fd >= first_closable) return fd;
-    const rc = linux.fcntl(fd, linux.F.DUPFD, @intCast(first_closable));
-    if (linux.errno(rc) != .SUCCESS) return null;
-    return @intCast(rc);
-}
-
-/// Claims `want` for `fd`, which must already have been parked out of range.
-fn claimDescriptor(fd: i32, want: u32) bool {
-    return linux.errno(linux.dup3(fd, @intCast(want), 0)) == .SUCCESS;
-}
-
-/// Closes every descriptor the child inherited and does not need.
+/// The reply pipe is moved into place in two steps, parked at or above this
+/// number with `os.park` and only then moved onto `reply_fd` with `os.claim`,
+/// because the pipe may already sit on the number it is about to claim and a
+/// descriptor cannot be duplicated onto itself.
 ///
-/// The child is forked and never exec'd, so `CLOEXEC` does nothing for it: it
-/// starts life holding everything the parent had open. It cannot *open* a
-/// socket or a file -- no profile permits that -- but `write` is a call it
-/// has, and a renderer subverted into writing attacker-controlled bytes into a
-/// connection the parent already had is a containment failure in the thing
-/// whose only job is containment.
-///
-/// Called before the filter is installed, so it needs no permission of its
-/// own, and paired with pinning `write` to one descriptor afterwards: this
-/// takes away what could be written to, and the filter takes away the ability
-/// to name anything else.
-///
-/// Best effort on a kernel without `close_range`, which is Linux 5.9. The
-/// fallback is bounded rather than running to the descriptor limit, which may
-/// be millions.
-fn sealDescriptors() void {
-    const rc = linux.close_range(first_closable, math.maxInt(i32), .{
-        .UNSHARE = false,
-        .CLOEXEC = false,
-    });
-    if (linux.errno(rc) == .SUCCESS) return;
-    var fd: i32 = first_closable;
-    while (fd < 4096) : (fd += 1) _ = linux.close(fd);
-}
+/// Everything at or above it is then closed. The child is forked and never
+/// exec'd, so `CLOEXEC` does nothing for it: it starts life holding
+/// everything the parent had open. It cannot *open* a socket or a file under
+/// either kernel's lock, but `write` is a call it has, and a renderer
+/// subverted into writing attacker-controlled bytes into a connection the
+/// parent already had is a containment failure in the thing whose only job is
+/// containment. Closing takes away what could be written to; the lock takes
+/// away the ability to name anything else.
+const first_closable: os.Fd = reply_fd + 1;
 
-/// The limits and flags a child is given before its filter goes on.
-///
-/// None of these needs permitting, because all of them happen first, and none
-/// of them can be undone afterwards -- `RLIMIT` hard limits only ever go down
-/// for a process without privilege, and `PR_SET_DUMPABLE` is not a thing a
-/// filtered process can call back.
-fn hardenChild(opts: Options) void {
-    // A crash must not write the shared mapping out to disk.
-    const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
-    _ = linux.setrlimit(.CORE, &no_core);
-
-    // A renderer that has stopped making progress is killed by the kernel
-    // rather than waited for by the parent. This is a wall, not a budget: it
-    // is far above what any render inside the default pixel limit costs, and a
-    // caller who raises `Limits.max_pixels` a long way should raise this with
-    // it.
-    if (opts.cpu_seconds) |seconds| {
-        const cpu: linux.rlimit = .{ .cur = seconds, .max = seconds };
-        _ = linux.setrlimit(.CPU, &cpu);
-    }
-
-    // Not dumpable: no core file, and no ptrace attach from another process of
-    // the same user, which would otherwise be able to read the mapping out
-    // from under the parent.
-    _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
-}
-
-fn writeAll(fd: i32, bytes: []const u8) void {
+/// `write` until it is all gone, which is the child's only system call in
+/// ordinary operation.
+fn writeAll(fd: os.Fd, bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
-        const rc = linux.write(fd, bytes.ptr + off, bytes.len - off);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return;
-                off += rc;
-            },
-            .INTR => continue,
-            // Nothing useful is left to do: the parent will see a missing
-            // reply and say so.
-            else => return,
-        }
+        // Nothing useful is left to do on an error: the parent will see a
+        // missing reply and say so.
+        const n = os.write(fd, bytes[off..]) orelse return;
+        if (n == 0) return;
+        off += n;
     }
 }
 
@@ -860,70 +844,33 @@ fn surfaceTypeFromWire(v: u8) ?z2d.surface.SurfaceType {
 
 // -- the parent's half -------------------------------------------------------
 
-fn makeMemfd(cap: usize) Error!i32 {
-    const rc = linux.memfd_create("zig-svg-pixels", linux.MFD.CLOEXEC);
-    if (linux.errno(rc) != .SUCCESS) return error.SandboxFailed;
-    const fd: i32 = @intCast(rc);
-    errdefer _ = linux.close(fd);
-    if (linux.errno(linux.ftruncate(fd, @intCast(cap))) != .SUCCESS) return error.SandboxFailed;
-    return fd;
-}
-
-fn mapShared(fd: i32, cap: usize) Error![*]u8 {
-    const rc = linux.mmap(
-        null,
-        cap,
-        .{ .READ = true, .WRITE = true },
-        .{ .TYPE = .SHARED },
-        fd,
-        0,
-    );
-    if (linux.errno(rc) != .SUCCESS) return error.SandboxFailed;
-    return @ptrFromInt(rc);
-}
-
-fn waitFor(pid: i32) Error!u32 {
-    var status: u32 = 0;
-    while (true) {
-        const rc = linux.waitpid(pid, &status, 0);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return status,
-            .INTR => continue,
-            else => return error.SandboxFailed,
-        }
-    }
-}
-
 /// Turns how the child died into the error that says so.
+///
+/// Which signal means the lock refused a call is the backend's to say:
+/// `SIGSYS` from seccomp, `SIGTRAP` from Capsicum with `PROC_TRAPCAP_CTL`.
 fn checkExit(status: u32) Error!void {
-    if (linux.W.IFSIGNALED(status)) {
-        return switch (linux.W.TERMSIG(status)) {
-            .SYS => error.SandboxViolation,
-            else => error.RendererCrashed,
-        };
+    if (os.W.IFSIGNALED(status)) {
+        return if (os.W.TERMSIG(status) == os.violation)
+            error.SandboxViolation
+        else
+            error.RendererCrashed;
     }
-    if (!linux.W.IFEXITED(status)) return error.RendererCrashed;
-    if (linux.W.EXITSTATUS(status) != 0) return error.RendererCrashed;
+    if (!os.W.IFEXITED(status)) return error.RendererCrashed;
+    if (os.W.EXITSTATUS(status) != 0) return error.RendererCrashed;
 }
 
 /// Reads the reply, if there is a whole one.
 ///
 /// Called after the child has been reaped, so the pipe holds everything it
 /// will ever hold and a short read means a short write.
-fn readReply(fd: i32) ?Reply {
+fn readReply(fd: os.Fd) ?Reply {
     var reply: Reply = undefined;
     const buf = mem.asBytes(&reply);
     var off: usize = 0;
     while (off < buf.len) {
-        const rc = linux.read(fd, buf.ptr + off, buf.len - off);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {
-                if (rc == 0) return null; // end of stream, short reply
-                off += rc;
-            },
-            .INTR => continue,
-            else => return null,
-        }
+        const n = os.read(fd, buf[off..]) orelse return null;
+        if (n == 0) return null; // end of stream, short reply
+        off += n;
     }
     return reply;
 }
@@ -1210,8 +1157,82 @@ fn inSet(comptime Set: type, comptime err: anyerror) bool {
     }
 }
 
-test "a strict child may write down the reply pipe and nowhere else" {
+test "the sandbox actually kills a child that steps outside it" {
     if (!available) return error.SkipZigTest;
+
+    // The claim the whole module rests on, made directly: a process that has
+    // locked itself down and then makes an ordinary, harmless system call the
+    // lock refuses does not come back from it. Which call that is differs --
+    // `getpid` under seccomp, opening a path under Capsicum, which allows
+    // `getpid` because it names nothing outside the process -- and so does
+    // the signal, which is why both come from the backend.
+    const pid = os.fork() orelse return error.SkipZigTest;
+    if (pid == 0) {
+        // No lock here -- an old kernel, or a container that will not allow
+        // a filter. Say so through the exit status.
+        os.confine(.strict) catch os.exit(9);
+        os.forbiddenCall();
+        // Only reached if the lock did nothing, which is the failure this
+        // test exists to catch.
+        os.exit(0);
+    }
+
+    const status = os.wait(pid) orelse return error.SkipZigTest;
+    if (os.W.IFEXITED(status) and os.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+    try testing.expect(os.W.IFSIGNALED(status));
+    try testing.expectEqual(os.violation, os.W.TERMSIG(status));
+    try testing.expectError(error.SandboxViolation, checkExit(status));
+}
+
+test "a call the sandbox does permit goes through" {
+    if (!available) return error.SkipZigTest;
+
+    // The other half of the claim: the lock is an allowlist, not a wall.
+    const pid = os.fork() orelse return error.SkipZigTest;
+    if (pid == 0) {
+        // Closed *before* the lock goes on, because `close` is not on the
+        // seccomp list either -- which is the whole point of the list.
+        os.close(reply_fd);
+        os.confine(.strict) catch os.exit(9);
+        // `write` on the reply descriptor is permitted. That descriptor is
+        // shut, so this writes nothing anywhere and still has to be permitted
+        // to come back with a failure of its own.
+        _ = os.write(reply_fd, "x");
+        os.exit(0);
+    }
+
+    const status = os.wait(pid) orelse return error.SkipZigTest;
+    if (os.W.IFEXITED(status) and os.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+    try testing.expect(os.W.IFEXITED(status));
+    try testing.expectEqual(@as(u8, 0), os.W.EXITSTATUS(status));
+}
+
+test "a strict child cannot write to its standard error" {
+    if (!available) return error.SkipZigTest;
+
+    // The standard streams are inherited like everything else, and are the
+    // ones the child keeps: seccomp refuses `write` on any descriptor but the
+    // reply's, and Capsicum strips the streams of every right. Either way a
+    // write to one is a violation -- which is also why a panic under `strict`
+    // reports as one.
+    const pid = os.fork() orelse return error.SkipZigTest;
+    if (pid == 0) {
+        os.confine(.strict) catch os.exit(9);
+        _ = os.write(2, "a sandboxed child should never print this\n");
+        os.exit(0);
+    }
+
+    const status = os.wait(pid) orelse return error.SkipZigTest;
+    if (os.W.IFEXITED(status) and os.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+    try testing.expect(os.W.IFSIGNALED(status));
+    try testing.expectEqual(os.violation, os.W.TERMSIG(status));
+}
+
+test "a strict child may write down the reply pipe and nowhere else" {
+    // seccomp's claim alone: the filter refuses a write to a descriptor that
+    // is still open. Capsicum's answer to the same hole is that the
+    // descriptor is not open, which the next test covers for both.
+    if (builtin.os.tag != .linux or !available) return error.SkipZigTest;
 
     // The hole this closes: a forked child keeps every descriptor the parent
     // had open, because `CLOEXEC` means nothing to a process that never
@@ -1221,52 +1242,40 @@ test "a strict child may write down the reply pipe and nowhere else" {
     //
     // Two children, differing only in which descriptor they write to.
     for ([_]enum { reply, other }{ .reply, .other }) |which| {
-        var fds: [2]i32 = undefined;
-        if (linux.errno(linux.pipe2(&fds, .{})) != .SUCCESS) return error.SkipZigTest;
+        var fds: [2]os.Fd = undefined;
+        if (!os.pipe(&fds)) return error.SkipZigTest;
         defer {
-            _ = linux.close(fds[0]);
-            _ = linux.close(fds[1]);
+            os.close(fds[0]);
+            os.close(fds[1]);
         }
 
-        const fork_rc = linux.fork();
-        if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
-        const pid: i32 = @intCast(fork_rc);
+        const pid = os.fork() orelse return error.SkipZigTest;
         if (pid == 0) {
-            const parked = parkDescriptor(fds[1]) orelse {
-                _ = linux.exit_group(9);
-                unreachable;
-            };
-            if (!claimDescriptor(parked, seccomp.reply_fd)) {
-                _ = linux.exit_group(9);
-                unreachable;
-            }
-            // Deliberately *not* sealed: the point is that the filter refuses
+            const parked = os.park(fds[1], first_closable) orelse os.exit(9);
+            if (!os.claim(parked, reply_fd)) os.exit(9);
+            // Deliberately *not* closed: the point is that the filter refuses
             // the write even when the descriptor is still there to write to.
-            seccomp.install(.strict) catch {
-                _ = linux.exit_group(9);
-                unreachable;
-            };
-            const fd: i32 = switch (which) {
-                .reply => @intCast(seccomp.reply_fd),
+            os.confine(.strict) catch os.exit(9);
+            const fd: os.Fd = switch (which) {
+                .reply => reply_fd,
                 // The same pipe, by the number it was opened as. Nothing
                 // about the object changes; only the integer naming it.
                 .other => parked,
             };
             _ = linux.write(fd, "x", 1);
-            _ = linux.exit_group(0);
-            unreachable;
+            os.exit(0);
         }
 
-        const status = try waitFor(pid);
-        if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+        const status = os.wait(pid) orelse return error.SkipZigTest;
+        if (os.W.IFEXITED(status) and os.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
         switch (which) {
             .reply => {
-                try testing.expect(linux.W.IFEXITED(status));
-                try testing.expectEqual(@as(u32, 0), linux.W.EXITSTATUS(status));
+                try testing.expect(os.W.IFEXITED(status));
+                try testing.expectEqual(@as(u32, 0), os.W.EXITSTATUS(status));
             },
             .other => {
-                try testing.expect(linux.W.IFSIGNALED(status));
-                try testing.expectEqual(linux.SIG.SYS, linux.W.TERMSIG(status));
+                try testing.expect(os.W.IFSIGNALED(status));
+                try testing.expectEqual(linux.SIG.SYS, os.W.TERMSIG(status));
             },
         }
     }
@@ -1275,49 +1284,39 @@ test "a strict child may write down the reply pipe and nowhere else" {
 test "a child keeps no descriptor it was not given" {
     if (!available) return error.SkipZigTest;
 
-    // `sealDescriptors` closes what the fork handed over. Proved by opening a
-    // pipe the child has no business keeping, sealing, and having the child
+    // `os.closeFrom` closes what the fork handed over. Proved by opening a
+    // pipe the child has no business keeping, closing, and having the child
     // report whether it is still there -- through the one descriptor it is
     // allowed to keep.
-    var carrier: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&carrier, .{})) != .SUCCESS) return error.SkipZigTest;
+    var carrier: [2]os.Fd = undefined;
+    if (!os.pipe(&carrier)) return error.SkipZigTest;
     defer {
-        _ = linux.close(carrier[0]);
-        _ = linux.close(carrier[1]);
+        os.close(carrier[0]);
+        os.close(carrier[1]);
     }
-    var stray: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&stray, .{})) != .SUCCESS) return error.SkipZigTest;
+    var stray: [2]os.Fd = undefined;
+    if (!os.pipe(&stray)) return error.SkipZigTest;
     defer {
-        _ = linux.close(stray[0]);
-        _ = linux.close(stray[1]);
+        os.close(stray[0]);
+        os.close(stray[1]);
     }
 
-    const fork_rc = linux.fork();
-    if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
-    const pid: i32 = @intCast(fork_rc);
+    const pid = os.fork() orelse return error.SkipZigTest;
     if (pid == 0) {
-        const parked = parkDescriptor(carrier[1]) orelse {
-            _ = linux.exit_group(9);
-            unreachable;
-        };
-        if (!claimDescriptor(parked, seccomp.reply_fd)) {
-            _ = linux.exit_group(9);
-            unreachable;
-        }
-        sealDescriptors();
-        // No filter here: what is being tested is the closing, and a filter
+        const parked = os.park(carrier[1], first_closable) orelse os.exit(9);
+        if (!os.claim(parked, reply_fd)) os.exit(9);
+        os.closeFrom(first_closable);
+        // No lock here: what is being tested is the closing, and a lock
         // would only make a failure harder to tell apart from a refusal.
-        var answer: [1]u8 = .{if (linux.errno(linux.write(stray[1], "x", 1)) == .SUCCESS) 1 else 0};
-        _ = linux.write(@intCast(seccomp.reply_fd), &answer, 1);
-        _ = linux.exit_group(0);
-        unreachable;
+        var answer: [1]u8 = .{if (os.write(stray[1], "x") != null) 1 else 0};
+        _ = os.write(reply_fd, &answer);
+        os.exit(0);
     }
 
-    const status = try waitFor(pid);
-    if (linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
+    const status = os.wait(pid) orelse return error.SkipZigTest;
+    if (os.W.IFEXITED(status) and os.W.EXITSTATUS(status) == 9) return error.SkipZigTest;
     var answer: [1]u8 = undefined;
-    const rc = linux.read(carrier[0], &answer, 1);
-    try testing.expectEqual(@as(usize, 1), rc);
+    try testing.expectEqual(@as(?usize, 1), os.read(carrier[0], &answer));
     // Zero: the stray descriptor was gone by the time the child tried it.
     try testing.expectEqual(@as(u8, 0), answer[0]);
 }
@@ -1332,24 +1331,22 @@ test "a child that stops making progress is killed by the kernel" {
     //
     // One second rather than the default sixty, so the test costs a second
     // rather than a minute.
-    const fork_rc = linux.fork();
-    if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
-    const pid: i32 = @intCast(fork_rc);
+    const pid = os.fork() orelse return error.SkipZigTest;
     if (pid == 0) {
-        hardenChild(.{ .cpu_seconds = 1 });
+        os.harden(1);
         // Spin. `@breakpoint` is not it and a sleep would not do: this has to
         // consume processor time, which is what the limit measures.
         var x: u64 = 0;
         while (true) : (x +%= 1) std.mem.doNotOptimizeAway(x);
     }
 
-    const status = try waitFor(pid);
-    try testing.expect(linux.W.IFSIGNALED(status));
+    const status = os.wait(pid) orelse return error.SkipZigTest;
+    try testing.expect(os.W.IFSIGNALED(status));
     // `SIGXCPU` at the soft limit, whose default disposition is to end the
     // process, or `SIGKILL` at the hard one. Which arrives first is the
     // kernel's business; that one of them does is the claim.
-    const sig = linux.W.TERMSIG(status);
-    try testing.expect(sig == linux.SIG.XCPU or sig == linux.SIG.KILL);
+    const sig = os.W.TERMSIG(status);
+    try testing.expect(sig == os.SIG.XCPU or sig == os.SIG.KILL);
 }
 
 test "a font resolver survives the fork into the child" {

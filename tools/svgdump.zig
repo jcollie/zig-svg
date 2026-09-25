@@ -13,8 +13,9 @@
 //! $ resvg --width 256 --height 256 icon.svg theirs.png
 //! ```
 //!
-//! `--sandbox` renders in a forked, seccomp-confined process instead, which is
-//! the way to see that the sandbox is working on the machine in front of you.
+//! `--sandbox` renders in a forked child locked down by seccomp on Linux or
+//! Capsicum on FreeBSD, which is the way to see that the sandbox is working on
+//! the machine in front of you.
 
 const std = @import("std");
 const z2d = @import("z2d");
@@ -24,7 +25,10 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
 
-    var args: std.process.Args.Iterator = .init(init.minimal.args);
+    // The allocating form, which is the one that works everywhere: Windows
+    // hands a program its command line as one UTF-16 string to be split, and
+    // there is no splitting it without somewhere to put the pieces.
+    var args: std.process.Args.Iterator = try .initAllocator(init.minimal.args, gpa);
     defer args.deinit();
     _ = args.skip();
 

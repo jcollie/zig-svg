@@ -47,10 +47,11 @@
 //!
 //! ## Sandboxing
 //!
-//! `sandbox.render` runs the renderer in a forked process that seccomp has
-//! reduced to four system calls -- one of them on a single descriptor -- with
-//! every inherited descriptor closed behind it, and passes the pixels back
-//! through shared memory. It matters more for SVG than for most formats: the full
+//! `sandbox.render` runs the renderer in a forked process locked down by the
+//! kernel -- seccomp on Linux, reducing it to four system calls, one of them on
+//! a single descriptor; Capsicum on FreeBSD, taking away every global
+//! namespace -- with every inherited descriptor closed behind it, and passes
+//! the pixels back through shared memory. It matters more for SVG than for most formats: the full
 //! specification *includes* fetching documents, running scripts and reading
 //! fonts, so a renderer growing towards it grows towards exactly the
 //! capabilities the sandbox takes away. See that module for what it does and

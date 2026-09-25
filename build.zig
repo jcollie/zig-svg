@@ -38,6 +38,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        // FreeBSD's system call interface is its libc, and the sandbox's
+        // FreeBSD backend calls through it. Said here, on the module, so that
+        // any program importing it links libc on FreeBSD without having to
+        // know why; everywhere else nothing here needs libc and none is asked
+        // for.
+        .link_libc = if (target.result.os.tag == .freebsd) true else null,
         .imports = &.{
             .{ .name = "z2d", .module = z2d },
             .{ .name = "ztree", .module = ztree },
@@ -92,11 +98,17 @@ pub fn build(b: *std.Build) void {
     // Renders one document to a PNG, so that the path parser can be looked at.
     // A wrong arc is a slightly wrong picture, which is not something a test
     // discovers by itself.
+    //
+    // Built for `-Dtarget`, like the library it imports, and not for the
+    // host: it is installed, and a `svgdump --sandbox` built for FreeBSD is
+    // how the Capsicum sandbox is tried on a real document there. A tool
+    // built for the host around a module built for somewhere else gets a
+    // standard library for one kernel and a sandbox for the other.
     const svgdump = b.addExecutable(.{
         .name = "svgdump",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/svgdump.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "svg", .module = mod },

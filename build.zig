@@ -7,51 +7,20 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const z2d_dep = b.dependency("z2d", .{ .target = target, .optimize = optimize });
-    const ztree_dep = b.dependency("ztree", .{ .target = target, .optimize = optimize });
-    const css_dep = b.dependency("zig_css", .{ .target = target, .optimize = optimize });
-    const z2dimg_dep = b.dependency("z2dimg", .{ .target = target, .optimize = optimize });
-    const uri_dep = b.dependency("uri", .{ .target = target, .optimize = optimize });
+    // The library as a consumer gets it, for `-Dtarget`.
+    const lib = libraryModules(b, target, optimize, .exported);
+    const mod = lib.svg;
+    const z2d = lib.z2d;
 
-    const z2d = z2d_dep.module("z2d");
-    // ztree rather than zxml directly: the reader needs random access to
-    // resolve a `#id` reference, which a pull parser cannot give it. See
-    // src/document.zig.
-    const ztree = ztree_dep.module("ztree");
-    // SVG 1.1 §6 is CSS, and deciding which of several declarations of one
-    // property applies to an element has nothing to do with drawing. It was
-    // `src/css.zig` and `src/style.zig` here until it was lifted out.
-    const css = css_dep.module("css");
-    // An `<image>` names its picture by URL, almost always a `data:` one, and
-    // what that URL carries is a PNG or a JPEG. Reading the URL and decoding
-    // the bytes are each a library of their own. z2dimg is built on the same
-    // z2d as this, with the same options, so the two share one z2d and a
-    // decoded image is a surface this can draw.
-    const z2dimg = z2dimg_dep.module("z2dimg");
-    const uri = uri_dep.module("uri");
-
-    // One module. The reader, the path grammar, the rasterizer and the sandbox
-    // live together because Zig only analyses what is referenced: a program
-    // that draws an icon and never mentions the sandbox does not compile the
-    // sandbox, so splitting them would cost a dependency edge to save nothing.
-    const mod = b.addModule("svg", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        // FreeBSD's system call interface is its libc, and the sandbox's
-        // FreeBSD backend calls through it. Said here, on the module, so that
-        // any program importing it links libc on FreeBSD without having to
-        // know why; everywhere else nothing here needs libc and none is asked
-        // for.
-        .link_libc = if (target.result.os.tag == .freebsd) true else null,
-        .imports = &.{
-            .{ .name = "z2d", .module = z2d },
-            .{ .name = "ztree", .module = ztree },
-            .{ .name = "css", .module = css },
-            .{ .name = "z2dimg", .module = z2dimg },
-            .{ .name = "uri", .module = uri },
-        },
-    });
+    // The same library again, for the machine running the build, which is
+    // where the tools the build *runs* -- the fuzz loop and the oracle --
+    // have to be compiled. A tool built for the host around a library built
+    // for `-Dtarget` is one program with two targets in it: a standard
+    // library for one kernel and code for another, which compiles into
+    // something that fails far from the cause -- a compile error in
+    // `std.c`'s FreeBSD half, or LLVM falling over on aarch64. When
+    // `-Dtarget` is the host the two are the same set of dependencies.
+    const host = libraryModules(b, b.graph.host, optimize, .private);
 
     const test_step = b.step("test", "Run the tests");
     const check_step = b.step("check", "Compile everything without running it");
@@ -79,13 +48,25 @@ pub fn build(b: *std.Build) void {
     // version is that the coverage table comes back empty. Optimised, because
     // a fuzzer's whole job is how many inputs it gets through, and ReleaseSafe
     // keeps every check that makes a failure a failure.
+    //
+    // It runs here, so it is built for the host, and so are the targets it
+    // drives and the library under them.
+    const host_fuzz_mod = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "svg", .module = host.svg },
+            .{ .name = "z2d", .module = host.z2d },
+        },
+    });
     const fuzz_run = b.addExecutable(.{
         .name = "svg-fuzz",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/fuzz.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseSafe,
-            .imports = &.{.{ .name = "fuzz_targets", .module = fuzz_mod }},
+            .imports = &.{.{ .name = "fuzz_targets", .module = host_fuzz_mod }},
         }),
     });
     const run_fuzz = b.addRunArtifact(fuzz_run);
@@ -101,9 +82,7 @@ pub fn build(b: *std.Build) void {
     //
     // Built for `-Dtarget`, like the library it imports, and not for the
     // host: it is installed, and a `svgdump --sandbox` built for FreeBSD is
-    // how the Capsicum sandbox is tried on a real document there. A tool
-    // built for the host around a module built for somewhere else gets a
-    // standard library for one kernel and a sandbox for the other.
+    // how the Capsicum sandbox is tried on a real document there.
     const svgdump = b.addExecutable(.{
         .name = "svgdump",
         .root_module = b.createModule(.{
@@ -131,11 +110,12 @@ pub fn build(b: *std.Build) void {
         .name = "svg-oracle",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/oracle.zig"),
+            // Run here, so built for here, library and all.
             .target = b.graph.host,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "svg", .module = mod },
-                .{ .name = "z2d", .module = z2d },
+                .{ .name = "svg", .module = host.svg },
+                .{ .name = "z2d", .module = host.z2d },
             },
         }),
     });
@@ -204,4 +184,61 @@ pub fn build(b: *std.Build) void {
     ).step);
     check_step.dependOn(&docs_server.step);
     check_step.dependOn(&svgdump.step);
+}
+
+/// The `svg` module and the z2d it draws with, for one target.
+const Library = struct {
+    svg: *std.Build.Module,
+    z2d: *std.Build.Module,
+};
+
+/// Builds the library's module for `target`: `exported` is the one a
+/// consumer imports as `svg`, and a `private` one is a second copy for a
+/// different target, which nothing outside this build can name.
+fn libraryModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    visibility: enum { exported, private },
+) Library {
+    const z2d = b.dependency("z2d", .{ .target = target, .optimize = optimize }).module("z2d");
+    // ztree rather than zxml directly: the reader needs random access to
+    // resolve a `#id` reference, which a pull parser cannot give it. See
+    // src/document.zig.
+    const ztree = b.dependency("ztree", .{ .target = target, .optimize = optimize }).module("ztree");
+    // SVG 1.1 §6 is CSS, and deciding which of several declarations of one
+    // property applies to an element has nothing to do with drawing. It was
+    // `src/css.zig` and `src/style.zig` here until it was lifted out.
+    const css = b.dependency("zig_css", .{ .target = target, .optimize = optimize }).module("css");
+    // An `<image>` names its picture by URL, almost always a `data:` one, and
+    // what that URL carries is a PNG or a JPEG. Reading the URL and decoding
+    // the bytes are each a library of their own. z2dimg is built on the same
+    // z2d as this, with the same options, so the two share one z2d and a
+    // decoded image is a surface this can draw.
+    const z2dimg = b.dependency("z2dimg", .{ .target = target, .optimize = optimize }).module("z2dimg");
+    const uri = b.dependency("uri", .{ .target = target, .optimize = optimize }).module("uri");
+
+    // One module. The reader, the path grammar, the rasterizer and the sandbox
+    // live together because Zig only analyses what is referenced: a program
+    // that draws an icon and never mentions the sandbox does not compile the
+    // sandbox, so splitting them would cost a dependency edge to save nothing.
+    const options: std.Build.Module.CreateOptions = .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "z2d", .module = z2d },
+            .{ .name = "ztree", .module = ztree },
+            .{ .name = "css", .module = css },
+            .{ .name = "z2dimg", .module = z2dimg },
+            .{ .name = "uri", .module = uri },
+        },
+    };
+    return .{
+        .svg = switch (visibility) {
+            .exported => b.addModule("svg", options),
+            .private => b.createModule(options),
+        },
+        .z2d = z2d,
+    };
 }

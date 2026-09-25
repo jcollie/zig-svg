@@ -741,9 +741,6 @@ capability mode between a subverted renderer and a fork bomb. It also permits
 the long tail of calls that touch only the process itself — `getpid`,
 anonymous `mmap`, `sigaction` — none of which reaches anything outside.
 
-FreeBSD's system call interface is its libc, so the `svg` module asks for libc
-when it is built for FreeBSD, and nowhere else.
-
 The same tests run on both. On FreeBSD they were run by cross-compiling
 `zig build test -Dtarget=x86_64-freebsd` and running the test executables in a
 FreeBSD 14.5 virtual machine as an unprivileged user — root is exempt from

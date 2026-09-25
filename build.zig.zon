@@ -17,8 +17,8 @@
             .hash = "ztree-0.0.0-Rb9y2UksAwAIl9qdJcWF_hQJ4OByzMagmRh0rxr14Oel",
         },
         .zig_css = .{
-            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#4d9a4d855026ff68222498086901ade4dc12c3ad",
-            .hash = "zig_css-0.0.0-d530kKeuAQB7-v8-1VNgjL9pLefK35fR3oIBXTwDqtVP",
+            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#e24444690930931bfec79c4b4efad84e141b8a10",
+            .hash = "zig_css-0.0.0-d530kFLbGgAN4NqKWIX58MC_Mq2QNhfS0ej8r9O_Ftz6",
         },
     },
     .paths = .{

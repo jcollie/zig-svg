@@ -651,6 +651,7 @@ const WireError = enum(u16) {
     unterminated_rule = 66,
     too_many_css_rules = 67,
     selector_too_complex = 68,
+    too_many_css_selectors = 69,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -723,6 +724,7 @@ fn wireFromError(err: anyerror) WireError {
         error.UnterminatedRule => .unterminated_rule,
         error.TooManyCssRules => .too_many_css_rules,
         error.SelectorTooComplex => .selector_too_complex,
+        error.TooManyCssSelectors => .too_many_css_selectors,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -810,6 +812,7 @@ fn wireToError(status: u16) Error {
         .unterminated_rule => error.UnterminatedRule,
         .too_many_css_rules => error.TooManyCssRules,
         .selector_too_complex => error.SelectorTooComplex,
+        .too_many_css_selectors => error.TooManyCssSelectors,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,

@@ -437,6 +437,8 @@ short of the specification.
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | Entity references in attribute values | yes, resolved as the document is parsed |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
+| `display` | yes — `none` removes an element and everything in it; any other value draws it |
+| `visibility` | yes, inherited — `hidden` and `collapse` paint nothing but still take up room, and a `visible` child of a hidden group is drawn |
 | Lengths | `px`, `pt`, `pc`, `mm`, `cm`, `in`, `%`, `em`, `ex`, and a bare number |
 | Nesting depth | containers and `<use>` targets to `document.max_container_depth` (64) |
 | Composited layers | to `Limits.max_layers` (8); each is a surface the size of the picture |

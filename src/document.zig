@@ -140,6 +140,8 @@ pub const Error = error{
     /// An `image-rendering` that is none of the keywords SVG 1.1 or CSS
     /// Images 3 define for it.
     BadImageRendering,
+    /// A `visibility` that is none of `visible`, `hidden` and `collapse`.
+    BadVisibility,
     /// A `font-weight` that is neither a number in range nor `normal` or
     /// `bold`.
     BadFontWeight,
@@ -316,6 +318,11 @@ pub const Inherited = struct {
     /// reaches every `<image>` in the document.
     image_rendering: ?resample.Sampling = null,
 
+    /// §11.5's `visibility`: false for `hidden` or `collapse`. Inherited, and
+    /// overridable -- a `visible` child of a hidden group is drawn, which is
+    /// the one thing that tells it apart from `display="none"`.
+    visible: ?bool = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -338,6 +345,7 @@ pub const Inherited = struct {
             .font_italic = child.font_italic orelse self.font_italic,
             .text_anchor = child.text_anchor orelse self.text_anchor,
             .image_rendering = child.image_rendering orelse self.image_rendering,
+            .visible = child.visible orelse self.visible,
         };
     }
 };
@@ -395,6 +403,8 @@ pub const Image = struct {
     filter: ?[]const u8,
     /// The `color` in force, which a `currentColor` in its filter resolves to.
     current_color: ?color.Color,
+    /// False under `visibility: hidden`; see `Shape.visible`.
+    visible: bool,
     /// Every `transform` down to and including this element's, as `Shape`
     /// carries it.
     transform: z2d.Transformation,
@@ -482,6 +492,13 @@ pub const Shape = struct {
     /// The id of a `<mask>` this shape is cut to, or null. Not inherited
     /// either, and a shape may carry both.
     mask: ?[]const u8,
+    /// False under `visibility: hidden` or `collapse`.
+    ///
+    /// A hidden shape is still yielded rather than dropped, because it still
+    /// takes up room: a hidden run of text moves the pen as far as a visible
+    /// one would, and a hidden shape is still part of its group's bounding
+    /// box. It is only not painted.
+    visible: bool,
     /// Every `transform` from the root down to and including this element,
     /// composed, with each `<use>`'s `x` and `y` folded in. In user units: the
     /// viewBox-to-pixels mapping is *not* in here, because it belongs to the
@@ -792,12 +809,15 @@ pub const PathIterator = struct {
             self.viewport.font_size = null;
             const root_inherited = try self.readInherited(root);
             self.viewport.font_size = root_inherited.font_size;
+            // A root with `display="none"` hides the whole document: its
+            // frame starts exhausted, so the walk yields nothing.
+            const hidden = self.displayNone(root);
             self.stack[0] = .{
                 .node = root,
-                .next_child = 0,
+                .next_child = if (hidden) std.math.maxInt(usize) else 0,
                 .inherited = root_inherited,
                 .transform = ctm,
-                .opens_layer = opacity < 1.0 or refs.any(),
+                .opens_layer = !hidden and (opacity < 1.0 or refs.any()),
             };
             // The root is the one container the walk never meets as somebody's
             // child, so its layer is opened here rather than in `visit`.
@@ -915,6 +935,7 @@ pub const PathIterator = struct {
                 .font_weight = parent.inherited.font_weight,
                 .font_italic = parent.inherited.font_italic,
                 .text_anchor = parent.inherited.text_anchor,
+                .visible = parent.inherited.visible orelse true,
                 // A run has no `opacity` of its own: the element it sits in does,
                 // and that element opened a layer for it if it needed one.
                 .opacity = 1.0,
@@ -980,6 +1001,14 @@ pub const PathIterator = struct {
         return node;
     }
 
+    /// Whether an element says `display: none`. The only value that matters
+    /// here: every other one draws the element, and CSS has a great many of
+    /// them, so none is refused.
+    fn displayNone(self: *const PathIterator, node: ztree.NodeId) bool {
+        const raw = self.presentation(node, "display") orelse return false;
+        return std.mem.eql(u8, std.mem.trim(u8, raw, " \t\r\n"), "none");
+    }
+
     /// An element's own `opacity`, which is not inherited.
     fn opacityOf(self: *const PathIterator, node: ztree.NodeId) Error!f64 {
         const raw = self.presentation(node, "opacity") orelse return 1.0;
@@ -1027,6 +1056,12 @@ pub const PathIterator = struct {
         var hops: usize = 0;
         while (true) {
             if (!self.isSvgContent(node)) return null;
+            // §11.5: `display="none"` takes the element and everything in it
+            // out of the picture -- and out of it here, before anything is
+            // read, so that nothing inside can be refused either. Checked on
+            // every hop, because a `<use>` can be hidden and so can what it
+            // names.
+            if (self.displayNone(node)) return null;
             if (!localIs(tree, node, "use")) break;
 
             hops += 1;
@@ -1117,6 +1152,7 @@ pub const PathIterator = struct {
                 .font_weight = effective.font_weight,
                 .font_italic = effective.font_italic,
                 .text_anchor = effective.text_anchor,
+                .visible = effective.visible orelse true,
                 .opacity = try self.opacityOf(node),
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
@@ -1189,6 +1225,7 @@ pub const PathIterator = struct {
             else
                 .meet_centred,
             .sampling = effective.image_rendering orelse .smooth,
+            .visible = effective.visible orelse true,
             .opacity = try self.opacityOf(node),
             .clip_path = refs.clip_path,
             .mask = refs.mask,
@@ -1354,6 +1391,7 @@ pub const PathIterator = struct {
             .font_italic = if (self.presentation(node, "font-style")) |v| try parseFontStyle(v) else null,
             .text_anchor = if (self.presentation(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
             .image_rendering = if (self.presentation(node, "image-rendering")) |v| try parseImageRendering(v) else null,
+            .visible = if (self.presentation(node, "visibility")) |v| try parseVisibility(v) else null,
         };
     }
 
@@ -1540,6 +1578,15 @@ fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
     // leaving the attribute out already does here.
     if (std.mem.eql(u8, t, "inherit")) return error.BadTextAnchor;
     return error.BadTextAnchor;
+}
+
+/// §11.5's `visibility`. `collapse` is `hidden` for anything that is not a
+/// table row, which nothing in SVG is.
+fn parseVisibility(raw: []const u8) Error!bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "visible")) return true;
+    if (std.mem.eql(u8, t, "hidden") or std.mem.eql(u8, t, "collapse")) return false;
+    return error.BadVisibility;
 }
 
 /// `image-rendering`: SVG 1.1's three keywords and CSS Images 3's four.
@@ -2728,5 +2775,53 @@ test "a use drawn as a group that contains itself is still recursion" {
     ));
     try testing.expectError(error.RecursiveUse, read(testing.allocator,
         \\<svg viewBox="0 0 10 10"><use id="u" href="#u" opacity="0.5"/></svg>
+    ));
+}
+
+test "display none takes an element and everything in it out of the walk" {
+    // Hidden things are not read at all, so what is inside one cannot be
+    // refused: the `<foo>` would be `UnsupportedElement` anywhere else.
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <rect width="1" height="1" display="none"/>
+        \\  <g display="none"><rect width="2" height="2"/><foo/></g>
+        \\  <defs><rect id="r" width="3" height="3"/></defs>
+        \\  <use href="#r" display="none"/>
+        \\  <g style="display: none"><rect width="4" height="4"/></g>
+        \\  <rect width="5" height="5" display="inline"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+    var it = doc.paths();
+    try testing.expectEqual(@as(f64, 5), (try it.next()).?.shape.geometry.rect.width);
+    try testing.expectEqual(@as(?Item, null), try it.next());
+
+    // A hidden root hides the document, which then has nothing to draw.
+    try testing.expectError(error.NoPath, read(testing.allocator,
+        \\<svg viewBox="0 0 10 10" display="none"><rect width="1" height="1"/></svg>
+    ));
+}
+
+test "visibility is inherited, overridable, and hides without removing" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <g visibility="hidden">
+        \\    <rect width="1" height="1"/>
+        \\    <rect width="2" height="2" visibility="visible"/>
+        \\  </g>
+        \\  <rect width="3" height="3" visibility="collapse"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    // All three are still yielded: a hidden shape takes up room.
+    try testing.expectEqual(@as(usize, 3), doc.shape_count);
+    var it = doc.paths();
+    try testing.expect(!(try it.next()).?.shape.visible);
+    try testing.expect((try it.next()).?.shape.visible);
+    try testing.expect(!(try it.next()).?.shape.visible);
+
+    try testing.expectError(error.BadVisibility, read(testing.allocator,
+        \\<svg viewBox="0 0 10 10"><rect width="1" height="1" visibility="invisible"/></svg>
     ));
 }

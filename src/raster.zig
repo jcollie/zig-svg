@@ -551,11 +551,27 @@ fn drawItems(
                 continue;
             },
             .image => |im| {
-                try drawImage(gpa, layers, doc, im, pass, opts);
+                if (im.visible) try drawImage(gpa, layers, doc, im, pass, opts);
                 continue;
             },
         };
         const ctm = view_box.mul(shape.transform);
+
+        // `visibility: hidden` paints nothing and still takes up room. For a
+        // run of text that room is the pen's advance, which the next run
+        // starts from, so the run is laid out as though it were drawn --
+        // built and thrown away -- and nothing else happens.
+        if (!shape.visible) {
+            if (shape.geometry == .text) {
+                var p: z2d.Path = .empty;
+                defer p.deinit(gpa);
+                try buildGeometry(gpa, &p, shape, ctm, .{
+                    .max_nodes = pass.nodes_left.*,
+                }, doc, &pen, opts);
+                try spendNodes(pass, p.nodes.items.len);
+            }
+            continue;
+        }
 
         // A clip or a mask on a shape is the same layer a clip on a group
         // gets. It costs a surface the size of the picture for one shape,
@@ -1872,6 +1888,10 @@ fn buildClip(
         }, doc, &clip_pen, opts);
         try spendNodes(pass, p.nodes.items.len);
         if (p.nodes.items.len == 0) continue;
+        // §14.3.5: a hidden child contributes nothing to the clip. Built all
+        // the same, so that a hidden run of text still moves the pen the run
+        // after it starts from.
+        if (!shape.visible) continue;
 
         try z2d.painter.fill(gpa, &mask, &white, p.nodes.items, .{
             // §14.3's `clip-rule`, which is a property of its own: a document
@@ -5456,4 +5476,26 @@ test "a use's own opacity and clip apply to what it draws" {
     // The clip moves with the `<use>`'s `x`: the left half of the second one.
     try testing.expectEqual(@as(u8, 255), sfc.getPixel(11, 4).?.rgba.a);
     try testing.expectEqual(@as(u8, 0), sfc.getPixel(16, 4).?.rgba.a);
+}
+
+test "a hidden shape paints nothing, and a visible child of a hidden group does" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 20 10\"><g visibility=\"hidden\">" ++
+        "<rect width=\"10\" height=\"10\" fill=\"black\"/>" ++
+        "<rect x=\"10\" width=\"10\" height=\"10\" fill=\"black\" visibility=\"visible\"/>" ++
+        "</g></svg>", .{ .width = 20, .height = 10 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(5, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(15, 5).?.rgba.a);
+}
+
+test "a hidden child of a clip path cuts nothing" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 20 10\"><clipPath id=\"c\">" ++
+        "<rect width=\"10\" height=\"10\"/>" ++
+        "<rect x=\"10\" width=\"10\" height=\"10\" visibility=\"hidden\"/>" ++
+        "</clipPath><rect width=\"20\" height=\"10\" fill=\"black\" clip-path=\"url(#c)\"/></svg>", .{ .width = 20, .height = 10 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(5, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(15, 5).?.rgba.a);
 }

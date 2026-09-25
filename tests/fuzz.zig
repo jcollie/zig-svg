@@ -124,7 +124,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "filterGausinBlurOfetMrgNodFlvyUS" ++
     "<style>{}#.*~|[]=:,>+/**/!important " ++
     "imagehrefdata:;base64,/pngjpegwebpgifsvg+xmlimage-renderingoptimizeSpeedpixelatedauto" ++
-    "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=";
+    "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=" ++
+    "displaynoneinlinevisibilityhiddencollapsevisible";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -911,6 +912,10 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42gXBAQEAAACAEP9PFyIJBQM/0gX7Pk0ZHwAAAABJRU5ErkJggg==\" width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><image href=\"data:image/svg+xml,&lt;svg/>\" width=\"8\" height=\"8\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><image href=\"picture.png\" width=\"8\" height=\"8\"/></svg>",
+    // `display` and `visibility`: hidden things are not read, hidden ones
+    // are laid out and not painted.
+    "<svg viewBox=\"0 0 8 8\"><g display=\"none\"><foo/><rect width=\"8\" height=\"8\"/></g><rect width=\"4\" height=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><g visibility=\"hidden\"><rect width=\"8\" height=\"8\"/><rect width=\"4\" height=\"4\" visibility=\"visible\"/></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

@@ -475,11 +475,11 @@ fn drawItems(
                     height,
                     opts,
                 );
-                errdefer if (cut) |c| {
-                    var owned = c;
-                    owned.deinit(gpa);
-                };
-                const filtered = try buildFilter(
+                // `cut` is this caller's until `layers.open` takes it, and `open`
+                // frees what it was handed when it fails -- so it is released here
+                // only if the filter fails first, and never by an `errdefer` that
+                // would free it a second time after a refused `open`.
+                const filtered = buildFilter(
                     gpa,
                     doc,
                     g.filter,
@@ -489,7 +489,13 @@ fn drawItems(
                     width,
                     height,
                     opts,
-                );
+                ) catch |err| {
+                    if (cut) |c| {
+                        var owned = c;
+                        owned.deinit(gpa);
+                    }
+                    return err;
+                };
                 try layers.open(gpa, g.opacity, cut, filtered, opts.limits.max_layers);
                 continue;
             },
@@ -517,11 +523,11 @@ fn drawItems(
                 height,
                 opts,
             );
-            errdefer if (cut) |c| {
-                var owned = c;
-                owned.deinit(gpa);
-            };
-            const filtered = try buildFilter(
+            // `cut` is this caller's until `layers.open` takes it, and `open`
+            // frees what it was handed when it fails -- so it is released here
+            // only if the filter fails first, and never by an `errdefer` that
+            // would free it a second time after a refused `open`.
+            const filtered = buildFilter(
                 gpa,
                 doc,
                 shape.filter,
@@ -531,7 +537,13 @@ fn drawItems(
                 width,
                 height,
                 opts,
-            );
+            ) catch |err| {
+                if (cut) |c| {
+                    var owned = c;
+                    owned.deinit(gpa);
+                }
+                return err;
+            };
             if (cut != null or filtered != null) {
                 try layers.open(gpa, 1.0, cut, filtered, opts.limits.max_layers);
                 shape_layer = true;
@@ -4803,4 +4815,22 @@ test "only the first subpath of a textPath's shape is followed" {
     defer arc.deinit(gpa);
     try flatten(gpa, p.nodes.items, &arc);
     try testing.expectApproxEqAbs(@as(f64, 6), arc.total(), 1e-9);
+}
+
+test "an element whose layer is refused frees its clip once" {
+    const gpa = testing.allocator;
+    // `Layers.open` frees the clip it is handed when it refuses, and each
+    // caller used to free it again from an `errdefer`. A shape and a group
+    // each take that path, and each must come back as the refusal rather
+    // than as a double free.
+    const clip = "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><rect width=\"4\" height=\"4\"/></clipPath>";
+    for ([_][]const u8{
+        clip ++ "<rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
+        clip ++ "<g clip-path=\"url(#c)\"><rect width=\"8\" height=\"8\"/></g></svg>",
+    }) |src| {
+        try testing.expectError(
+            error.TooManyLayers,
+            render(gpa, src, .{ .width = 8, .height = 8, .limits = .{ .max_layers = 0 } }),
+        );
+    }
 }

@@ -202,11 +202,11 @@ copyFarm name
       };
     }
     {
-      name = "z2dimg-0.0.0-N7PaCQpCJABvbpIS36N2BVfYqTVAWyszvCeUZZwy-aDE";
+      name = "z2dimg-0.0.0-N7PaCUj_JACc-jdt5ImF4dCwoXD7T8YPNgpgDfaYJ46d";
       path = fetchZigArtifact {
         name = "z2dimg";
-        url = "git+https://git.jcollie.dev/jeff/z2dimg.git#07312cf2c0f0a03a7bc6331335e6a8d7c0aa8f67";
-        hash = "sha256-sGUiDLJIC5x9P6SJjDpDkzrlLI8cEYfm6USktcd8gUk=";
+        url = "git+https://git.jcollie.dev/jeff/z2dimg.git#97968f22a9e9c37f1fcb79d3c7c52e191056dff4";
+        hash = "sha256-7pYGBTZmyjS62Y0DoJYvf9vybdWVz3cKSdg51w0D7xo=";
         unpack = true;
       };
     }

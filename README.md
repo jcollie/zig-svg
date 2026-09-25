@@ -467,7 +467,7 @@ short of the specification.
 | Picture formats | whatever [z2dimg](https://git.jcollie.dev/jeff/z2dimg) reads: PNG, JPEG, GIF, WebP, BMP, TGA, ICO, Netpbm, PCX, XBM, XPM |
 | `width`, `height` on `<image>` | yes, including SVG 2's `auto` — the picture's own size, or what the other side implies |
 | `preserveAspectRatio` on `<image>` | yes — the picture's own size stands in for a `viewBox` |
-| `image-rendering` | yes, inherited — bilinear by default; nearest for `optimizeSpeed`, `pixelated`, `crisp-edges` |
+| `image-rendering` | yes, inherited — Mitchell's cubic by default, as resvg; nearest for `optimizeSpeed`, `pixelated`, `crisp-edges` |
 | An SVG inside an `<image>` | **no** — `error.UnsupportedImageFormat` |
 | Pictures decoded | to `Limits.max_images` (256) and `Limits.max_image_pixels` (2²⁴, reductions included) |
 
@@ -521,12 +521,17 @@ believed is `image/svg+xml`, which is refused by name: a document inside a
 document is a render of its own rather than a decode.
 
 The picture is fitted into the element's rectangle by §7.8's rule, with its own
-pixel size standing in for a `viewBox`, and cut to that rectangle with the same
-anti-aliased coverage any shape's edge gets. Sampling is bilinear, on
-premultiplied pixels so that transparency lends no colour to its neighbours; a
-picture drawn at less than half its size is halved first, as many times as it
-takes, so that bilinear never skips a pixel. `image-rendering: optimizeSpeed`
-— or CSS's `pixelated` or `crisp-edges` — samples the nearest pixel instead.
+pixel size standing in for a `viewBox`, and the rectangle is then filled with
+the picture as paint — a `z2d.SurfacePattern` — so that its edge gets the same
+anti-aliased coverage any shape's does. The pattern samples with Mitchell and
+Netravali's cubic, B = C = 1/3, which is what Skia calls high-quality sampling
+and so what resvg draws pictures with; the two agree to a level. It works on
+premultiplied pixels, so transparency lends no colour to its neighbours, and a
+picture drawn at its own size, however it is moved, is copied rather than
+filtered. A picture drawn at less than half its size is halved first, as many
+times as it takes, so that the filter never skips a pixel.
+`image-rendering: optimizeSpeed` — or CSS's `pixelated` or `crisp-edges` —
+samples the nearest pixel instead.
 
 **Decoding happens while drawing, not while reading.** That is the one
 exception to refusing before anything is painted: a picture is only worth
@@ -808,7 +813,7 @@ code.
 Some fixtures are held to their own tolerances, named in `DIVERGENCES` at the
 top of `tools/check_oracle.py` with the reason beside each and printed as
 *diff* rather than *ok* so they stay visible. Five are `<filter>`, for two
-separate reasons.
+separate reasons, and one is `<image>`.
 
 The first is the **blur kernel**. §15.17 defines `feGaussianBlur` as a Gaussian
 and then offers an approximation — "the implementation *can* approximate the
@@ -819,8 +824,8 @@ noticeably more peaked than a Gaussian below about `stdDeviation` three and
 indistinguishable from one above it. Two approximations of the same curve
 differ by a level or two across the whole of a blurred area rather than along
 an edge, which is exactly the shape of disagreement a tolerance tuned for
-antialiasing does not fit — `filter-srgb` measures 0.805 with a worst pixel of
-6, which is a lot of pixels differing by one and none differing visibly.
+antialiasing does not fit — `filter-srgb` measures 0.704 with a worst pixel of
+5, which is a lot of pixels differing by one and none differing visibly.
 
 The second is the **region edge**, and here the oracle is the one that is
 wrong. §15.7.5 makes the filter region "a hard clip" on the filter's input and
@@ -832,20 +837,16 @@ product of two blurs is not a linear operator, and `feGaussianBlur` is defined
 as a convolution, which is. `filter-region` exists to record the difference
 rather than being reshaped to avoid it.
 
-The rest are `<image>`, written by `tools/image_fixtures.py` so that the base64
-in them comes from an encoder that is not z2dimg's, and they differ for three
-reasons, each measured. resvg samples a picture **bicubically** where this
-samples bilinearly — a black and a white pixel enlarged thirty-two times come
-out an S-curve there and a straight ramp here — and every fixture enlarges a
-sixteen-pixel picture sixteen times, so a level or so of mean with no area that
-moves. z2d's **premultiplied round trip** truncates both ways, so a
-translucent pixel comes back one to four levels darker than it went in;
-`image-optimize-speed`, where both renderers sample the nearest pixel, is that
-and nothing else. And resvg does not **reduce** a picture drawn small, so the
-rings in `image-downscale` are a moiré there and a faint one here — the one
-place resvg is the worse picture. resvg 0.48.1 also draws CSS's `pixelated`
-and `crisp-edges` smooth, knowing only SVG 1.1's `optimizeSpeed`; no fixture
-uses them, since it would be measuring resvg's gap.
+The other is `<image>`. The image fixtures are written by
+`tools/image_fixtures.py`, so that the base64 in them comes from an encoder
+that is not z2dimg's, and all but one match resvg to a level: both sample with
+Mitchell's cubic, and a black and a white pixel enlarged thirty-two times come
+out the same S-curve in both. `image-downscale` is the exception, and the one
+place resvg is the worse picture: resvg does not reduce a picture drawn small,
+so the rings in that fixture are a moiré there and a faint one here. resvg
+0.48.1 also draws CSS's `pixelated` and `crisp-edges` smooth, knowing only SVG
+1.1's `optimizeSpeed`; no fixture uses them, since it would be measuring
+resvg's gap.
 
 ## Fuzzing
 
@@ -992,8 +993,11 @@ The z2d is a fork of [vancluever/z2d](https://github.com/vancluever/z2d),
 carrying what this library needs and upstream does not have: gradient extend
 modes, without which `spreadMethod` cannot be drawn; a fix for a leak in the
 dashed stroke plotter when an allocation fails; the thin-line guard being
-decided by the user-space width rather than the device-space one; and
-`PathNode` not being exported although the painters take it. Each arrived with
+decided by the user-space width rather than the device-space one; `PathNode`
+not being exported although the painters take it; a surface usable as paint,
+filtered with bilinear or Mitchell's cubic, and halved for drawing small, which
+is how an `<image>` is drawn; and pre-multiplication that rounds rather than
+truncates, which had darkened every translucent pixel by a level or so. Each arrived with
 a test in z2d's own suite.
 
 All are fetched by the Zig package manager. Nix builds fetch them through

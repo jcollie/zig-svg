@@ -183,14 +183,16 @@ pub const Cache = struct {
             const h = halfUp(from.getHeight());
             const cost: u64 = @as(u64, @intCast(w)) * @as(u64, @intCast(h));
             if (cost > self.budget.pixels) return error.EmbeddedImageTooLarge;
-            // At least one pixel each way, since `from` is, so the size
-            // cannot be refused -- only the allocation can fail.
-            var half = z2d.Surface.init(.image_surface_rgba, gpa, w, h) catch |err| switch (err) {
+            // Rounded up each way and never below one pixel, and averaged
+            // with rounding; see `z2d.Surface.halved`. Its size is known
+            // before it is made, so the budget is checked first.
+            var half = from.halved(gpa) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidWidth, error.InvalidHeight => unreachable,
+                // At least one pixel each way, since `from` is, so the size
+                // cannot be refused.
+                else => unreachable,
             };
             errdefer half.deinit(gpa);
-            halve(&half, from);
             try bitmap.levels.append(gpa, half);
             self.budget.pixels -= cost;
         }
@@ -294,47 +296,6 @@ fn translate(err: z2dimg.DecodeError) Error {
         // file cut short.
         error.InvalidData, error.EndOfStream, error.ReadFailed => error.BadImageData,
     };
-}
-
-/// Halve `from` into `to`, averaging each two-by-two block.
-///
-/// Premultiplied, so a transparent pixel adds nothing to its neighbours'
-/// colour. An odd last row or column averages with itself, which is the edge
-/// repeated rather than transparency brought in from outside.
-fn halve(to: *z2d.Surface, from: *const z2d.Surface) void {
-    const fw = from.getWidth();
-    const fh = from.getHeight();
-    const tw = to.getWidth();
-    const th = to.getHeight();
-    const src = from.image_surface_rgba.buf;
-    const dst = to.image_surface_rgba.buf;
-    var y: i32 = 0;
-    while (y < th) : (y += 1) {
-        const y0 = 2 * y;
-        const y1 = @min(y0 + 1, fh - 1);
-        var x: i32 = 0;
-        while (x < tw) : (x += 1) {
-            const x0 = 2 * x;
-            const x1 = @min(x0 + 1, fw - 1);
-            const q = [4]z2d.pixel.RGBA{
-                src[@intCast(y0 * fw + x0)],
-                src[@intCast(y0 * fw + x1)],
-                src[@intCast(y1 * fw + x0)],
-                src[@intCast(y1 * fw + x1)],
-            };
-            dst[@intCast(y * tw + x)] = .{
-                .r = average(q[0].r, q[1].r, q[2].r, q[3].r),
-                .g = average(q[0].g, q[1].g, q[2].g, q[3].g),
-                .b = average(q[0].b, q[1].b, q[2].b, q[3].b),
-                .a = average(q[0].a, q[1].a, q[2].a, q[3].a),
-            };
-        }
-    }
-}
-
-fn average(a: u8, b: u8, c: u8, d: u8) u8 {
-    const sum: u32 = @as(u32, a) + b + c + d;
-    return @intCast((sum + 2) / 4);
 }
 
 // -- tests -------------------------------------------------------------------
@@ -444,22 +405,6 @@ test "the budget is spent across pictures, and a picture past it is refused" {
         error.TooManyImages,
         few.get(testing.allocator, 2, "data:;base64," ++ red_png_base64, null),
     );
-}
-
-test "halving averages blocks and repeats an odd edge" {
-    const gpa = testing.allocator;
-    var from = try z2d.Surface.init(.image_surface_rgba, gpa, 3, 1);
-    defer from.deinit(gpa);
-    const buf = from.image_surface_rgba.buf;
-    buf[0] = .{ .r = 200, .g = 0, .b = 0, .a = 200 };
-    buf[1] = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
-    buf[2] = .{ .r = 0, .g = 0, .b = 100, .a = 100 };
-
-    var to = try z2d.Surface.init(.image_surface_rgba, gpa, 2, 1);
-    defer to.deinit(gpa);
-    halve(&to, &from);
-    try testing.expectEqual(z2d.pixel.RGBA{ .r = 100, .g = 0, .b = 0, .a = 100 }, to.image_surface_rgba.buf[0]);
-    try testing.expectEqual(z2d.pixel.RGBA{ .r = 0, .g = 0, .b = 100, .a = 100 }, to.image_surface_rgba.buf[1]);
 }
 
 test "reductions are made on demand and paid for" {

@@ -116,49 +116,18 @@ DIVERGENCES = {
     # 0.375 and 0.25% -- the same `<use>` with a mask or a clip instead is
     # exact to a level.
     "use-filter": (0.6, 0.005, "blur kernel, on a <use>"),
-    # The `<image>` fixtures, for three reasons, each measured.
+    # One `<image>` fixture. The rest match resvg to a level: pictures are
+    # sampled with Mitchell's cubic, which is what resvg draws them with, and
+    # z2d's pre-multiplication rounds rather than truncating, which is what
+    # used to darken every translucent pixel by a level or so.
     #
-    # **The kernel.** A picture drawn larger than its own size is sampled
-    # bilinearly here and bicubically by resvg -- tiny-skia's `Bicubic`
-    # quality, which is resvg's default for `image-rendering: auto`. The two
-    # agree at pixel centres and differ between them, and every fixture
-    # enlarges a sixteen-pixel picture sixteen times, so "between them" is
-    # most of the picture. Bicubic also overshoots at a hard edge where
-    # bilinear cannot, which is the worst pixel in `image-gif`: the white
-    # diagonal. A level or so of mean, and no area that moves.
-    #
-    # **The premultiplied round trip.** z2d premultiplies by truncating and
-    # demultiplies on export by truncating, so a translucent pixel comes back
-    # one to four levels darker than it went in -- (51, 242, 24) at alpha 217
-    # comes out (50, 240, 23). resvg's round trip is exact at those values.
-    # `image-optimize-speed` isolates it: both renderers sample the nearest
-    # pixel there, and the whole of its difference is this, worst pixel two.
-    # It is z2d's, not the picture's, and every translucent fixture carries
-    # it; these are simply the first with a translucent pixel on every row.
-    #
-    # **The reduction.** A picture drawn at less than half its size is halved
-    # first here, and is not by resvg, which aliases: the ninety-six-pixel
-    # rings drawn at thirty-two are a moire pattern in resvg's picture and a
-    # much fainter one in this one. That is the one place resvg is the worse
-    # picture, and so the one entry with outliers to allow for.
-    "image-auto-size": (0.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-clip": (1.0, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-gif": (2.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-in-mask": (1.6, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-in-pattern": (1.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-jpeg": (2.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-opacity": (1.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-optimize-speed": (1.0, 0.0025, "premultiplied round trip only; both sample nearest"),
-    "image-par-meet": (0.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-par-meet-min": (0.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-par-none": (1.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-par-slice": (1.2, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-png-alpha": (1.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-use": (1.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-webp-lossless": (1.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-webp-lossy": (1.9, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-xlink-href": (1.1, 0.0025, "bilinear against bicubic, and the premultiplied round trip"),
-    "image-downscale": (1.8, 0.025, "a box prefilter where resvg has none, so resvg aliases"),
+    # This one is where the two renderers do different things on purpose. A
+    # picture drawn at less than half its size is halved first here, and is
+    # not by resvg, which samples it directly and aliases: the ninety-six-pixel
+    # rings drawn at thirty-two are a strong moire in resvg's picture and a
+    # faint one in this one. The one place resvg is the worse picture, and so
+    # the one entry with outliers to allow for. Measured at 0.972 and 1.556%.
+    "image-downscale": (1.5, 0.025, "a box prefilter where resvg has none, so resvg aliases"),
 }
 
 

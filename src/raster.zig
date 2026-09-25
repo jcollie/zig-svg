@@ -896,10 +896,32 @@ fn paintImage(
     // draws nothing, as it would for a shape.
     const to_picture = to_footprint.mul(placement).inverse() catch return;
 
-    // Where the picture ends, as the same anti-aliased coverage any shape's
-    // edge gets. The sampling below runs out past it in every direction.
-    var cover = try z2d.Surface.init(.image_surface_alpha8, gpa, fw, fh);
-    defer cover.deinit(gpa);
+    // Reduced first when it is being drawn small, so that the filter does
+    // not skip pixels. Level `k` is the picture at `1 / 2^k` of its size.
+    const k = resample.levelFor(to_picture, im.sampling);
+    const source = try images.level(gpa, picture, k);
+    const grow = std.math.pow(f64, 2.0, @floatFromInt(k));
+
+    // The picture as paint: z2d samples it through the matrix that places
+    // it, with Mitchell's cubic unless the document asked for hard edges.
+    // `pad` rather than `none`, because where the picture ends is the
+    // rectangle's business, not the sampling's -- the fill below gives that
+    // edge the same anti-aliased coverage any shape's gets, where fading
+    // into transparency over the filter's reach would give every picture a
+    // soft border no other renderer draws.
+    var paint: z2d.SurfacePattern = .{
+        .surface = source,
+        .extend = .pad,
+        .filter = switch (im.sampling) {
+            .smooth => .bicubic,
+            .nearest => .nearest,
+        },
+    };
+    paint.setTransformation(to_footprint.mul(placement).scale(grow, grow)) catch return;
+    const pattern_ = paint.asPattern();
+
+    var ink = try z2d.Surface.init(.image_surface_rgba, gpa, fw, fh);
+    defer ink.deinit(gpa);
     {
         var outline: z2d.Path = .empty;
         defer outline.deinit(gpa);
@@ -912,26 +934,13 @@ fn paintImage(
             .ry = null,
         } }, to_footprint, .{ .max_nodes = 16 });
         if (outline.nodes.items.len == 0) return;
-        const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
-        try z2d.painter.fill(gpa, &cover, &white, outline.nodes.items, .{
+        try z2d.painter.fill(gpa, &ink, &pattern_, outline.nodes.items, .{
             .anti_aliasing_mode = opts.anti_aliasing_mode,
             .tolerance = opts.tolerance,
         });
     }
 
-    // Reduced first when it is being drawn small, so that bilinear sampling
-    // does not skip pixels. Level `k` is the picture at `1 / 2^k` of its size.
-    const k = resample.levelFor(to_picture, im.sampling);
-    const source = try images.level(gpa, picture, k);
-    const shrink = 1.0 / std.math.pow(f64, 2.0, @floatFromInt(k));
-    const to_source = z2d.Transformation.identity.scale(shrink, shrink).mul(to_picture);
-
-    var ink = try z2d.Surface.init(.image_surface_rgba, gpa, fw, fh);
-    defer ink.deinit(gpa);
-    resample.paint(&ink, source, to_source, image.extent(&ink), im.sampling);
-
     const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
-    ink.composite(&cover, .dst_in, 0, 0, precision);
     if (opacity < 1.0) {
         const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(opacity) } };
         z2d.compositor.SurfaceCompositor.run(&ink, 0, 0, 1, .{

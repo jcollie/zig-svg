@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .z2d = .{
-            .url = "git+https://git.jcollie.dev/jeff/z2d.git#551eeffcf148a4b6e08553f6e722d61437c548c3",
-            .hash = "z2d-0.12.2-pre-j5P_Hr3pEQCCF9d-QIlDP-O7SUs9GcIKyEjz5uNJW4mm",
+            .url = "git+https://git.jcollie.dev/jeff/z2d.git#c016785e3c98f289b11041deb0e60fd0e3103b7f",
+            .hash = "z2d-0.12.2-pre-j5P_HnUtEgB-WFJ_HPagXmB5wIgULczoSsuw2GNoWQUh",
         },
         .zxml = .{
             .url = "git+https://git.jcollie.dev/jeff/zxml.git#cfbda2e23d78d55ce0e4b61e8ce8f1aee64a57f4",
@@ -21,8 +21,8 @@
             .hash = "zig_css-0.0.0-d530kFLbGgAN4NqKWIX58MC_Mq2QNhfS0ej8r9O_Ftz6",
         },
         .z2dimg = .{
-            .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#97968f22a9e9c37f1fcb79d3c7c52e191056dff4",
-            .hash = "z2dimg-0.0.0-N7PaCUj_JACc-jdt5ImF4dCwoXD7T8YPNgpgDfaYJ46d",
+            .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#4af70f61b5c4f7e64602ae3f118c742b09eac866",
+            .hash = "z2dimg-0.0.0-N7PaCfgDJQDuLSbcHztfA2lTkEttYcStz49aJ9G-lVr0",
         },
         .uri = .{
             .url = "git+https://git.jcollie.dev/jeff/zig-uri.git#b51701b260f07620b9bf953fc19c902115eac25e",

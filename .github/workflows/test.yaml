@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+# SPDX-License-Identifier: MIT
+
+# The platforms the Forgejo runners do not have. This repository is a mirror
+# of https://git.jcollie.dev/jeff/zig-svg, whose own workflow runs everything
+# on Linux: formatting, REUSE, the tests, the resvg oracle, the fuzzers, the
+# Nix package and the documentation. This runs only what can differ between
+# operating systems -- the tests and a compile of every tool -- on macOS and
+# Windows, where there is no sandbox and `sandbox.render` has to say so rather
+# than render unconfined.
+#
+# No Nix here, because there is none on Windows: Zig comes from setup-zig at
+# the version flake.nix pins, and Zig fetches the dependencies itself. The
+# unit tests need nothing else -- the font and resvg are the oracle's, which
+# stays on Linux.
+
+name: test
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      # One platform failing says nothing about the other, so both finish.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        # Pinned to a commit rather than a tag, in the format pinact writes, so
+        # that what runs here cannot change under a moved tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Run tests
+        run: zig build test --summary all
+
+      - name: Compile the tools that are not run here
+        run: zig build check

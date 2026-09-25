@@ -377,7 +377,7 @@ Groups nest, and carry both presentation attributes and a transform:
 
 ## Where this lives
 
-The repository lives in three places that carry the same history. The Forgejo
+The repository lives in four places that carry the same history. The Forgejo
 instance at <https://git.jcollie.dev/jeff/zig-svg> is the web-visible one:
 
 ```console
@@ -392,7 +392,15 @@ rad:z2u6JeD6AUFAFSTYuG32WjsSivLnc
 ```
 
 and `rad clone rad:z2u6JeD6AUFAFSTYuG32WjsSivLnc` fetches it from any node that
-seeds it. Any of the three is the whole project.
+seeds it.
+
+It is mirrored on GitHub at <https://github.com/jcollie/zig-svg> as well, for
+one reason: GitHub has macOS and Windows runners, and the Forgejo runners are
+all Linux. `.github/workflows/test.yaml` runs the tests and compiles every tool
+on those two, where there is no sandbox and the library has to say so rather
+than render unconfined; everything else the continuous integration does runs
+on Forgejo, from `.forgejo/workflows/test.yaml`. Any of the four is the whole
+project.
 
 ## What it draws
 

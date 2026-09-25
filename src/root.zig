@@ -15,16 +15,18 @@
 //!
 //! The static half of SVG 1.1: paths and the basic shapes, `<g>` and `<use>`,
 //! transforms, fills and strokes with every property that goes with them,
-//! gradients and patterns, clipping and masking, and `<text>` with the fonts
-//! the caller supplies. The path data grammar of §8.3 is complete, elliptical
-//! arcs included, and so is §7.8's `preserveAspectRatio`. `README.md` has the
-//! table, and `tests/oracle` has a fixture for each of them checked against
-//! resvg.
+//! gradients and patterns, clipping and masking, the commonest `<filter>`
+//! primitives, CSS in a `style` attribute or a `<style>` element, `<text>` and
+//! `<tspan>` with the fonts the caller supplies, and `<image>` with the
+//! pictures z2dimg decodes. The path data grammar of §8.3 is complete,
+//! elliptical arcs included, and so is §7.8's `preserveAspectRatio`.
+//! `README.md` has the table, and `tests/oracle` has a fixture for each of
+//! them checked against resvg.
 //!
 //! What it does not draw is the half that makes SVG a programming language
 //! rather than a picture format -- scripting, animation, `<foreignObject>`,
-//! external references -- along with `<filter>`, CSS in a `style` attribute or
-//! a `<style>` element, and `<tspan>`.
+//! and external references other than the pictures an `<image>` names, which
+//! the caller is asked for.
 //!
 //! An element it cannot draw is **refused**, not skipped. A renderer that
 //! skips what it does not understand produces a picture quietly missing a
@@ -36,7 +38,10 @@
 //!
 //! Nothing here opens, closes, reads or writes a file, and nothing takes an
 //! `Io`. A document arrives as a byte slice and pixels come back as memory;
-//! where either came from is the calling program's business. That is what
+//! where either came from is the calling program's business. So is anything
+//! the document names from outside itself: a font is asked of
+//! `Options.fonts`, and a picture that is not a `data:` URL of
+//! `Options.images`, and both answer out of memory the caller already holds. That is what
 //! makes `sandbox` possible — rendering never needed a file, so a process that
 //! cannot open one is still a perfectly capable renderer.
 //!
@@ -75,6 +80,11 @@ pub const pattern = @import("pattern.zig");
 pub const filter = @import("filter.zig");
 /// The pixel operations those primitives are made of.
 pub const image = @import("image.zig");
+/// The pictures an `<image>` names: fetched from a `data:` URL or the
+/// caller, decoded by z2dimg, and kept for the length of a render.
+pub const bitmap = @import("bitmap.zig");
+/// Drawing a decoded picture under a matrix.
+pub const resample = @import("resample.zig");
 /// SVG 1.1 §6: the `style` attribute, a `<style>` element's rules, and the
 /// cascade that decides between them.
 ///
@@ -107,6 +117,8 @@ pub const Document = document.Document;
 pub const PathIterator = document.PathIterator;
 /// One drawable element, with the paint that applies to it.
 pub const Shape = document.Shape;
+/// An `<image>`, placed and ready to decode.
+pub const Image = document.Image;
 /// What a drawable element contributes: a `d`, or a basic shape's numbers.
 pub const Geometry = shapes.Geometry;
 /// A colour, in straight alpha.
@@ -125,6 +137,8 @@ pub const Options = raster.Options;
 pub const Box = raster.Box;
 /// How much a caller is willing to spend on a picture somebody else wrote.
 pub const Limits = raster.Limits;
+/// How the caller supplies a picture an `<image>` names by URL.
+pub const ImageResolver = raster.ImageResolver;
 /// Everything a render can fail with.
 pub const Error = raster.Error;
 
@@ -138,6 +152,8 @@ test {
     _ = pattern;
     _ = filter;
     _ = image;
+    _ = bitmap;
+    _ = resample;
     _ = css;
     _ = length;
     _ = path;

@@ -61,6 +61,10 @@ const limits: svg.Limits = .{
     .max_height = 128,
     .max_pixels = 1 << 12,
     .max_path_nodes = 4096,
+    // A mutated PNG header is the cheapest way to ask for a huge picture, so
+    // the decode budget is as small as the canvas.
+    .max_image_pixels = 1 << 12,
+    .max_images = 4,
 };
 
 /// A fuzz target: a property, the inputs it is worth starting from, and how
@@ -118,7 +122,9 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "textPathstOf%" ++
     "style:;!importan" ++
     "filterGausinBlurOfetMrgNodFlvyUS" ++
-    "<style>{}#.*~|[]=:,>+/**/!important ";
+    "<style>{}#.*~|[]=:,>+/**/!important " ++
+    "imagehrefdata:;base64,/pngjpegwebpgifsvg+xmlimage-renderingoptimizeSpeedpixelatedauto" ++
+    "iVBORw0KGgoAAAANSUhEUgIDATIEND+/=";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -243,6 +249,30 @@ fn documentTarget(input: []const u8) anyerror!void {
             .close_group => {
                 if (open_groups == 0) return error.GroupClosedWithoutOpening;
                 open_groups -= 1;
+                continue;
+            },
+            // A picture carries a URL it borrows and a rectangle, and the
+            // same promises hold of both: the URL is the tree's, not the
+            // source's, and every number is one the rasterizer can use. A
+            // size, when there is one, is positive -- the walk drops an
+            // `<image>` whose size is zero rather than yielding it.
+            .image => |im| {
+                seen += 1;
+                const inside = @intFromPtr(im.href.ptr) >= @intFromPtr(src.ptr) and
+                    @intFromPtr(im.href.ptr) < @intFromPtr(src.ptr) + src.len;
+                try testing.expect(!inside);
+                try testing.expect(im.href.len != 0);
+                try expectUsable(im.x);
+                try expectUsable(im.y);
+                if (im.width) |w| {
+                    try expectUsable(w);
+                    try testing.expect(w > 0);
+                }
+                if (im.height) |h| {
+                    try expectUsable(h);
+                    try testing.expect(h > 0);
+                }
+                try testing.expect(im.opacity >= 0.0 and im.opacity <= 1.0);
                 continue;
             },
         };
@@ -872,6 +902,15 @@ const document_corpus = [_][]const u8{
     // `<use>` naming an id the document does not have.
     "<svg viewBox=\"0 0 24 24\"><use href=\"#a\"/></svg>",
     "<svg viewBox=\"0 0 24 24\"><text x=\"1\" y=\"1\">hi</text></svg>",
+    // `<image>`: a picture in each of three formats, placed, fitted and
+    // sampled every way the element allows, and the refusals.
+    "<svg viewBox=\"0 0 8 8\"><image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42gXBAQEAAACAEP9PFyIJBQM/0gX7Pk0ZHwAAAABJRU5ErkJggg==\" width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><image href=\"data:image/webp;base64,UklGRhwAAABXRUJQVlA4TBAAAAAvAUAAAAdQwOh//wMR0f8A\" x=\"1\" width=\"4\" preserveAspectRatio=\"xMinYMax slice\" transform=\"rotate(20)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\" image-rendering=\"optimizeSpeed\"><image href=\"data:image/gif;base64,R0lGODdhAgACAIEAAP//AAAAAAAAAAAAACwAAAAAAgACAAAIBgABCAQQEAA7\" opacity=\"0.5\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><defs><image id=\"i\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42gXBAQEAAACAEP9PFyIJBQM/0gX7Pk0ZHwAAAABJRU5ErkJggg==\" height=\"3\"/></defs><use href=\"#i\"/><use href=\"#i\" x=\"4\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><mask id=\"m\"><image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42gXBAQEAAACAEP9PFyIJBQM/0gX7Pk0ZHwAAAABJRU5ErkJggg==\" width=\"8\" height=\"8\"/></mask><rect width=\"8\" height=\"8\" mask=\"url(#m)\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><image href=\"data:image/svg+xml,&lt;svg/>\" width=\"8\" height=\"8\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><image href=\"picture.png\" width=\"8\" height=\"8\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

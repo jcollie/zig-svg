@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 const z2d = @import("z2d");
 const ztree = @import("ztree");
 
+const bitmap = @import("bitmap.zig");
 const color = @import("color.zig");
 const css = @import("css");
 const document = @import("document.zig");
@@ -31,6 +32,7 @@ const image = @import("image.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
 const pattern = @import("pattern.zig");
+const resample = @import("resample.zig");
 const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
 
@@ -117,6 +119,23 @@ pub const Limits = struct {
     /// anything the caller did not already have.
     max_input_bytes: u64 = 1 << 24,
 
+    /// The most pixels to decode for `<image>` elements, over all of them
+    /// together, reductions included.
+    ///
+    /// The encoded picture is bounded already -- it is inside the document,
+    /// and `max_input_bytes` bounds that -- but the decoded one is not: a PNG
+    /// of a few hundred bytes can declare itself sixteen thousand pixels
+    /// square and compress the lot to nothing. So this is the number that
+    /// bounds what an `<image>` costs, and a sandboxed render reserves four
+    /// bytes a pixel of it on top of `working_bytes`. The default is a picture
+    /// of four thousand pixels square, sixty-four megabytes of RGBA.
+    max_image_pixels: u64 = 1 << 24,
+
+    /// The most distinct `<image>` elements to decode. A decode costs
+    /// something however small the picture is, so this bounds a document of a
+    /// thousand one-pixel images, which `max_image_pixels` would not.
+    max_images: usize = 1 << 8,
+
     /// Nothing is refused. For a program drawing files it produced itself, on
     /// a machine it is not sharing.
     pub const unlimited: Limits = .{
@@ -127,6 +146,8 @@ pub const Limits = struct {
         .max_shapes = math.maxInt(usize),
         .max_layers = 64,
         .max_input_bytes = math.maxInt(u64),
+        .max_image_pixels = math.maxInt(u64),
+        .max_images = math.maxInt(usize),
     };
 
     /// Refuses a picture this budget will not pay for.
@@ -204,7 +225,18 @@ pub const Options = struct {
     /// A document with `<text>` in it and no resolver is refused rather than
     /// drawn without its text.
     fonts: ?FontResolver = null,
+
+    /// Where a picture comes from when an `<image>` names it by anything
+    /// other than a `data:` URL, or null when the caller has none to give.
+    ///
+    /// A `data:` URL needs no resolver: the picture is in the document. Any
+    /// other `href` without one is refused, like `<text>` without a font.
+    images: ?ImageResolver = null,
 };
+
+/// How the caller supplies a picture an `<image>` names by URL. See
+/// `bitmap.Resolver`, which says what it is asked and where it runs.
+pub const ImageResolver = bitmap.Resolver;
 
 /// What a document asks for when it wants a font.
 pub const FontRequest = struct {
@@ -310,7 +342,7 @@ pub const Error = document.Error || document.BuildError || path.BuildError || z2
     /// `<mask>` whose content is itself masked, or a `<clipPath>` carrying a
     /// `clip-path` of its own, repeated past any sense.
     TooManyMaskHops,
-} || gradient.Error || pattern.Error || filter.Error || image.Error;
+} || gradient.Error || pattern.Error || filter.Error || image.Error || bitmap.Error;
 
 /// Where in a surface to draw, in pixels.
 pub const Box = struct {
@@ -394,11 +426,22 @@ fn drawDocument(
     var layers: Layers = .{ .bottom = destination };
     defer layers.deinit(gpa);
 
+    // Every picture decoded once for the whole render, however many times it
+    // is drawn, and paid for out of one budget.
+    var images: bitmap.Cache = .init(.{
+        .pixels = opts.limits.max_image_pixels,
+        .images = opts.limits.max_images,
+        .max_width = opts.limits.max_width,
+        .max_height = opts.limits.max_height,
+    });
+    defer images.deinit(gpa);
+
     var walk = doc.paths();
     return drawItems(gpa, &layers, doc, &walk, .{
         .base = doc.transformFor(box.x, box.y, box.width, box.height),
         .nodes_left = &nodes_left,
         .depth = 0,
+        .images = &images,
     }, opts);
 }
 
@@ -434,6 +477,10 @@ const Pass = struct {
     nodes_left: *usize,
     /// How many masks and clips deep this pass already is.
     depth: usize,
+    /// The pictures decoded so far, shared by every pass for the same reason
+    /// the node budget is: an `<image>` inside a mask or a pattern tile is
+    /// the same picture as one outside it.
+    images: *bitmap.Cache,
 };
 
 /// Draw whatever a walk yields onto the top of a layer stack.
@@ -501,6 +548,10 @@ fn drawItems(
             },
             .close_group => {
                 try layers.close(gpa);
+                continue;
+            },
+            .image => |im| {
+                try drawImage(gpa, layers, doc, im, pass, opts);
                 continue;
             },
         };
@@ -700,6 +751,224 @@ fn drawItems(
         // `drawDocument` unwinds the whole stack when a draw gives up.
         if (shape_layer) try layers.close(gpa);
     }
+}
+
+// -- images ------------------------------------------------------------------
+
+/// A picture's own size, in its pixels.
+const Size = struct {
+    width: f64,
+    height: f64,
+};
+
+/// Draw an `<image>`: SVG 1.1 §5.7.
+///
+/// The picture is fitted into the element's rectangle by §7.8's rule, its own
+/// pixel size standing in for a `viewBox`, and cut to that rectangle -- which
+/// only cuts anything under `slice`, where the picture overflows it by design.
+///
+/// A clip, a mask or a filter opens a layer exactly as it does for a shape,
+/// and then the element's `opacity` goes on that layer rather than on the
+/// picture, so that it applies after the filter as §15 says it must.
+fn drawImage(
+    gpa: Allocator,
+    layers: *Layers,
+    doc: *const document.Document,
+    im: document.Image,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    const picture = try pass.images.get(gpa, im.node, im.href, opts.images);
+    const size: Size = .{
+        .width = @floatFromInt(picture.width()),
+        .height = @floatFromInt(picture.height()),
+    };
+    const rect = imageRect(im, size);
+    const ctm = pass.base.mul(im.transform);
+    const width = layers.bottom.getWidth();
+    const height = layers.bottom.getHeight();
+
+    var own_layer = false;
+    {
+        const cut = try buildCut(
+            gpa,
+            doc,
+            .{ .clip_path = im.clip_path, .mask = im.mask },
+            ctm,
+            .{ .image = rect },
+            pass,
+            width,
+            height,
+            opts,
+        );
+        // `cut` is this caller's until `layers.open` takes it, and `open`
+        // frees what it was handed when it fails -- so it is released here
+        // only if the filter fails first, and never by an `errdefer` that
+        // would free it a second time after a refused `open`.
+        const filtered = buildFilter(
+            gpa,
+            doc,
+            im.filter,
+            ctm,
+            .{ .image = rect },
+            im.current_color orelse callerColor(opts),
+            width,
+            height,
+            opts,
+        ) catch |err| {
+            if (cut) |c| {
+                var owned = c;
+                owned.deinit(gpa);
+            }
+            return err;
+        };
+        if (cut != null or filtered != null) {
+            try layers.open(gpa, im.opacity, cut, filtered, opts.limits.max_layers);
+            own_layer = true;
+        }
+    }
+
+    try paintImage(
+        gpa,
+        layers.target(),
+        pass.images,
+        picture,
+        im,
+        rect,
+        size,
+        ctm,
+        if (own_layer) 1.0 else im.opacity,
+        opts,
+    );
+    if (own_layer) try layers.close(gpa);
+}
+
+/// Paint a decoded picture onto `target`, placed and cut.
+///
+/// Only the device footprint of what shows is worked on: the coverage mask
+/// and the sampled picture are both that size and composited at its corner,
+/// the way `paintTiled` works one cell at a time. A picture on a large canvas
+/// costs its own area, not the canvas's.
+fn paintImage(
+    gpa: Allocator,
+    target: *z2d.Surface,
+    images: *bitmap.Cache,
+    picture: *bitmap.Bitmap,
+    im: document.Image,
+    rect: Box,
+    size: Size,
+    ctm: z2d.Transformation,
+    opacity: f64,
+    opts: Options,
+) Error!void {
+    if (alphaByte(opacity) == 0) return;
+    const placement = document.viewBoxTransform(
+        .{ .min_x = 0, .min_y = 0, .width = size.width, .height = size.height },
+        im.preserve_aspect_ratio,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+    );
+    const placed: Box = .{
+        .x = placement.tx,
+        .y = placement.ty,
+        .width = size.width * placement.ax,
+        .height = size.height * placement.dy,
+    };
+    const visible = intersect(rect, placed) orelse return;
+
+    const canvas: Box = .{
+        .width = @floatFromInt(target.getWidth()),
+        .height = @floatFromInt(target.getHeight()),
+    };
+    const footprint = intersect(mappedBounds(ctm, visible), canvas) orelse return;
+    const fx: i32 = @intFromFloat(@floor(footprint.x));
+    const fy: i32 = @intFromFloat(@floor(footprint.y));
+    const fw: i32 = @intFromFloat(@ceil(footprint.x + footprint.width) - @floor(footprint.x));
+    const fh: i32 = @intFromFloat(@ceil(footprint.y + footprint.height) - @floor(footprint.y));
+    if (fw <= 0 or fh <= 0) return;
+    const to_footprint = z2d.Transformation.identity
+        .translate(-@as(f64, @floatFromInt(fx)), -@as(f64, @floatFromInt(fy)))
+        .mul(ctm);
+
+    // A matrix that collapses the plane has nowhere to put the picture, and
+    // draws nothing, as it would for a shape.
+    const to_picture = to_footprint.mul(placement).inverse() catch return;
+
+    // Where the picture ends, as the same anti-aliased coverage any shape's
+    // edge gets. The sampling below runs out past it in every direction.
+    var cover = try z2d.Surface.init(.image_surface_alpha8, gpa, fw, fh);
+    defer cover.deinit(gpa);
+    {
+        var outline: z2d.Path = .empty;
+        defer outline.deinit(gpa);
+        try document.buildShape(&outline, gpa, .{ .rect = .{
+            .x = visible.x,
+            .y = visible.y,
+            .width = visible.width,
+            .height = visible.height,
+            .rx = null,
+            .ry = null,
+        } }, to_footprint, .{ .max_nodes = 16 });
+        if (outline.nodes.items.len == 0) return;
+        const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
+        try z2d.painter.fill(gpa, &cover, &white, outline.nodes.items, .{
+            .anti_aliasing_mode = opts.anti_aliasing_mode,
+            .tolerance = opts.tolerance,
+        });
+    }
+
+    // Reduced first when it is being drawn small, so that bilinear sampling
+    // does not skip pixels. Level `k` is the picture at `1 / 2^k` of its size.
+    const k = resample.levelFor(to_picture, im.sampling);
+    const source = try images.level(gpa, picture, k);
+    const shrink = 1.0 / std.math.pow(f64, 2.0, @floatFromInt(k));
+    const to_source = z2d.Transformation.identity.scale(shrink, shrink).mul(to_picture);
+
+    var ink = try z2d.Surface.init(.image_surface_rgba, gpa, fw, fh);
+    defer ink.deinit(gpa);
+    resample.paint(&ink, source, to_source, image.extent(&ink), im.sampling);
+
+    const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
+    ink.composite(&cover, .dst_in, 0, 0, precision);
+    if (opacity < 1.0) {
+        const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(opacity) } };
+        z2d.compositor.SurfaceCompositor.run(&ink, 0, 0, 1, .{
+            .{ .operator = .dst_in, .src = .{ .pixel = faded } },
+        }, precision);
+    }
+    target.composite(&ink, .src_over, fx, fy, precision);
+}
+
+/// The rectangle an `<image>` is fitted into, in its own user space.
+///
+/// SVG 2's `auto`: a missing `width` or `height` is the picture's own, and
+/// when only one of the two is missing it is the one the other implies at the
+/// picture's own proportions -- so `width="100"` on a picture twice as wide as
+/// it is tall is fifty high.
+fn imageRect(im: document.Image, size: Size) Box {
+    const ratio = size.width / size.height;
+    return .{
+        .x = im.x,
+        .y = im.y,
+        .width = im.width orelse if (im.height) |h| h * ratio else size.width,
+        .height = im.height orelse if (im.width) |w| w / ratio else size.height,
+    };
+}
+
+/// An `<image>`'s rectangle for measuring, which needs the picture's own size
+/// only when a `width` or a `height` is `auto` -- and then reads it from the
+/// picture's header rather than decoding the whole thing.
+fn measureImage(gpa: Allocator, im: document.Image, opts: Options) Error!Box {
+    if (im.width != null and im.height != null) return imageRect(im, .{ .width = 1, .height = 1 });
+    const w, const h = try bitmap.intrinsicSize(gpa, im.href, opts.images, .{
+        .pixels = opts.limits.max_image_pixels,
+        .images = opts.limits.max_images,
+        .max_width = opts.limits.max_width,
+        .max_height = opts.limits.max_height,
+    });
+    return imageRect(im, .{ .width = @floatFromInt(w), .height = @floatFromInt(h) });
 }
 
 // -- filters -----------------------------------------------------------------
@@ -1447,6 +1716,8 @@ const Subject = union(enum) {
     shape: document.Shape,
     /// A container, measured as the union of everything inside it.
     container: ztree.NodeId,
+    /// An `<image>`, whose box is its rectangle and is already known.
+    image: Box,
 };
 
 /// The cached answer to "what is this element's bounding box", so that an
@@ -1466,6 +1737,7 @@ const Measure = struct {
         const b = switch (self.subject) {
             .shape => |sh| try boundingBox(gpa, doc, sh, opts),
             .container => |node| try contentBox(gpa, doc, node, opts),
+            .image => |b| b,
         };
         self.box = b;
         return b;
@@ -1697,6 +1969,7 @@ fn buildMask(
             .base = .identity,
             .nodes_left = pass.nodes_left,
             .depth = pass.depth + 1,
+            .images = pass.images,
         }, opts);
     }
 
@@ -2111,6 +2384,7 @@ fn paintTiled(
                     .base = .identity,
                     .nodes_left = pass.nodes_left,
                     .depth = pass.depth + 1,
+                    .images = pass.images,
                 }, opts);
             }
 
@@ -3021,6 +3295,16 @@ fn contentExtent(
     while (try it.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
+            // A picture's box is its rectangle, under its transform. There is
+            // no stroke to grow it by.
+            .image => |im| {
+                const box = mappedBounds(im.transform, try measureImage(gpa, im, opts));
+                min_x = @min(min_x, box.x);
+                min_y = @min(min_y, box.y);
+                max_x = @max(max_x, box.x + box.width);
+                max_y = @max(max_y, box.y + box.height);
+                continue;
+            },
             // A group inside contributes its shapes, which the walk yields in
             // their own right; the group itself has no geometry to measure.
             else => continue,
@@ -4817,16 +5101,300 @@ test "only the first subpath of a textPath's shape is followed" {
     try testing.expectApproxEqAbs(@as(f64, 6), arc.total(), 1e-9);
 }
 
+// -- images ------------------------------------------------------------------
+
+const quad_png = bitmap.fixtures.quad_png;
+const checker_png = bitmap.fixtures.checker_png;
+
+fn renderImage(gpa: Allocator, body: []const u8, vb_w: u32, vb_h: u32, opts: Options) Error!z2d.Surface {
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.print(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {d} {d}\">{s}</svg>", .{ vb_w, vb_h, body });
+    var o = opts;
+    o.width = vb_w;
+    o.height = vb_h;
+    return render(gpa, src.items, o);
+}
+
+fn rgbaAt(sfc: *z2d.Surface, x: i32, y: i32) z2d.pixel.RGBA {
+    return sfc.getPixel(x, y).?.rgba;
+}
+
+const opaque_red: z2d.pixel.RGBA = .{ .r = 255, .g = 0, .b = 0, .a = 255 };
+const opaque_green: z2d.pixel.RGBA = .{ .r = 0, .g = 255, .b = 0, .a = 255 };
+const opaque_blue: z2d.pixel.RGBA = .{ .r = 0, .g = 0, .b = 255, .a = 255 };
+const transparent: z2d.pixel.RGBA = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
+test "an image fills its rectangle, each pixel where the picture puts it" {
+    const gpa = testing.allocator;
+    var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+        "\" width=\"8\" height=\"8\" image-rendering=\"optimizeSpeed\"/>", 8, 8, .{});
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(opaque_red, rgbaAt(&sfc, 1, 1));
+    try testing.expectEqual(opaque_green, rgbaAt(&sfc, 6, 1));
+    try testing.expectEqual(opaque_blue, rgbaAt(&sfc, 1, 6));
+    try testing.expectEqual(transparent, rgbaAt(&sfc, 6, 6));
+    // Hard edges: the last red column is still red, the next is green.
+    try testing.expectEqual(opaque_red, rgbaAt(&sfc, 3, 0));
+    try testing.expectEqual(opaque_green, rgbaAt(&sfc, 4, 0));
+}
+
+test "smooth sampling blends across the middle and holds at the edges" {
+    const gpa = testing.allocator;
+    var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++ "\" width=\"8\" height=\"8\"/>", 8, 8, .{});
+    defer sfc.deinit(gpa);
+    // The corners are past the outermost pixel centres, where there is
+    // nothing further to blend with.
+    try testing.expectEqual(opaque_red, rgbaAt(&sfc, 0, 0));
+    try testing.expectEqual(opaque_green, rgbaAt(&sfc, 7, 0));
+    try testing.expectEqual(opaque_blue, rgbaAt(&sfc, 0, 7));
+    // Across the middle of the top row, red gives way to green.
+    const mid = rgbaAt(&sfc, 3, 0);
+    try testing.expect(mid.r > 0 and mid.r < 255 and mid.g > 0 and mid.g < 255);
+}
+
+test "an image is fitted into its rectangle by preserveAspectRatio" {
+    const gpa = testing.allocator;
+    // `meet`, centred: the square picture is eight wide in a sixteen-wide
+    // rectangle, so four columns are left on each side.
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+            "\" width=\"16\" height=\"8\" image-rendering=\"pixelated\"/>", 16, 8, .{});
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 1, 1));
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 5, 1));
+        try testing.expectEqual(opaque_green, rgbaAt(&sfc, 10, 1));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 14, 1));
+    }
+    // `slice`: sixteen square in a rectangle eight high, so it overflows by
+    // four above and below and is cut to the rectangle.
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+            "\" y=\"4\" width=\"16\" height=\"8\" preserveAspectRatio=\"xMidYMid slice\"" ++
+            " image-rendering=\"pixelated\"/>", 16, 16, .{});
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 2, 2));
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 2, 5));
+        try testing.expectEqual(opaque_blue, rgbaAt(&sfc, 2, 10));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 2, 14));
+    }
+    // `none` stretches.
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+            "\" width=\"16\" height=\"8\" preserveAspectRatio=\"none\" image-rendering=\"pixelated\"/>", 16, 8, .{});
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 1, 1));
+        try testing.expectEqual(opaque_green, rgbaAt(&sfc, 14, 1));
+    }
+}
+
+test "an auto size is the picture's own, or what the other side implies" {
+    const gpa = testing.allocator;
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++ "\"/>", 4, 4, .{});
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 0, 0));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 3, 3));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 2, 0));
+    }
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+            "\" width=\"4\" image-rendering=\"pixelated\"/>", 8, 8, .{});
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(opaque_blue, rgbaAt(&sfc, 0, 3));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 0, 5));
+    }
+}
+
+test "an image's opacity, clip and bounding box are its own" {
+    const gpa = testing.allocator;
+    {
+        var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
+            "\" width=\"8\" height=\"8\" opacity=\"0.5\"/>", 8, 8, .{});
+        defer sfc.deinit(gpa);
+        const px = rgbaAt(&sfc, 0, 0);
+        try testing.expect(@abs(@as(i32, px.a) - 128) <= 1);
+        try testing.expect(@abs(@as(i32, px.r) - 128) <= 1);
+    }
+    // The left half of the image's own rectangle, in bounding-box units.
+    {
+        var sfc = try renderImage(
+            gpa,
+            "<clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\"0.5\" height=\"1\"/></clipPath>" ++
+                "<image href=\"" ++ quad_png ++ "\" x=\"8\" width=\"8\" height=\"8\"" ++
+                " clip-path=\"url(#c)\" image-rendering=\"pixelated\"/>",
+            16,
+            8,
+            .{},
+        );
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 9, 1));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 13, 1));
+    }
+    // And a group holding an auto-sized one measures it from its header.
+    {
+        var sfc = try renderImage(
+            gpa,
+            "<clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\"0.5\" height=\"1\"/></clipPath>" ++
+                "<g clip-path=\"url(#c)\"><image href=\"" ++ quad_png ++ "\" transform=\"scale(4)\"" ++
+                " image-rendering=\"pixelated\"/></g>",
+            8,
+            8,
+            .{},
+        );
+        defer sfc.deinit(gpa);
+        try testing.expectEqual(opaque_red, rgbaAt(&sfc, 1, 1));
+        try testing.expectEqual(transparent, rgbaAt(&sfc, 5, 1));
+    }
+}
+
+test "every format z2dimg reads is drawn" {
+    const gpa = testing.allocator;
+    const cases = [_]struct { href: []const u8, want: z2d.pixel.RGBA, tolerance: i32 }{
+        .{
+            .href = bitmap.fixtures.jpeg,
+            .want = .{ .r = 128, .g = 64, .b = 32, .a = 255 },
+            .tolerance = 3,
+        },
+        .{
+            .href = bitmap.fixtures.webp,
+            .want = .{ .r = 0, .g = 128, .b = 255, .a = 255 },
+            .tolerance = 0,
+        },
+        .{
+            .href = bitmap.fixtures.gif,
+            .want = .{ .r = 255, .g = 255, .b = 0, .a = 255 },
+            .tolerance = 0,
+        },
+    };
+    for (cases) |case| {
+        var src: std.ArrayList(u8) = .empty;
+        defer src.deinit(gpa);
+        try src.print(gpa, "<image href=\"{s}\" width=\"4\" height=\"4\"/>", .{case.href});
+        var sfc = try renderImage(gpa, src.items, 4, 4, .{});
+        defer sfc.deinit(gpa);
+        const px = rgbaAt(&sfc, 2, 2);
+        try testing.expect(@abs(@as(i32, px.r) - case.want.r) <= case.tolerance);
+        try testing.expect(@abs(@as(i32, px.g) - case.want.g) <= case.tolerance);
+        try testing.expect(@abs(@as(i32, px.b) - case.want.b) <= case.tolerance);
+        try testing.expectEqual(case.want.a, px.a);
+    }
+}
+
+test "a picture drawn small is reduced first, so it averages rather than aliases" {
+    const gpa = testing.allocator;
+    // Sixteen alternating pixels drawn into eight: each device pixel covers
+    // one black and one white, and smooth sampling says so everywhere.
+    var smooth = try renderImage(gpa, "<image href=\"" ++ checker_png ++ "\" width=\"8\" height=\"8\"/>", 8, 8, .{});
+    defer smooth.deinit(gpa);
+    for (0..8) |y| for (0..8) |x| {
+        const px = rgbaAt(&smooth, @intCast(x), @intCast(y));
+        try testing.expect(@abs(@as(i32, px.r) - 128) <= 1);
+    };
+    // Nearest takes one of the two, which is the aliasing the reduction is for.
+    var nearest = try renderImage(gpa, "<image href=\"" ++ checker_png ++
+        "\" width=\"8\" height=\"8\" image-rendering=\"optimizeSpeed\"/>", 8, 8, .{});
+    defer nearest.deinit(gpa);
+    const px = rgbaAt(&nearest, 3, 3);
+    try testing.expect(px.r == 0 or px.r == 255);
+}
+
+test "a picture is decoded once however often it is drawn" {
+    const gpa = testing.allocator;
+    // A `<use>` twice and a pattern of many cells, all of one `<image>`, under
+    // a budget of one decode.
+    var sfc = try renderImage(
+        gpa,
+        "<defs><image id=\"p\" href=\"" ++ quad_png ++ "\" width=\"2\" height=\"2\"/>" ++
+            "<pattern id=\"t\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><use href=\"#p\"/></pattern></defs>" ++
+            "<use href=\"#p\"/><use href=\"#p\" x=\"2\"/>" ++
+            "<rect y=\"4\" width=\"16\" height=\"4\" fill=\"url(#t)\"/>",
+        16,
+        8,
+        .{ .limits = .{ .max_images = 1 } },
+    );
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(opaque_red, rgbaAt(&sfc, 2, 0));
+    try testing.expect(rgbaAt(&sfc, 8, 4).r > 200);
+}
+
+test "an image inside a mask masks by its luminance" {
+    const gpa = testing.allocator;
+    var sfc = try renderImage(
+        gpa,
+        "<mask id=\"m\"><image href=\"" ++ checker_png ++
+            "\" width=\"8\" height=\"8\"/></mask>" ++
+            "<rect width=\"8\" height=\"8\" fill=\"black\" mask=\"url(#m)\"/>",
+        8,
+        8,
+        .{},
+    );
+    defer sfc.deinit(gpa);
+    try testing.expect(@abs(@as(i32, rgbaAt(&sfc, 4, 4).a) - 128) <= 2);
+}
+
+test "every way an image can be refused is its own error" {
+    const gpa = testing.allocator;
+    const Case = struct { body: []const u8, err: anyerror, limits: Limits = .{} };
+    const cases = [_]Case{
+        .{ .body = "<image href=\"a.png\" width=\"4\" height=\"4\"/>", .err = error.UnresolvedImage },
+        .{ .body = "<image href=\"data:image/png;base64\" width=\"4\" height=\"4\"/>", .err = error.BadDataUrl },
+        .{ .body = "<image href=\"data:image/png,hello\" width=\"4\" height=\"4\"/>", .err = error.UnsupportedImageFormat },
+        .{ .body = "<image href=\"data:image/svg+xml,&lt;svg/>\" width=\"4\" height=\"4\"/>", .err = error.UnsupportedImageFormat },
+        .{ .body = "<image href=\"data:;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAAC\" width=\"4\" height=\"4\"/>", .err = error.BadImageData },
+        .{ .body = "<image href=\"" ++ quad_png ++ "\" image-rendering=\"fuzzy\"/>", .err = error.BadImageRendering },
+        .{
+            .body = "<image href=\"" ++ quad_png ++ "\"/>",
+            .err = error.EmbeddedImageTooLarge,
+            .limits = .{ .max_image_pixels = 3 },
+        },
+        .{
+            .body = "<image href=\"" ++ quad_png ++ "\"/><image href=\"" ++ quad_png ++ "\"/>",
+            .err = error.TooManyImages,
+            .limits = .{ .max_images = 1 },
+        },
+    };
+    for (cases) |case| {
+        try testing.expectError(case.err, renderImage(gpa, case.body, 4, 4, .{ .limits = case.limits }));
+    }
+}
+
+test "a resolver answers for a picture named by anything but a data URL" {
+    const gpa = testing.allocator;
+    const Ctx = struct {
+        png: []const u8,
+        fn resolve(ctx: ?*anyopaque, href: []const u8) ?[]const u8 {
+            const self: *const @This() = @ptrCast(@alignCast(ctx.?));
+            return if (std.mem.eql(u8, href, "quad.png")) self.png else null;
+        }
+    };
+    const b64 = quad_png["data:image/png;base64,".len..];
+    var buf: [128]u8 = undefined;
+    const n = try std.base64.standard.Decoder.calcSizeForSlice(b64);
+    try std.base64.standard.Decoder.decode(buf[0..n], b64);
+    var ctx: Ctx = .{ .png = buf[0..n] };
+
+    var sfc = try renderImage(gpa, "<image href=\"quad.png\" width=\"4\" height=\"4\" image-rendering=\"pixelated\"/>", 4, 4, .{
+        .images = .{ .ctx = &ctx, .resolve = Ctx.resolve },
+    });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(opaque_red, rgbaAt(&sfc, 0, 0));
+    try testing.expectError(error.UnresolvedImage, renderImage(gpa, "<image href=\"other.png\" width=\"4\" height=\"4\"/>", 4, 4, .{
+        .images = .{ .ctx = &ctx, .resolve = Ctx.resolve },
+    }));
+}
+
 test "an element whose layer is refused frees its clip once" {
     const gpa = testing.allocator;
     // `Layers.open` frees the clip it is handed when it refuses, and each
-    // caller used to free it again from an `errdefer`. A shape and a group
-    // each take that path, and each must come back as the refusal rather
-    // than as a double free.
+    // caller used to free it again from an `errdefer`. A shape, a group and
+    // an image each take that path, and each must come back as the refusal
+    // rather than as a double free.
     const clip = "<svg viewBox=\"0 0 8 8\"><clipPath id=\"c\"><rect width=\"4\" height=\"4\"/></clipPath>";
     for ([_][]const u8{
         clip ++ "<rect width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
         clip ++ "<g clip-path=\"url(#c)\"><rect width=\"8\" height=\"8\"/></g></svg>",
+        clip ++ "<image href=\"" ++ quad_png ++ "\" width=\"8\" height=\"8\" clip-path=\"url(#c)\"/></svg>",
     }) |src| {
         try testing.expectError(
             error.TooManyLayers,

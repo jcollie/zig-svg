@@ -307,10 +307,15 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
     if (src.len > limits.max_input_bytes) return error.InputTooLarge;
 
     // The reservation, decided before anything has been parsed: the pixels a
-    // `Limits` permits at four bytes each, plus the rasterizer's working
-    // memory.
+    // `Limits` permits at four bytes each, the decoded `<image>` pictures it
+    // permits at four bytes each, plus the rasterizer's working memory.
     const pixel_bytes = math.mul(u64, limits.max_pixels, 4) catch return error.LimitsUnbounded;
-    const requested = math.add(u64, pixel_bytes, opts.working_bytes) catch return error.LimitsUnbounded;
+    const picture_bytes = math.mul(u64, limits.max_image_pixels, 4) catch return error.LimitsUnbounded;
+    const requested = math.add(
+        u64,
+        math.add(u64, pixel_bytes, picture_bytes) catch return error.LimitsUnbounded,
+        opts.working_bytes,
+    ) catch return error.LimitsUnbounded;
     if (requested > max_reservation) return error.LimitsUnbounded;
     const page = std.heap.pageSize();
     const cap: usize = @intCast(mem.alignForward(u64, requested, page));
@@ -652,6 +657,13 @@ const WireError = enum(u16) {
     too_many_css_rules = 67,
     selector_too_complex = 68,
     too_many_css_selectors = 69,
+    bad_image_rendering = 70,
+    bad_data_url = 71,
+    unresolved_image = 72,
+    bad_image_data = 73,
+    unsupported_image_format = 74,
+    embedded_image_too_large = 75,
+    too_many_images = 76,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -725,6 +737,13 @@ fn wireFromError(err: anyerror) WireError {
         error.TooManyCssRules => .too_many_css_rules,
         error.SelectorTooComplex => .selector_too_complex,
         error.TooManyCssSelectors => .too_many_css_selectors,
+        error.BadImageRendering => .bad_image_rendering,
+        error.BadDataUrl => .bad_data_url,
+        error.UnresolvedImage => .unresolved_image,
+        error.BadImageData => .bad_image_data,
+        error.UnsupportedImageFormat => .unsupported_image_format,
+        error.EmbeddedImageTooLarge => .embedded_image_too_large,
+        error.TooManyImages => .too_many_images,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -813,6 +832,13 @@ fn wireToError(status: u16) Error {
         .too_many_css_rules => error.TooManyCssRules,
         .selector_too_complex => error.SelectorTooComplex,
         .too_many_css_selectors => error.TooManyCssSelectors,
+        .bad_image_rendering => error.BadImageRendering,
+        .bad_data_url => error.BadDataUrl,
+        .unresolved_image => error.UnresolvedImage,
+        .bad_image_data => error.BadImageData,
+        .unsupported_image_format => error.UnsupportedImageFormat,
+        .embedded_image_too_large => error.EmbeddedImageTooLarge,
+        .too_many_images => error.TooManyImages,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1027,7 +1053,14 @@ test "a document the reader refuses comes back as that refusal" {
 
     try testing.expectError(error.UnsupportedElement, render(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><foreignObject/></svg>",
+        .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
+    ));
+    // A picture named by a file, with no resolver to fetch it: refused in the
+    // child, and the refusal comes back as itself rather than as a crash.
+    try testing.expectError(error.UnresolvedImage, render(
+        testing.allocator,
+        "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\" width=\"4\" height=\"4\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
     // Text with no resolver behind it: refused rather than drawn without it,
@@ -1042,6 +1075,32 @@ test "a document the reader refuses comes back as that refusal" {
         "<svg><path d=\"M0 0Z\"/></svg>",
         .{ .render = .{ .limits = test_limits }, .working_bytes = 4 << 20 },
     ));
+}
+
+test "pictures are decoded inside the strict filter" {
+    if (!available) return error.SkipZigTest;
+    // The decoders are handed a slice and an allocator and make no system
+    // calls, which is the whole case for running them here rather than in a
+    // sandbox of z2dimg's own. The strict profile is the proof: a decoder
+    // that reached for `mmap` or `read` would come back `SandboxViolation`.
+    const bitmap = @import("bitmap.zig");
+    inline for (.{ bitmap.fixtures.quad_png, bitmap.fixtures.jpeg, bitmap.fixtures.webp, bitmap.fixtures.gif }) |href| {
+        var image = render(
+            testing.allocator,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\">" ++
+                "<image href=\"" ++ href ++ "\" width=\"8\" height=\"8\"/></svg>",
+            .{
+                .render = .{ .width = 8, .height = 8, .limits = test_limits },
+                .working_bytes = 4 << 20,
+                .profile = .strict,
+            },
+        ) catch |err| switch (err) {
+            error.SandboxFailed => return error.SkipZigTest,
+            else => |e| return e,
+        };
+        defer image.deinit();
+        try testing.expectEqual(@as(u8, 255), image.surface.getPixel(0, 0).?.rgba.a);
+    }
 }
 
 test "limits with no ceiling are refused rather than mapped" {
@@ -1097,6 +1156,13 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.OutOfMemory, .out_of_memory },
         .{ error.InvalidName, .malformed_xml },
         .{ error.PathNotClosed, .raster_failed },
+        .{ error.BadImageRendering, .bad_image_rendering },
+        .{ error.BadDataUrl, .bad_data_url },
+        .{ error.UnresolvedImage, .unresolved_image },
+        .{ error.BadImageData, .bad_image_data },
+        .{ error.UnsupportedImageFormat, .unsupported_image_format },
+        .{ error.EmbeddedImageTooLarge, .embedded_image_too_large },
+        .{ error.TooManyImages, .too_many_images },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

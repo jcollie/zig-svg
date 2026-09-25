@@ -453,6 +453,13 @@ short of the specification.
 | Selectors | `*`, type, `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`, `[attr\|=v]`; ` `, `>`, `+`, `~`; lists |
 | The cascade | yes — §6.4's five bands, specificity, source order, `!important` |
 | At-rules, pseudo-classes, namespace selectors | **no** — refused, not skipped |
+| `<image>` | yes — a `data:` URL, or any other `href` the caller's `ImageResolver` answers |
+| Picture formats | whatever [z2dimg](https://git.jcollie.dev/jeff/z2dimg) reads: PNG, JPEG, GIF, WebP, BMP, TGA, ICO, Netpbm, PCX, XBM, XPM |
+| `width`, `height` on `<image>` | yes, including SVG 2's `auto` — the picture's own size, or what the other side implies |
+| `preserveAspectRatio` on `<image>` | yes — the picture's own size stands in for a `viewBox` |
+| `image-rendering` | yes, inherited — bilinear by default; nearest for `optimizeSpeed`, `pixelated`, `crisp-edges` |
+| An SVG inside an `<image>` | **no** — `error.UnsupportedImageFormat` |
+| Pictures decoded | to `Limits.max_images` (256) and `Limits.max_image_pixels` (2²⁴, reductions included) |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
@@ -478,6 +485,51 @@ than four shapes drawn and then an error. That is not a validating walk beside
 the drawing one — it *is* the drawing one. `read` runs the same iterator the
 renderer will, to the end, and throws the shapes away; `shape_count` is the
 number that iterator produced rather than a number counted alongside it.
+
+## Pictures
+
+An `<image>` names its picture by URL. In a document meant to stand on its own
+that URL is a `data:` one — RFC 2397, the bytes of a PNG or a JPEG written into
+the attribute in base64, usually broken across lines — and needs nothing from
+the caller: [zig-uri](https://git.jcollie.dev/jeff/zig-uri) reads the URL and
+[z2dimg](https://git.jcollie.dev/jeff/z2dimg) decodes what it carries. Any other
+`href` is handed to `Options.images`, which answers out of memory the caller
+already holds, exactly as `Options.fonts` does for `<text>`; with no resolver,
+or no answer, it is `error.UnresolvedImage` rather than a picture missing a
+piece.
+
+```zig
+var surface = try svg.render(gpa, source, .{
+    .images = .{ .ctx = &pictures, .resolve = Pictures.resolve },
+});
+```
+
+What the bytes are is read from the bytes. The media type a `data:` URL claims
+is not what chooses the decoder — z2dimg reads the signature, as a browser
+does, and a PNG labelled `image/jpeg` is drawn as the PNG it is. The one claim
+believed is `image/svg+xml`, which is refused by name: a document inside a
+document is a render of its own rather than a decode.
+
+The picture is fitted into the element's rectangle by §7.8's rule, with its own
+pixel size standing in for a `viewBox`, and cut to that rectangle with the same
+anti-aliased coverage any shape's edge gets. Sampling is bilinear, on
+premultiplied pixels so that transparency lends no colour to its neighbours; a
+picture drawn at less than half its size is halved first, as many times as it
+takes, so that bilinear never skips a pixel. `image-rendering: optimizeSpeed`
+— or CSS's `pixelated` or `crisp-edges` — samples the nearest pixel instead.
+
+**Decoding happens while drawing, not while reading.** That is the one
+exception to refusing before anything is painted: a picture is only worth
+decoding once the document has been found drawable, and decoding it twice to
+say so would double the most expensive thing in the render. So a broken
+picture is refused part-way through. `render` frees its surface when it fails,
+so no half-drawn picture escapes it; `draw` onto a surface the caller owns may
+leave the elements before the `<image>` painted. Each picture is decoded once
+per render and kept however many times a `<use>` or a pattern tile draws it.
+
+No colour management: an ICC profile or a PNG `gAMA` is not applied and the
+pixels are taken as sRGB, which is what resvg does. EXIF orientation is not
+applied, and an animation — GIF, APNG or WebP — is drawn as its first frame.
 
 Two walks kept in step by hand is what it was, and they drifted twice: once
 where the reader knew a `<path>` inside `<defs>` was not a shape and the
@@ -549,6 +601,14 @@ since ten thousand `<path>` elements each just under the limit is the same
 denial of service written out longhand. `max_shapes` covers what the node
 budget cannot: an empty `d` produces no nodes and still costs a fill.
 
+`max_image_pixels` bounds what the pictures cost. The encoded bytes are inside
+the document and `max_input_bytes` bounds those, but a PNG of a few hundred
+bytes can declare itself sixteen thousand pixels square and compress the lot to
+nothing, so the decoded size needs a budget of its own — shared by every
+picture in the document, and paid for again by each reduction made to draw one
+small. `max_images` bounds the number of decodes, which a thousand one-pixel
+pictures would otherwise get for free.
+
 `max_layers` and `max_mask_depth` bound the *memory* rather than the work.
 Every composited group, every clip and every mask is a surface the size of the
 whole picture, so the ceiling is `max_pixels` times four bytes times how many
@@ -617,6 +677,15 @@ only in the descriptor they write to, a child reporting through the one
 descriptor it kept that the one it should not have is gone, and a child that
 spins until the kernel ends it.
 
+Pictures are decoded inside that child, by the same filter. z2dimg can decode
+in a sandbox of its own and is not asked to: the render already has one, and a
+second fork from inside it would be a sandbox in a sandbox that the first one's
+filter refuses anyway. The decoders are handed a slice and an allocator and
+make no system calls, which a test proves by decoding a PNG, a JPEG, a WebP and
+a GIF under the strict profile. The shared mapping is reserved with room for
+them: `max_image_pixels` at four bytes a pixel, on top of the picture and
+`working_bytes`.
+
 It does not make the pixels *trustworthy* — writing into the shared mapping is
 the child's job. What the parent validates is the shape of the reply: that the
 buffer is inside the mapping, correctly aligned, and exactly the length the
@@ -676,9 +745,9 @@ and a percentage alpha `rgba(255, 0, 0, 50%)`. None of the three appears in the
 corpus, since a fixture using one would be testing resvg's gap rather than this
 code.
 
-Four fixtures are held to their own tolerances, named in `DIVERGENCES` at the
+Some fixtures are held to their own tolerances, named in `DIVERGENCES` at the
 top of `tools/check_oracle.py` with the reason beside each and printed as
-*diff* rather than *ok* so they stay visible. All four are `<filter>`, for two
+*diff* rather than *ok* so they stay visible. Four are `<filter>`, for two
 separate reasons.
 
 The first is the **blur kernel**. §15.17 defines `feGaussianBlur` as a Gaussian
@@ -702,6 +771,21 @@ it was measured. resvg draws 77, which is the *square* of that, and matches
 product of two blurs is not a linear operator, and `feGaussianBlur` is defined
 as a convolution, which is. `filter-region` exists to record the difference
 rather than being reshaped to avoid it.
+
+The rest are `<image>`, written by `tools/image_fixtures.py` so that the base64
+in them comes from an encoder that is not z2dimg's, and they differ for three
+reasons, each measured. resvg samples a picture **bicubically** where this
+samples bilinearly — a black and a white pixel enlarged thirty-two times come
+out an S-curve there and a straight ramp here — and every fixture enlarges a
+sixteen-pixel picture sixteen times, so a level or so of mean with no area that
+moves. z2d's **premultiplied round trip** truncates both ways, so a
+translucent pixel comes back one to four levels darker than it went in;
+`image-optimize-speed`, where both renderers sample the nearest pixel, is that
+and nothing else. And resvg does not **reduce** a picture drawn small, so the
+rings in `image-downscale` are a moiré there and a faint one here — the one
+place resvg is the worse picture. resvg 0.48.1 also draws CSS's `pixelated`
+and `crisp-edges` smooth, knowing only SVG 1.1's `optimizeSpeed`; no fixture
+uses them, since it would be measuring resvg's gap.
 
 ## Fuzzing
 
@@ -776,8 +860,10 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 Next are the filter primitives this does not yet have: `feColorMatrix`,
 `feComposite`, `feBlend`, `feComponentTransfer`, `feTile`, `feMorphology`,
 `feImage`, and the three that need a light model. Outside those, what SVG 1.1
-has that this does not is `@media`, the CSS pseudo-classes, and the
-`spacingAndGlyphs` form of `lengthAdjust`. Each is refused rather than ignored,
+has that this does not is `@media`, the CSS pseudo-classes, the
+`spacingAndGlyphs` form of `lengthAdjust`, and an `<image>` of another SVG
+document, which wants a render nested in a render with its own viewport and a
+share of the budget. Each is refused rather than ignored,
 so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
@@ -832,6 +918,8 @@ which no project holding a fuzz test can build a test executable at all;
 | [z2d](https://git.jcollie.dev/jeff/z2d) | the rasterizer, and the surfaces this draws onto |
 | [ztree](https://git.jcollie.dev/jeff/ztree) | the XML document tree, built on [zxml](https://git.jcollie.dev/jeff/zxml) |
 | [zig-css](https://git.jcollie.dev/jeff/zig-css) | §6's `style` attribute, `<style>` selectors, and the cascade |
+| [z2dimg](https://git.jcollie.dev/jeff/z2dimg) | decoding the pictures an `<image>` names, onto the same z2d |
+| [zig-uri](https://git.jcollie.dev/jeff/zig-uri) | reading a `data:` URL |
 
 The CSS was `src/css.zig` and `src/style.zig` here until it was lifted out.
 Deciding which of several declarations of one property applies to an element
@@ -889,6 +977,17 @@ Kept in the Zotero collection **zig-svg**.
   defined anywhere including after the reference that names it.
 - Ollie, J. C. *zxml*. <https://git.jcollie.dev/jeff/zxml> — the pull parser
   ztree is built on.
+- Masinter, L. (1998, August). *The "data" URL scheme* (RFC 2397). RFC Editor.
+  <https://www.rfc-editor.org/info/rfc2397> — how an `<image>` carries its
+  picture inside the document.
+- World Wide Web Consortium (W3C). (2023, December). *CSS Images Module Level 3*
+  (W3C Candidate Recommendation Draft). <https://www.w3.org/TR/css-images-3/> — the
+  `image-rendering` values beyond SVG 1.1's three: `smooth`, `high-quality`,
+  `crisp-edges` and `pixelated`.
+- Ollie, J. C. *z2dimg*. <https://git.jcollie.dev/jeff/z2dimg> — the decoders
+  an `<image>` is read with.
+- Ollie, J. C. *zig-uri*. <https://git.jcollie.dev/jeff/zig-uri> — the `data:`
+  URL reader.
 - Pictogrammers. *Material Design Icons*. <https://pictogrammers.com/library/mdi/>
   — the 7,447-icon set that decided what this reader had to implement: every
   path command, and no other element.

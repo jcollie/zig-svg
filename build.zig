@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
     const z2d_dep = b.dependency("z2d", .{ .target = target, .optimize = optimize });
     const ztree_dep = b.dependency("ztree", .{ .target = target, .optimize = optimize });
     const css_dep = b.dependency("zig_css", .{ .target = target, .optimize = optimize });
+    const z2dimg_dep = b.dependency("z2dimg", .{ .target = target, .optimize = optimize });
+    const uri_dep = b.dependency("uri", .{ .target = target, .optimize = optimize });
 
     const z2d = z2d_dep.module("z2d");
     // ztree rather than zxml directly: the reader needs random access to
@@ -20,6 +22,13 @@ pub fn build(b: *std.Build) void {
     // property applies to an element has nothing to do with drawing. It was
     // `src/css.zig` and `src/style.zig` here until it was lifted out.
     const css = css_dep.module("css");
+    // An `<image>` names its picture by URL, almost always a `data:` one, and
+    // what that URL carries is a PNG or a JPEG. Reading the URL and decoding
+    // the bytes are each a library of their own. z2dimg is built on the same
+    // z2d as this, with the same options, so the two share one z2d and a
+    // decoded image is a surface this can draw.
+    const z2dimg = z2dimg_dep.module("z2dimg");
+    const uri = uri_dep.module("uri");
 
     // One module. The reader, the path grammar, the rasterizer and the sandbox
     // live together because Zig only analyses what is referenced: a program
@@ -33,6 +42,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "z2d", .module = z2d },
             .{ .name = "ztree", .module = ztree },
             .{ .name = "css", .module = css },
+            .{ .name = "z2dimg", .module = z2dimg },
+            .{ .name = "uri", .module = uri },
         },
     });
 

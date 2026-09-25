@@ -20,6 +20,14 @@
             .url = "git+https://git.jcollie.dev/jeff/zig-css.git#e24444690930931bfec79c4b4efad84e141b8a10",
             .hash = "zig_css-0.0.0-d530kFLbGgAN4NqKWIX58MC_Mq2QNhfS0ej8r9O_Ftz6",
         },
+        .z2dimg = .{
+            .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#07312cf2c0f0a03a7bc6331335e6a8d7c0aa8f67",
+            .hash = "z2dimg-0.0.0-N7PaCQpCJABvbpIS36N2BVfYqTVAWyszvCeUZZwy-aDE",
+        },
+        .uri = .{
+            .url = "git+https://git.jcollie.dev/jeff/zig-uri.git#b51701b260f07620b9bf953fc19c902115eac25e",
+            .hash = "uri-0.1.0-yCrwNNH2EwAHUOoMVFq21bN9Oc84QFSzmPaa6xPh6koO",
+        },
     },
     .paths = .{
         "build.zig",

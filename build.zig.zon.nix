@@ -157,11 +157,65 @@ in
 copyFarm name
   [
     {
+      name = "riff-0.1.0-HAfI3rPCAADDnynVeckIf35oQu3Syx2BJ6qt9v-UTF4y";
+      path = fetchZigArtifact {
+        name = "riff";
+        url = "https://git.jcollie.dev/jeff/zig-riff/archive/b8e61dc1f90239c6ef9cf1185d5993ca87166e89.tar.gz";
+        hash = "sha256-1lPXZWq86AARgjHoGF2icuPEpJOdtnox69EJUXErz5c=";
+        unpack = true;
+      };
+    }
+    {
+      name = "uri-0.1.0-yCrwNNH2EwAHUOoMVFq21bN9Oc84QFSzmPaa6xPh6koO";
+      path = fetchZigArtifact {
+        name = "uri";
+        url = "git+https://git.jcollie.dev/jeff/zig-uri.git#b51701b260f07620b9bf953fc19c902115eac25e";
+        hash = "sha256-TlPE0XeSScVocHAqC4bL4o3m7vnR6wEiwkp7clcK9Pc=";
+        unpack = true;
+      };
+    }
+    {
+      name = "uucode-0.2.0-ZZjBPh-6VADBlunHbwABTPng0DH6uJqd4CvvtjZ19tny";
+      path = fetchZigArtifact {
+        name = "uucode";
+        url = "git+https://github.com/jacobsandlund/uucode#61e54266895f833b307de81a0e3038cf1f1bebd4";
+        hash = "sha256-6Riz1CowKgQr70YAcfozHETUqfOR4gYIwUE5txjX70o=";
+        unpack = true;
+      };
+    }
+    {
+      name = "vp8-0.0.0-8XCztL3qEwCExhrnicHiP0F-Gw8ZRGJ2kVBztgd5dUDp";
+      path = fetchZigArtifact {
+        name = "vp8";
+        url = "https://git.jcollie.dev/jeff/zig-vp8/archive/2b71a352f930f4fa3fc3ba4bbfad53d9acfd37b1.tar.gz";
+        hash = "sha256-kSmtmSVZ57BN4CPXdLx2SxCc3OtIuhsXWojD3pnxZnM=";
+        unpack = true;
+      };
+    }
+    {
       name = "z2d-0.12.2-pre-j5P_Hr3pEQCCF9d-QIlDP-O7SUs9GcIKyEjz5uNJW4mm";
       path = fetchZigArtifact {
         name = "z2d";
         url = "git+https://git.jcollie.dev/jeff/z2d.git#551eeffcf148a4b6e08553f6e722d61437c548c3";
         hash = "sha256-RCVb0v7a0a7Sk8KWm1vjVMEMwQQR0f9ZYC5j1Yp6PCs=";
+        unpack = true;
+      };
+    }
+    {
+      name = "z2dimg-0.0.0-N7PaCQpCJABvbpIS36N2BVfYqTVAWyszvCeUZZwy-aDE";
+      path = fetchZigArtifact {
+        name = "z2dimg";
+        url = "git+https://git.jcollie.dev/jeff/z2dimg.git#07312cf2c0f0a03a7bc6331335e6a8d7c0aa8f67";
+        hash = "sha256-sGUiDLJIC5x9P6SJjDpDkzrlLI8cEYfm6USktcd8gUk=";
+        unpack = true;
+      };
+    }
+    {
+      name = "z46-0.1.0-_AxhwBHeAwDelVOsDdnw7Rg1ZzCY2uH99YdFQknXdy1J";
+      path = fetchZigArtifact {
+        name = "z46";
+        url = "git+https://git.jcollie.dev/jeff/z46.git#52bc1256116cde4b3e7480d8664da09e5901490a";
+        hash = "sha256-U2dGmTMhQI+Yc0Zw9K9rGq1vRSqqTOxI51zxbtiI1Bk=";
         unpack = true;
       };
     }

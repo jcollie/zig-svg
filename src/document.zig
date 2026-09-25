@@ -70,6 +70,7 @@ const z2d = @import("z2d");
 const color = @import("color.zig");
 const length = @import("length.zig");
 const path = @import("path.zig");
+const resample = @import("resample.zig");
 const shapes = @import("shapes.zig");
 const css = @import("css");
 const transform = @import("transform.zig");
@@ -91,8 +92,8 @@ pub const Error = error{
     /// There is no shape at all, or a `<path>` has no `d`.
     NoPath,
     /// An element in the SVG namespace that this reader does not implement --
-    /// a `<text>`, an `<image>`. Refused rather than skipped: skipping it
-    /// would draw a picture that is quietly missing a piece.
+    /// a `<foreignObject>`, a `<switch>`. Refused rather than skipped:
+    /// skipping it would draw a picture that is quietly missing a piece.
     ///
     /// An element in *another* namespace is not this: it is not SVG content,
     /// nothing is meant to draw it, and it is passed over.
@@ -136,6 +137,9 @@ pub const Error = error{
     TooManyUseHops,
     /// A `text-anchor` that is not one of §10.9's three.
     BadTextAnchor,
+    /// An `image-rendering` that is none of the keywords SVG 1.1 or CSS
+    /// Images 3 define for it.
+    BadImageRendering,
     /// A `font-weight` that is neither a number in range nor `normal` or
     /// `bold`.
     BadFontWeight,
@@ -308,6 +312,10 @@ pub const Inherited = struct {
     font_italic: ?bool = null,
     text_anchor: ?TextAnchor = null,
 
+    /// §11.7.6's `image-rendering`, which is inherited so that one on the root
+    /// reaches every `<image>` in the document.
+    image_rendering: ?resample.Sampling = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -329,6 +337,7 @@ pub const Inherited = struct {
             .font_weight = child.font_weight orelse self.font_weight,
             .font_italic = child.font_italic orelse self.font_italic,
             .text_anchor = child.text_anchor orelse self.text_anchor,
+            .image_rendering = child.image_rendering orelse self.image_rendering,
         };
     }
 };
@@ -354,8 +363,41 @@ pub const TextAnchor = enum {
 /// every other where the group shows only the upper one.
 pub const Item = union(enum) {
     shape: Shape,
+    image: Image,
     open_group: Group,
     close_group,
+};
+
+/// An `<image>`: SVG 1.1 §5.7. A picture placed in a rectangle, which is the
+/// one drawable element with no paint and no outline.
+pub const Image = struct {
+    /// The `<image>` element itself, which is what the renderer keys its
+    /// decoded picture by: a `<use>` of it reaches the same node.
+    node: ztree.NodeId,
+    /// The URL as written, borrowed from the tree's arena. Nothing here reads
+    /// it -- fetching and decoding belong to the renderer.
+    href: []const u8,
+    /// The rectangle the picture is fitted into, in user units. A null
+    /// `width` or `height` is SVG 2's `auto`, which is the picture's own size
+    /// and is only known once it has been decoded.
+    x: f64,
+    y: f64,
+    width: ?f64,
+    height: ?f64,
+    /// How the picture is fitted into that rectangle. §7.8's rule, with the
+    /// picture's own pixel size standing in for a `viewBox`.
+    preserve_aspect_ratio: PreserveAspectRatio,
+    sampling: resample.Sampling,
+    /// This element's own `opacity`, applied to the picture once.
+    opacity: f64,
+    clip_path: ?[]const u8,
+    mask: ?[]const u8,
+    filter: ?[]const u8,
+    /// The `color` in force, which a `currentColor` in its filter resolves to.
+    current_color: ?color.Color,
+    /// Every `transform` down to and including this element's, as `Shape`
+    /// carries it.
+    transform: z2d.Transformation,
 };
 
 /// A container that needs a layer of its own.
@@ -1034,6 +1076,8 @@ pub const PathIterator = struct {
             } };
         }
 
+        if (std.mem.eql(u8, name, "image")) return self.readImage(node, effective, refs, own_ctm);
+
         if (isContainer(name)) {
             // A container's `opacity` applies to it once it is flattened, so
             // it needs a surface of its own to flatten into. One that does not
@@ -1056,6 +1100,66 @@ pub const PathIterator = struct {
         // Refused rather than skipped: skipping it would draw a picture
         // quietly missing a piece.
         return error.UnsupportedElement;
+    }
+
+    /// An `<image>`, or null when it draws nothing.
+    ///
+    /// §5.7: a zero `width` or `height` disables drawing the element, and so
+    /// does SVG 2's missing or empty `href`. None of the three is an error --
+    /// each is the document saying there is nothing here -- so none of them is
+    /// refused. A negative size is SVG 1.1's error and SVG 2's zero, and is
+    /// taken the SVG 2 way, as resvg takes it.
+    fn readImage(
+        self: *PathIterator,
+        node: ztree.NodeId,
+        effective: Inherited,
+        refs: Refs,
+        ctm: z2d.Transformation,
+    ) Error!?Item {
+        const tree = self.doc.tree;
+        const raw = tree.attributeValue(node, "", "href") orelse
+            tree.attributeValue(node, xlink_ns, "href") orelse
+            return null;
+        const href = std.mem.trim(u8, raw, " \t\r\n");
+        if (href.len == 0) return null;
+
+        const width = try self.autoLengthOf(node, "width", .x);
+        const height = try self.autoLengthOf(node, "height", .y);
+        if (width) |w| if (!(w > 0)) return null;
+        if (height) |h| if (!(h > 0)) return null;
+
+        return .{ .image = .{
+            .node = node,
+            .href = href,
+            .x = try self.lengthOf(node, "x", .x, 0),
+            .y = try self.lengthOf(node, "y", .y, 0),
+            .width = width,
+            .height = height,
+            .preserve_aspect_ratio = if (self.attr(node, "preserveAspectRatio")) |v|
+                try PreserveAspectRatio.parse(v)
+            else
+                .meet_centred,
+            .sampling = effective.image_rendering orelse .smooth,
+            .opacity = try self.opacityOf(node),
+            .clip_path = refs.clip_path,
+            .mask = refs.mask,
+            .filter = refs.filter,
+            .current_color = effective.current_color,
+            .transform = ctm,
+        } };
+    }
+
+    /// A length that may also be SVG 2's `auto`, which comes back as null, as
+    /// does leaving the attribute out.
+    fn autoLengthOf(
+        self: *const PathIterator,
+        node: ztree.NodeId,
+        name: []const u8,
+        axis: length.Axis,
+    ) Error!?f64 {
+        const raw = self.attr(node, name) orelse return null;
+        if (std.mem.eql(u8, std.mem.trim(u8, raw, " \t\r\n"), "auto")) return null;
+        return try length.parse(raw, axis, self.viewport);
     }
 
     /// Open a container, having satisfied itself that it is not already open.
@@ -1200,6 +1304,7 @@ pub const PathIterator = struct {
             .font_weight = if (self.presentation(node, "font-weight")) |v| try parseFontWeight(v) else null,
             .font_italic = if (self.presentation(node, "font-style")) |v| try parseFontStyle(v) else null,
             .text_anchor = if (self.presentation(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
+            .image_rendering = if (self.presentation(node, "image-rendering")) |v| try parseImageRendering(v) else null,
         };
     }
 
@@ -1388,6 +1493,22 @@ fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
     return error.BadTextAnchor;
 }
 
+/// `image-rendering`: SVG 1.1's three keywords and CSS Images 3's four.
+///
+/// Only the difference between smooth and hard edges survives, because that
+/// is the only difference any renderer draws: `optimizeQuality` and
+/// `high-quality` are what `auto` already does here, and `crisp-edges` asks
+/// for "an algorithm that preserves contrast" which in practice every
+/// implementation, resvg included, answers with nearest-neighbour.
+fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    const smooth = [_][]const u8{ "auto", "optimizeQuality", "smooth", "high-quality" };
+    const nearest = [_][]const u8{ "optimizeSpeed", "pixelated", "crisp-edges" };
+    for (smooth) |k| if (std.mem.eql(u8, t, k)) return .smooth;
+    for (nearest) |k| if (std.mem.eql(u8, t, k)) return .nearest;
+    return error.BadImageRendering;
+}
+
 /// §10.10's `font-weight`, as the number the resolver is asked for.
 ///
 /// The numeric spellings and the two names. `bolder` and `lighter` are
@@ -1505,9 +1626,10 @@ pub fn read(gpa: std.mem.Allocator, src: []const u8) Error!Document {
     var it = doc.paths();
     var count: usize = 0;
     while (try it.next()) |item| {
-        // Shapes, not items: `shape_count` is what `Limits.max_shapes` bounds,
-        // and a group is not a thing that gets painted.
-        if (item == .shape) count += 1;
+        // Shapes and pictures, not items: `shape_count` is what
+        // `Limits.max_shapes` bounds, and a group is not a thing that gets
+        // painted.
+        if (item == .shape or item == .image) count += 1;
     }
     if (count == 0) return error.NoPath;
     doc.shape_count = count;
@@ -1858,8 +1980,100 @@ test "an element with geometry this reader cannot draw is refused" {
     );
     try testing.expectError(
         error.UnsupportedElement,
-        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><image href=\"a.png\"/></svg>"),
+        read(testing.allocator, "<svg viewBox=\"0 0 24 24\"><switch/></svg>"),
     );
+}
+
+/// The one `<image>` a document yields, for looking at.
+fn onlyImage(doc: *const Document) !Image {
+    var it = doc.paths();
+    var found: ?Image = null;
+    while (try it.next()) |item| switch (item) {
+        .image => |im| {
+            if (found != null) return error.TestUnexpectedResult;
+            found = im;
+        },
+        else => {},
+    };
+    return found orelse error.TestUnexpectedResult;
+}
+
+test "an image is read with its rectangle, its fit and its URL" {
+    var doc = try read(testing.allocator,
+        \\<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+        \\     viewBox="0 0 100 100" image-rendering="optimizeSpeed">
+        \\  <image xlink:href=" data:image/png;base64,AAAA " x="10" y="20" width="30" height="40"
+        \\         preserveAspectRatio="xMinYMax slice" opacity="0.5" transform="translate(1 2)"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    const im = try onlyImage(&doc);
+    try testing.expectEqualStrings("data:image/png;base64,AAAA", im.href);
+    try testing.expectEqual(@as(f64, 10), im.x);
+    try testing.expectEqual(@as(f64, 20), im.y);
+    try testing.expectEqual(@as(?f64, 30), im.width);
+    try testing.expectEqual(@as(?f64, 40), im.height);
+    try testing.expectEqual(
+        PreserveAspectRatio{ .align_x = .min, .align_y = .max, .slice = true },
+        im.preserve_aspect_ratio,
+    );
+    // Inherited from the root.
+    try testing.expectEqual(resample.Sampling.nearest, im.sampling);
+    try testing.expectEqual(@as(f64, 0.5), im.opacity);
+    try testing.expectEqual(@as(f64, 1), im.transform.tx);
+    try testing.expectEqualStrings("image", doc.tree.node(im.node).name.local);
+    try testing.expectEqual(@as(usize, 1), doc.shape_count);
+}
+
+test "the plain href wins, and a missing size is auto" {
+    var doc = try read(testing.allocator,
+        \\<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">
+        \\  <image href="a.png" xlink:href="b.png" width="auto"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    const im = try onlyImage(&doc);
+    try testing.expectEqualStrings("a.png", im.href);
+    try testing.expectEqual(@as(?f64, null), im.width);
+    try testing.expectEqual(@as(?f64, null), im.height);
+    try testing.expectEqual(resample.Sampling.smooth, im.sampling);
+    try testing.expectEqual(PreserveAspectRatio.meet_centred, im.preserve_aspect_ratio);
+}
+
+test "an image that draws nothing is passed over rather than refused" {
+    // No href, an empty one, and a zero or negative size are each the
+    // document saying there is nothing here. With nothing else in it, the
+    // document has nothing to draw at all.
+    const nothing = [_][]const u8{
+        "<svg viewBox=\"0 0 10 10\"><image width=\"4\" height=\"4\"/></svg>",
+        "<svg viewBox=\"0 0 10 10\"><image href=\"  \"/></svg>",
+        "<svg viewBox=\"0 0 10 10\"><image href=\"a.png\" width=\"0\"/></svg>",
+        "<svg viewBox=\"0 0 10 10\"><image href=\"a.png\" height=\"-3\"/></svg>",
+    };
+    for (nothing) |src| try testing.expectError(error.NoPath, read(testing.allocator, src));
+}
+
+test "a use of an image reaches the image" {
+    var doc = try read(testing.allocator,
+        \\<svg viewBox="0 0 10 10">
+        \\  <defs><image id="pic" href="a.png" width="2" height="2"/></defs>
+        \\  <use href="#pic" x="3" y="4"/>
+        \\</svg>
+    );
+    defer doc.deinit();
+    const im = try onlyImage(&doc);
+    try testing.expectEqual(@as(f64, 3), im.transform.tx);
+    try testing.expectEqual(@as(f64, 4), im.transform.ty);
+    try testing.expectEqual(doc.ids.get("pic").?, im.node);
+}
+
+test "image-rendering takes both vocabularies and refuses anything else" {
+    try testing.expectEqual(resample.Sampling.smooth, try parseImageRendering("auto"));
+    try testing.expectEqual(resample.Sampling.smooth, try parseImageRendering(" optimizeQuality "));
+    try testing.expectEqual(resample.Sampling.nearest, try parseImageRendering("pixelated"));
+    try testing.expectEqual(resample.Sampling.nearest, try parseImageRendering("crisp-edges"));
+    try testing.expectError(error.BadImageRendering, parseImageRendering("OPTIMIZESPEED"));
+    try testing.expectError(error.BadImageRendering, parseImageRendering("blurry"));
 }
 
 test "a document is refused before any of it is drawn" {
@@ -1868,7 +2082,7 @@ test "a document is refused before any of it is drawn" {
     // half-drawn picture and an error at once.
     try testing.expectError(error.UnsupportedElement, read(
         testing.allocator,
-        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><image href=\"a.png\"/></svg>",
+        "<svg viewBox=\"0 0 24 24\"><path d=\"M0 0Z\"/><path d=\"M1 1Z\"/><foreignObject/></svg>",
     ));
     try testing.expectError(error.NoPath, read(
         testing.allocator,

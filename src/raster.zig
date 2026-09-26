@@ -4260,7 +4260,12 @@ fn makeSource(
     }
     g.setTransformation(placement) catch |err| switch (err) {
         // A placement that collapses the plane has nothing to sample through.
-        error.InvalidMatrix => return .nothing,
+        // Returning is not an error, so the `errdefer` above does not free
+        // the stops; this has to.
+        error.InvalidMatrix => {
+            g.deinit(gpa);
+            return .nothing;
+        },
         else => |e| return e,
     };
     return .{ .gradient = g };
@@ -6697,4 +6702,14 @@ test "a caller's stylesheet outweighs an attribute, and loses a tie to the docum
     defer tie.deinit(testing.allocator);
     try testing.expectEqual(@as(u8, 255), tie.getPixel(12, 12).?.rgba.b);
     try testing.expectEqual(@as(u8, 0), tie.getPixel(12, 12).?.rgba.r);
+}
+
+test "a gradient under a transform that collapses the plane draws nothing, and frees its stops" {
+    // Found by the fuzzer: the stops were built and then dropped when the
+    // placement turned out to have no inverse.
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 8 8\"><linearGradient id=\"g\"><stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient>" ++
+        "<path d=\"M1 1 L2 6\" stroke=\"url(#g)\" transform=\"scale(3 0)\"/></svg>", .{ .width = 8, .height = 8 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 4).?.rgba.a);
 }

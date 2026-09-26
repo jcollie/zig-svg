@@ -1038,6 +1038,9 @@ const document_corpus = [_][]const u8{
     // Decorations on glyphs placed one by one: turned, jumping, stretched,
     // stroked, and in every paint order.
     "<svg viewBox=\"0 0 64 32\" font-size=\"7\"><text x=\"2 10 20\" y=\"12\" dy=\"0 2 -2\" rotate=\"12 -8\" text-decoration=\"underline overline line-through\" stroke=\"blue\" paint-order=\"stroke\" textLength=\"40\" lengthAdjust=\"spacingAndGlyphs\">decorate<tspan text-decoration=\"underline\" fill=\"red\" rotate=\"90\">d</tspan></text></svg>",
+    // Style sheets in force by media query: size, scheme, print, and a query
+    // nobody has heard of.
+    "<svg viewBox=\"0 0 8 8\" width=\"64\" height=\"64\"><style media=\"(max-width: 100px), (prefers-color-scheme: dark)\">rect{fill:red}</style><style media=\"print\">rect{fill:green}</style><style media=\"(mumble: 3)\">rect{fill:blue}</style><style media=\"not all and (min-aspect-ratio: 2/1)\">circle{fill:teal}</style><rect width=\"4\" height=\"4\"/><circle cx=\"6\" cy=\"6\" r=\"2\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

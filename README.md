@@ -591,7 +591,7 @@ short of the specification.
 | `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style` | yes — §6.3's declaration block, which outranks the attributes |
-| `<style>` | yes — every one of them, as one sheet in document order |
+| `<style>` | yes — every one of them, as one sheet in document order; one whose `media` query does not hold is not in force, the query asked about the size the picture is drawn at and the caller's `Options.color_scheme` and `reduced_motion`, as Chrome asks it of an SVG `<img>` |
 | Selectors | `*`, type, `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`, `[attr\|=v]`; ` `, `>`, `+`, `~`; lists |
 | The cascade | yes — §6.4's five bands, specificity, source order, `!important` |
 | At-rules, pseudo-classes, namespace selectors | **no** — refused, not skipped |

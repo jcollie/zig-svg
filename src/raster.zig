@@ -256,6 +256,12 @@ pub const Options = struct {
     /// or outlined without editing it, since a stylesheet outweighs any
     /// presentation attribute the document wrote.
     stylesheets: []const []const u8 = &.{},
+
+    /// Whether the picture is drawn for a dark colour scheme or a light one,
+    /// and for a reader who asked for less motion: what the document's media
+    /// queries are asked, alongside the size it is drawn at.
+    color_scheme: css.media.ColorScheme = .light,
+    reduced_motion: css.media.ReducedMotion = .no_preference,
 };
 
 /// How the caller supplies a picture an `<image>` names by URL. See
@@ -382,10 +388,7 @@ pub const Box = struct {
 ///
 /// The caller owns the surface and releases it with `z2d.Surface.deinit`.
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface {
-    var doc = try document.readWith(gpa, src, .{
-        .languages = opts.languages,
-        .stylesheets = opts.stylesheets,
-    });
+    var doc = try document.readWith(gpa, src, readOptions(opts, null));
     defer doc.deinit();
 
     // The document's own size, which is what `width` and `height` say when it
@@ -393,6 +396,18 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface 
     const width = opts.width orelse fitDimension(doc.width);
     const height = opts.height orelse fitDimension(doc.height);
     try opts.limits.check(width, height);
+
+    // Read at its own size, because the size it is drawn at was not known
+    // until it had been read. A document whose styles asked a media query
+    // about that is read again at the size it is actually drawn -- once, and
+    // only then.
+    const w: f64 = @floatFromInt(width);
+    const h: f64 = @floatFromInt(height);
+    if (doc.media_dependent and (w != doc.width or h != doc.height)) {
+        const again = try document.readWith(gpa, src, readOptions(opts, .{ .width = w, .height = h }));
+        doc.deinit();
+        doc = again;
+    }
 
     var surface = if (opts.background) |px|
         try z2d.Surface.initPixel(px, gpa, @intCast(width), @intCast(height))
@@ -420,12 +435,24 @@ pub fn draw(
     box: Box,
     opts: Options,
 ) Error!void {
-    var doc = try document.readWith(gpa, src, .{
-        .languages = opts.languages,
-        .stylesheets = opts.stylesheets,
-    });
+    var doc = try document.readWith(gpa, src, readOptions(opts, box));
     defer doc.deinit();
     return drawDocument(gpa, surface, &doc, box, opts);
+}
+
+/// How a document is read for drawing under `opts`, at `size` when it is
+/// known.
+fn readOptions(opts: Options, size: ?Box) document.ReadOptions {
+    return .{
+        .languages = opts.languages,
+        .stylesheets = opts.stylesheets,
+        .media = .{
+            .width = if (size) |b| b.width else null,
+            .height = if (size) |b| b.height else null,
+            .color_scheme = opts.color_scheme,
+            .reduced_motion = opts.reduced_motion,
+        },
+    };
 }
 
 /// The half of `draw` that has the document already, so that `render` does not
@@ -7644,5 +7671,29 @@ test "a run is split into whole characters, or refused, whatever its bytes" {
             }
             _ = spacingAfter(run, glyph);
         }
+    }
+}
+
+test "a style element's media query is asked about the size it is drawn at, and the caller's scheme" {
+    const gpa = testing.allocator;
+    // As Chrome draws it as an `<img>`: the narrow sheet at 64 pixels and not
+    // at 256, print never, and the dark one when the caller says dark.
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\" viewBox=\"0 0 8 8\">" ++
+        "<style>rect { fill: blue }</style><style media=\"(max-width: 100px)\">rect { fill: red }</style>" ++
+        "<style media=\"print\">rect { fill: green }</style><style media=\"(prefers-color-scheme: dark)\">circle { fill: white }</style>" ++
+        "<rect width=\"8\" height=\"4\"/><circle cx=\"4\" cy=\"6\" r=\"2\" fill=\"black\"/></svg>";
+    const Case = struct { size: u32, scheme: css.media.ColorScheme, rect: [3]u8, circle: [3]u8 };
+    for ([_]Case{
+        .{ .size = 64, .scheme = .light, .rect = .{ 255, 0, 0 }, .circle = .{ 0, 0, 0 } },
+        .{ .size = 256, .scheme = .light, .rect = .{ 0, 0, 255 }, .circle = .{ 0, 0, 0 } },
+        .{ .size = 64, .scheme = .dark, .rect = .{ 255, 0, 0 }, .circle = .{ 255, 255, 255 } },
+    }) |c| {
+        var sfc = try render(gpa, src, .{ .width = c.size, .height = c.size, .color_scheme = c.scheme });
+        defer sfc.deinit(gpa);
+        const k: i32 = @intCast(c.size / 8);
+        const r = sfc.getPixel(4 * k, k).?.rgba;
+        const o = sfc.getPixel(4 * k, 6 * k).?.rgba;
+        try testing.expectEqualSlices(u8, &c.rect, &.{ r.r, r.g, r.b });
+        try testing.expectEqualSlices(u8, &c.circle, &.{ o.r, o.g, o.b });
     }
 }

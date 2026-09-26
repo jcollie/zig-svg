@@ -830,6 +830,11 @@ pub const Document = struct {
     /// What measures an element for `transform-box: fill-box`, installed by
     /// the rasterizer for as long as it is drawing. See `Measurer`.
     measurer: ?Measurer = null,
+    /// Whether a media query decided anything in reading its styles -- a
+    /// `<style>` with a `media` attribute, or an `@media` rule -- so that
+    /// drawing it at another size than it was read for means reading it
+    /// again.
+    media_dependent: bool = false,
     /// Whether this is an SVG drawn as the picture of another document's
     /// `<image>`. Such a document names pictures of its own by `data:` URL
     /// only, as a browser's SVG-as-image does: nothing outside it is fetched
@@ -3104,7 +3109,41 @@ pub const ReadOptions = struct {
     /// Copied into the document, so they need not outlive the call.
     stylesheets: []const []const u8 = &.{},
 
+    /// What a media query in the document is asked about. See `Media`.
+    media: Media = .{},
+
     pub const default_languages: []const []const u8 = &.{"en"};
+};
+
+/// The environment a document's media queries are answered in: the `media`
+/// attribute of a `<style>`, and `@media` in a stylesheet.
+///
+/// A picture drawn as an SVG `<img>` in Chrome has the `<img>`'s size for its
+/// viewport, and that is what its queries' `width` and `height` are of; the
+/// equivalent here is the size the picture is drawn at, which `raster` passes
+/// in. The two preferences are the caller's to state, as a browser's user
+/// states them -- which is what lets an icon with a dark variant draw it.
+pub const Media = struct {
+    /// The size the picture is drawn at, in CSS pixels, or null for the size
+    /// the document says it is.
+    width: ?f64 = null,
+    height: ?f64 = null,
+    color_scheme: css.media.ColorScheme = .light,
+    reduced_motion: css.media.ReducedMotion = .no_preference,
+
+    fn environment(self: Media, doc: *const Document) css.media.Environment {
+        const w = self.width orelse doc.width;
+        const h = self.height orelse doc.height;
+        return .{
+            .type = .screen,
+            .width = w,
+            .height = h,
+            .device_width = w,
+            .device_height = h,
+            .color_scheme = self.color_scheme,
+            .reduced_motion = self.reduced_motion,
+        };
+    }
 };
 
 /// `readWith` with every option at its default.
@@ -3140,9 +3179,12 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
     doc.root_node = root;
 
     try indexIds(&doc);
+    // The size first, which is attributes alone, since a media query in the
+    // stylesheets may be asking about it.
+    try readRootSize(&doc, root);
     // Before anything reads a property, because from here on every one of them
     // goes through the cascade.
-    try readStylesheet(gpa, &doc, options.stylesheets);
+    try readStylesheet(gpa, &doc, options.stylesheets, options.media.environment(&doc));
     try readRoot(&doc, root);
 
     var it = doc.paths();
@@ -3187,7 +3229,7 @@ fn indexIds(doc: *Document) Error!void {
 /// its children, so one written as CDATA -- which is how a document with a
 /// `>` in a selector has to write it -- reads the same as one written as plain
 /// text.
-fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []const u8) Error!void {
+fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []const u8, env: css.media.Environment) Error!void {
     const arena = doc.tree.alloc();
     var sources: std.ArrayList([]const u8) = .empty;
     defer sources.deinit(gpa);
@@ -3203,7 +3245,7 @@ fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []cons
         if (node.kind != .element) continue;
         if (!std.mem.eql(u8, node.name.local, "style")) continue;
         const elem: ztree.NodeId = @intCast(id);
-        if (!try isStyleSheet(doc.tree, elem)) continue;
+        if (!try isStyleSheet(doc, elem, env)) continue;
         // Into the tree's arena, so the selectors and blocks the parser slices
         // out of it live exactly as long as the tree does.
         const text = try doc.tree.stringValue(arena, elem);
@@ -3211,26 +3253,31 @@ fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []cons
         try sources.append(gpa, text);
     }
     if (sources.items.len == 0) return;
-    doc.stylesheet = try css.parse(gpa, sources.items);
+    doc.stylesheet = try css.parseWith(gpa, sources.items, .{ .media = env });
+    for (doc.stylesheet.at_rules) |r| {
+        if (std.ascii.eqlIgnoreCase(r.name, "media")) doc.media_dependent = true;
+    }
 }
 
 /// Whether a `<style>` element holds CSS this should read.
 ///
 /// `type` says what the content is, and a type that is not CSS means the
 /// element is not a stylesheet at all -- there is nothing being dropped by
-/// passing over it, and resvg passes over it too. `media` is the opposite
-/// case: it says the rules apply somewhere, and skipping them would lose rules
-/// the document meant, so anything but a medium this renders for is refused.
-fn isStyleSheet(tree: *const ztree.Document, node: ztree.NodeId) Error!bool {
+/// passing over it, and resvg passes over it too. `media` is a media query
+/// list, answered in `env`: a sheet whose query does not hold is not in force,
+/// as a browser has it -- `media="print"` on a screen, `(max-width: 100px)` on
+/// a picture drawn larger.
+fn isStyleSheet(doc: *Document, node: ztree.NodeId, env: css.media.Environment) Error!bool {
+    const tree = doc.tree;
     if (tree.attributeValue(node, "", "type")) |raw| {
         const t = std.mem.trim(u8, raw, " \t\r\n");
         if (t.len != 0 and !std.mem.eql(u8, t, "text/css")) return false;
     }
     if (tree.attributeValue(node, "", "media")) |raw| {
         const t = std.mem.trim(u8, raw, " \t\r\n");
-        if (t.len != 0 and !std.mem.eql(u8, t, "all") and !std.mem.eql(u8, t, "screen")) {
-            return error.UnsupportedAtRule;
-        }
+        if (t.len == 0 or std.mem.eql(u8, t, "all") or std.mem.eql(u8, t, "screen")) return true;
+        doc.media_dependent = true;
+        return css.media.matches(t, env);
     }
     return true;
 }
@@ -3243,7 +3290,7 @@ fn isStyleSheet(tree: *const ztree.Document, node: ztree.NodeId) Error!bool {
 /// resolves to zero and the `viewBox` supplies the size instead, which is what
 /// resvg does with the `width="100%" height="100%"` that drawing programs like
 /// to write.
-fn readRoot(doc: *Document, root: ztree.NodeId) Error!void {
+fn readRootSize(doc: *Document, root: ztree.NodeId) Error!void {
     const tree = doc.tree;
     if (tree.attributeValue(root, "", "viewBox")) |raw| {
         doc.view_box = try parseViewBox(raw);
@@ -3270,7 +3317,11 @@ fn readRoot(doc: *Document, root: ztree.NodeId) Error!void {
     if (tree.attributeValue(root, "", "preserveAspectRatio")) |raw| {
         doc.preserve_aspect_ratio = try PreserveAspectRatio.parse(raw);
     }
+}
 
+/// What the root `<svg>` names that everything inherits, through the cascade
+/// -- so after the stylesheets are read, where its size came before them.
+fn readRoot(doc: *Document, root: ztree.NodeId) Error!void {
     var it = doc.paths();
     doc.root = try it.readInherited(root);
 }

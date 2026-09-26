@@ -1035,6 +1035,9 @@ const document_corpus = [_][]const u8{
     // tref: its characters in its own style, twice in one text, with lists,
     // naming nested text, and naming an element with none.
     "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 64 32\" font-size=\"6\"><defs><text id=\"t\">Re<tspan>f<a>er</a></tspan>red</text><g id=\"e\"/></defs><text x=\"2\" y=\"10\" xml:space=\"preserve\">a <tref xlink:href=\"#t\" x=\"8 12\" rotate=\"4\" fill=\"red\"/> <tref href=\"#t\" textLength=\"20\"/><tref href=\"#e\"/></text></svg>",
+    // Decorations on glyphs placed one by one: turned, jumping, stretched,
+    // stroked, and in every paint order.
+    "<svg viewBox=\"0 0 64 32\" font-size=\"7\"><text x=\"2 10 20\" y=\"12\" dy=\"0 2 -2\" rotate=\"12 -8\" text-decoration=\"underline overline line-through\" stroke=\"blue\" paint-order=\"stroke\" textLength=\"40\" lengthAdjust=\"spacingAndGlyphs\">decorate<tspan text-decoration=\"underline\" fill=\"red\" rotate=\"90\">d</tspan></text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

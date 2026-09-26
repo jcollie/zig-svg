@@ -571,7 +571,7 @@ short of the specification.
 | Filter functions in `filter` | all ten of Filter Effects 1, in a list with `url()`s, to `filter.max_functions` (16) |
 | `letter-spacing`, `word-spacing` | yes, inherited, as lengths (an `em` is the declaring element's font size); letter spacing after every character but the last of a chunk, word spacing after each word separator, as resvg; on a `<textPath>` too |
 | `baseline-shift` | yes — lengths, percentages of the element's font size, and `sub`/`super` at the font's own OS/2 offsets; nested shifts add up, the `<text>`'s own is ignored (as resvg); along a `<textPath>` too |
-| `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; not along a `<textPath>`, with `rotate`, or across a run whose characters are placed one by one, where it is refused |
+| `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; and across glyphs placed one by one — turned by `rotate`, or moved by positions of their own — as a piece under each glyph that turns and moves with it, as resvg and Chrome draw it; not along a `<textPath>`, where Chrome follows the curve and resvg draws none, and where it is refused |
 | `dominant-baseline`, `alignment-baseline` | every SVG 1.1 keyword and CSS Inline 3's `text-top`/`text-bottom`, placed by resvg's distances from the font's ascent, descent and x-height; `dominant-baseline` inherits, as SVG 2 has it, where resvg reads it from the element alone |
 | `shape-rendering`, `text-rendering` | yes, inherited — `crispEdges` and `optimizeSpeed` draw a shape without anti-aliasing, `text-rendering: optimizeSpeed` its text and decorations (text ignores `shape-rendering`, as in resvg); clips and masks keep theirs |
 | `mix-blend-mode`, `isolation` | yes, from `style` or a stylesheet (SVG 2 gives them no attribute) — all sixteen modes, on groups, shapes, text and images, each blended onto what is beneath it in its parent layer; `isolate` gives a group its own |
@@ -1108,8 +1108,7 @@ What SVG 1.1 has that this does not is vertical and right-to-left text —
 `writing-mode`, `direction: rtl` and `unicode-bidi` — which want the Unicode
 bidirectional algorithm, contextual shaping from the font's `GSUB` for Arabic
 and the other joining scripts, and vertical metrics z2d does not read yet;
-`@media` and the CSS pseudo-classes; and a decoration along a `<textPath>` or
-across glyphs placed one by one. Each is refused rather than
+`@media` and the CSS pseudo-classes; and a decoration along a `<textPath>`. Each is refused rather than
 ignored, so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and

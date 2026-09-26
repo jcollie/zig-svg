@@ -1397,10 +1397,10 @@ pub const PathIterator = struct {
         const owner = self.textOwnerOf(parent.node);
         const shift = try self.baselineShiftOf(owner);
         const decorations = try self.decorationsOf();
-        // Along a path, or turned glyph by glyph, a decoration is broken
-        // into a piece per glyph, which is a layout of its own that this
-        // does not draw.
-        if (decorations.any() and (self.attr(parent.node, "rotate") != null or try self.onPathOf(parent.node) != null)) {
+        // Along a path a decoration follows the curve -- Chrome draws it so,
+        // and resvg draws none -- which is a layout of its own that this does
+        // not draw.
+        if (decorations.any() and try self.onPathOf(parent.node) != null) {
             return error.UnsupportedTextLayout;
         }
 

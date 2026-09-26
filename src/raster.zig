@@ -1016,6 +1016,30 @@ fn paintDecoration(
         .rx = null,
         .ry = null,
     } };
+    // Glyphs placed one by one each carry a piece of it, across their own
+    // advance and turned and moved with them, as resvg and Chrome draw it:
+    // one path of a quadrilateral per glyph, filled and stroked as one.
+    var pieces: std.ArrayList(u8) = .empty;
+    defer pieces.deinit(gpa);
+    if (span.run_glyphs.len > 0) {
+        var w: std.Io.Writer.Allocating = .init(gpa);
+        errdefer w.deinit();
+        for (span.run_glyphs) |g| {
+            var frame = z2d.Transformation.identity.translate(g.x, g.y);
+            if (g.rotate != 0) frame = frame.rotate(g.rotate * std.math.pi / 180.0);
+            if (g.scale != 1) frame = frame.scale(g.scale, 1);
+            const top = -centre - t / 2;
+            const corners = [4][2]f64{ .{ 0, top }, .{ g.advance / g.scale, top }, .{ g.advance / g.scale, top + t }, .{ 0, top + t } };
+            for (corners, 0..) |c, i| {
+                const x = frame.ax * c[0] + frame.by * c[1] + frame.tx;
+                const y = frame.cx * c[0] + frame.dy * c[1] + frame.ty;
+                w.writer.print("{s}{d} {d}", .{ if (i == 0) "M" else "L", x, y }) catch return error.OutOfMemory;
+            }
+            w.writer.writeAll("Z") catch return error.OutOfMemory;
+        }
+        pieces = w.toArrayList();
+        band.geometry = .{ .path = pieces.items };
+    }
     band.fill = paint.fill;
     band.fill_opacity = paint.fill_opacity;
     band.stroke = paint.stroke;
@@ -3678,6 +3702,10 @@ const Pen = struct {
     run_x0: f64 = 0,
     run_x1: f64 = 0,
     run_baseline: f64 = 0,
+    /// Its glyphs, when they were placed one by one -- turned, or moved by
+    /// positions of their own -- so that a decoration can follow each; empty
+    /// when one band across the run is the decoration.
+    run_glyphs: []const TextLayout.GlyphPlace = &.{},
 };
 
 /// Every `<text>` a render has laid out, by the document and element.
@@ -4206,6 +4234,12 @@ fn buildText(
     pen.run_x0 = place.x0;
     pen.run_x1 = place.x1;
     pen.run_baseline = place.baseline;
+    // Only from the render's own layouts, which outlive this call; one made
+    // here for the occasion does not.
+    pen.run_glyphs = if (place.broken and pen.layouts != null)
+        layout.glyphs.items[place.first..][0..place.count]
+    else
+        &.{};
 
     const size = shape.font_size orelse 16;
     if (!(size > 0)) return;
@@ -4221,9 +4255,6 @@ fn buildText(
         return;
     }
     if (place.count == 0) return;
-    // A decoration is one band across the run, which cannot follow a run
-    // whose characters jump about inside it.
-    if (shape.decorations.any() and place.broken) return error.UnsupportedTextLayout;
 
     const baseline = font.baselineOffset(size);
     const glyphs = layout.glyphs.items[place.first..][0..place.count];

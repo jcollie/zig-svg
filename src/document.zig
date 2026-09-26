@@ -158,6 +158,14 @@ pub const Error = error{
     /// `<tspan>`. Each changes where the glyphs go, so ignoring one draws text
     /// that is in the wrong place and looks deliberate.
     UnsupportedTextLayout,
+    /// Text that is vertical (`writing-mode`), right to left (`direction`), or
+    /// under a `unicode-bidi` other than `normal`. Each is a different layout
+    /// from the left-to-right horizontal one this draws, and drawing that
+    /// instead would put every glyph in the wrong place.
+    UnsupportedTextDirection,
+    /// A `writing-mode`, `direction` or `unicode-bidi` that is none of its
+    /// keywords.
+    BadTextDirection,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -351,6 +359,13 @@ pub const Inherited = struct {
     marker_mid: ?[]const u8 = null,
     marker_end: ?[]const u8 = null,
 
+    /// `writing-mode`, `direction` and `unicode-bidi`, each inherited, as
+    /// whether it asks for something other than left-to-right horizontal
+    /// text. Only text reads them, and refuses what they ask.
+    vertical: ?bool = null,
+    right_to_left: ?bool = null,
+    bidi: ?bool = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -378,6 +393,9 @@ pub const Inherited = struct {
             .marker_start = child.marker_start orelse self.marker_start,
             .marker_mid = child.marker_mid orelse self.marker_mid,
             .marker_end = child.marker_end orelse self.marker_end,
+            .vertical = child.vertical orelse self.vertical,
+            .right_to_left = child.right_to_left orelse self.right_to_left,
+            .bidi = child.bidi orelse self.bidi,
         };
     }
 };
@@ -1040,6 +1058,10 @@ pub const PathIterator = struct {
         // `lengthAdjust="spacingAndGlyphs"` stretches the glyphs themselves
         // rather than the gaps between them, which is a different drawing and
         // not one this does. The initial value is `spacing`, which is.
+        const inherited = parent.inherited;
+        if ((inherited.vertical orelse false) or (inherited.right_to_left orelse false) or (inherited.bidi orelse false)) {
+            return error.UnsupportedTextDirection;
+        }
         if (self.attr(parent.node, "lengthAdjust")) |raw| {
             const t = std.mem.trim(u8, raw, " \t\r\n");
             if (!std.mem.eql(u8, t, "spacing")) return error.UnsupportedTextLayout;
@@ -1798,6 +1820,9 @@ pub const PathIterator = struct {
             .marker_start = try self.markerOf(node, "marker-start"),
             .marker_mid = try self.markerOf(node, "marker-mid"),
             .marker_end = try self.markerOf(node, "marker-end"),
+            .vertical = if (self.presentation(node, "writing-mode")) |v| try parseWritingMode(v) else null,
+            .right_to_left = if (self.presentation(node, "direction")) |v| try parseDirection(v) else null,
+            .bidi = if (self.presentation(node, "unicode-bidi")) |v| try parseUnicodeBidi(v) else null,
         };
     }
 
@@ -2104,6 +2129,41 @@ pub fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
     for (smooth) |k| if (std.mem.eql(u8, t, k)) return .smooth;
     for (nearest) |k| if (std.mem.eql(u8, t, k)) return .nearest;
     return error.BadImageRendering;
+}
+
+/// `writing-mode`: true for vertical. CSS Writing Modes 3's keywords, and SVG
+/// 1.1's, whose `lr`, `lr-tb`, `rl` and `rl-tb` CSS makes horizontal and whose
+/// `tb` and `tb-rl` it makes vertical.
+fn parseWritingMode(raw: []const u8) Error!?bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "inherit")) return null;
+    for ([_][]const u8{ "horizontal-tb", "lr", "lr-tb", "rl", "rl-tb", "initial" }) |k| {
+        if (std.mem.eql(u8, t, k)) return false;
+    }
+    for ([_][]const u8{ "vertical-rl", "vertical-lr", "sideways-rl", "sideways-lr", "tb", "tb-rl" }) |k| {
+        if (std.mem.eql(u8, t, k)) return true;
+    }
+    return error.BadTextDirection;
+}
+
+/// `direction`: true for `rtl`.
+fn parseDirection(raw: []const u8) Error!?bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "inherit")) return null;
+    if (std.mem.eql(u8, t, "ltr") or std.mem.eql(u8, t, "initial")) return false;
+    if (std.mem.eql(u8, t, "rtl")) return true;
+    return error.BadTextDirection;
+}
+
+/// `unicode-bidi`: true for anything but `normal`.
+fn parseUnicodeBidi(raw: []const u8) Error!?bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "inherit")) return null;
+    if (std.mem.eql(u8, t, "normal") or std.mem.eql(u8, t, "initial")) return false;
+    for ([_][]const u8{ "embed", "isolate", "bidi-override", "isolate-override", "plaintext" }) |k| {
+        if (std.mem.eql(u8, t, k)) return true;
+    }
+    return error.BadTextDirection;
 }
 
 /// §10.10's `font-weight`, as the number the resolver is asked for.
@@ -3616,4 +3676,28 @@ test "filter is one reference, or a list of functions" {
     try testing.expectEqualStrings("a", seen[0].reference);
     try testing.expectEqualStrings("url(#a) blur(2px)", seen[1].functions);
     try testing.expectEqualStrings("grayscale(1)", seen[2].functions);
+}
+
+test "vertical, right-to-left and bidirectional text are refused, and horizontal is not" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><text writing-mode=\"vertical-rl\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text writing-mode=\"tb\">a</text></svg>",
+        // Inherited from outside the text.
+        "<svg viewBox=\"0 0 8 8\" direction=\"rtl\"><text>a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text>a<tspan style=\"unicode-bidi: bidi-override\">b</tspan></text></svg>",
+    }) |src| {
+        try testing.expectError(error.UnsupportedTextDirection, read(gpa, src));
+    }
+    try testing.expectError(error.BadTextDirection, read(gpa, "<svg viewBox=\"0 0 8 8\"><text direction=\"up\">a</text></svg>"));
+    // The horizontal spellings, SVG 1.1's included, and a right-to-left
+    // `direction` on something that is not text, draw as they always did.
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><text writing-mode=\"lr-tb\" direction=\"ltr\" unicode-bidi=\"normal\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text writing-mode=\"rl\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" direction=\"rtl\"/></svg>",
+    }) |src| {
+        var doc = try read(gpa, src);
+        doc.deinit();
+    }
 }

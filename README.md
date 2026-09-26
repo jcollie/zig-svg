@@ -545,6 +545,7 @@ short of the specification.
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
 | `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`, `feSpecularLighting` and the three light sources, `feDropShadow`, `feImage` of a picture or an element; any other `fe` element is refused |
 | Filter functions in `filter` | all ten of Filter Effects 1, in a list with `url()`s, to `filter.max_functions` (16) |
+| `writing-mode`, `direction`, `unicode-bidi` | horizontal left-to-right only; vertical, right-to-left or bidirectional text is refused (`UnsupportedTextDirection`) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |
 | `filterRes` | ignored, as resvg ignores it |
@@ -1023,11 +1024,13 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-What SVG 1.1 has that this does not is `@media`, the CSS pseudo-classes, the
-`spacingAndGlyphs` form of `lengthAdjust`, and an `<image>` of another SVG
-document, which wants a render nested in a render with its own viewport and a
-share of the budget. Each is refused rather than ignored, so a document needing
-one says so.
+What SVG 1.1 has that this does not is vertical and right-to-left text —
+`writing-mode`, `direction: rtl` and `unicode-bidi` — which want a layout of
+their own and the Unicode bidirectional algorithm, `@media`, the CSS
+pseudo-classes, the `spacingAndGlyphs` form of `lengthAdjust`, and an `<image>`
+of another SVG document, which wants a render nested in a render with its own
+viewport and a share of the budget. Each is refused rather than ignored, so a
+document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

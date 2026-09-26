@@ -143,7 +143,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle" ++
     "feDropShadowdxdystdDeviationflood-colorflood-opacity" ++
     "feImagehrefxlink:hrefpreserveAspectRatioimage-renderingoptimizeSpeed#" ++
-    "blur(drop-shadow(grayscale(sepia(saturate(hue-rotate(invert(opacity(brightness(contrast(url(#)%pxdegturnradgrad";
+    "blur(drop-shadow(grayscale(sepia(saturate(hue-rotate(invert(opacity(brightness(contrast(url(#)%pxdegturnradgrad" ++
+    "writing-modehorizontal-tbvertical-rltblr-tbdirectionrtlltrunicode-bidinormalbidi-override";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },

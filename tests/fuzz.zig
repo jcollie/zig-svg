@@ -138,7 +138,9 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feTilefeMorphologyradiuserodedilate" ++
     "feConvolveMatrixorderkernelMatrixdivisorbiastargetXtargetYedgeModeduplicatewrapnonepreserveAlphatruefalse" ++
     "feDisplacementMapscalexChannelSelectoryChannelSelectorRGBA" ++
-    "feTurbulencebaseFrequencynumOctavesseedstitchTilesstitchnoStitchfractalNoiseturbulence";
+    "feTurbulencebaseFrequencynumOctavesseedstitchTilesstitchnoStitchfractalNoiseturbulence" ++
+    "feDiffuseLightingfeSpecularLightingsurfaceScalediffuseConstantspecularConstantspecularExponentlighting-color" ++
+    "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -956,6 +958,9 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood flood-color=\"rgba(200,20,90,0.5)\" result=\"m\"/><feDisplacementMap in=\"SourceGraphic\" in2=\"m\" scale=\"3\" xChannelSelector=\"B\" yChannelSelector=\"A\"/><feDisplacementMap in2=\"SourceAlpha\" scale=\"-40\"/></filter><rect x=\"1\" y=\"1\" width=\"5\" height=\"5\" fill=\"navy\" filter=\"url(#f)\"/></svg>",
     // Noise of both kinds, stitched, under a transform, feeding a map.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"><feTurbulence type=\"fractalNoise\" baseFrequency=\"0.3 0.1\" numOctaves=\"4\" seed=\"-9.5\" stitchTiles=\"stitch\" result=\"n\"/><feTurbulence baseFrequency=\"1e9\" numOctaves=\"30\"/><feDisplacementMap in=\"SourceGraphic\" in2=\"n\" scale=\"2\"/></filter><rect width=\"6\" height=\"6\" transform=\"rotate(20) scale(0.5 2)\" filter=\"url(#f)\"/></svg>",
+    // Every light, on the alpha of a shape, one of them in bounding-box
+    // units, and a highlight composited back over it.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feDiffuseLighting in=\"SourceAlpha\" surfaceScale=\"3\" lighting-color=\"currentColor\"><fePointLight x=\"0.2\" y=\"0.1\" z=\"0.5\"/></feDiffuseLighting></filter><filter id=\"g\"><feSpecularLighting in=\"SourceAlpha\" specularExponent=\"128\" result=\"s\"><feSpotLight x=\"1\" y=\"1\" z=\"9\" pointsAtX=\"4\" pointsAtY=\"4\" limitingConeAngle=\"-20\" specularExponent=\"-1\"/></feSpecularLighting><feComposite in=\"SourceGraphic\" in2=\"s\" operator=\"arithmetic\" k2=\"1\" k3=\"1\"/><feDiffuseLighting><feDistantLight azimuth=\"1e30\" elevation=\"-90\"/></feDiffuseLighting></filter><circle cx=\"3\" cy=\"3\" r=\"2\" color=\"red\" filter=\"url(#f)\"/><rect x=\"4\" y=\"4\" width=\"3\" height=\"3\" filter=\"url(#g)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

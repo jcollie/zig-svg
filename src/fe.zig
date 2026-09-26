@@ -797,6 +797,152 @@ const Noise = struct {
     }
 };
 
+/// A light source in canvas pixels, as `light` takes it.
+pub const Light = union(enum) {
+    /// Azimuth and elevation, in degrees.
+    distant: [2]f64,
+    point: [3]f64,
+    spot: struct { at: [3]f64, points_at: [3]f64, exponent: f64, cone: ?f64 },
+};
+
+pub const Lighting = struct {
+    specular: bool,
+    surface_scale: f64,
+    /// `diffuseConstant` or `specularConstant`.
+    constant: f64,
+    exponent: f64,
+    /// `lighting-color` in the primitive's colour space.
+    color: [3]f32,
+    light: Light,
+};
+
+/// `feDiffuseLighting` and `feSpecularLighting`, §15.14 and §15.22: the alpha
+/// of `in` taken as a height field, lit, over the pixels of `box` in `out`.
+///
+/// The surface normal is §15.14's Sobel operator, with its own kernels where
+/// the image stops -- at the edges and corners of `bounds`, the image the
+/// primitive is given. Those kernels all come to one rule: each difference
+/// is taken across whichever of the two neighbours exist, weighted 1-2-1 down
+/// whichever rows exist, and scaled by two over the product of the weights
+/// and the distance. That gives the specification's `1/4`, `1/3`, `1/2` and
+/// `2/3` exactly, without eight functions to say so.
+///
+/// Every pixel is its corner, as resvg has it. A diffuse result is opaque;
+/// a specular one takes the greatest of its channels as its alpha, and its
+/// colour as already premultiplied by it, as Skia and resvg both do.
+pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, box: image.PixelBox, l: Lighting) void {
+    const b = bounds.intersect(image.extent(in));
+    const clipped = box.intersect(b);
+    if (clipped.isEmpty()) return;
+    const w = in.getWidth();
+    const src = in.image_surface_rgba.buf;
+    const dst = out.image_surface_rgba.buf;
+    const alphaAt = struct {
+        fn f(buf: []const RGBA, width: i32, x: i32, y: i32) f64 {
+            return @as(f64, @floatFromInt(buf[@intCast(y * width + x)].a)) / 255;
+        }
+    }.f;
+
+    // A distant light's direction is the same everywhere.
+    const distant: [3]f64 = switch (l.light) {
+        .distant => |d| blk: {
+            const az = std.math.degreesToRadians(d[0]);
+            const el = std.math.degreesToRadians(d[1]);
+            break :blk .{ @cos(az) * @cos(el), @sin(az) * @cos(el), @sin(el) };
+        },
+        else => .{ 0, 0, 1 },
+    };
+    const spot_axis: ?[3]f64 = switch (l.light) {
+        .spot => |sp| normalize(.{ sp.points_at[0] - sp.at[0], sp.points_at[1] - sp.at[1], sp.points_at[2] - sp.at[2] }),
+        else => null,
+    };
+
+    var y = clipped.y0;
+    while (y < clipped.y1) : (y += 1) {
+        var x = clipped.x0;
+        while (x < clipped.x1) : (x += 1) {
+            // The normal.
+            const left = if (x - 1 >= b.x0) x - 1 else x;
+            const right = if (x + 1 < b.x1) x + 1 else x;
+            const up = if (y - 1 >= b.y0) y - 1 else y;
+            const down = if (y + 1 < b.y1) y + 1 else y;
+            var nx: f64 = 0;
+            var wx: f64 = 0;
+            var r = up;
+            while (r <= down) : (r += 1) {
+                const weight: f64 = if (r == y) 2 else 1;
+                nx += weight * (alphaAt(src, w, right, r) - alphaAt(src, w, left, r));
+                wx += weight;
+            }
+            var ny: f64 = 0;
+            var wy: f64 = 0;
+            var c = left;
+            while (c <= right) : (c += 1) {
+                const weight: f64 = if (c == x) 2 else 1;
+                ny += weight * (alphaAt(src, w, c, down) - alphaAt(src, w, c, up));
+                wy += weight;
+            }
+            const dx: f64 = @floatFromInt(right - left);
+            const dy: f64 = @floatFromInt(down - up);
+            const fx = if (dx > 0) 2 / (wx * dx) else 0;
+            const fy = if (dy > 0) 2 / (wy * dy) else 0;
+            const normal = normalize(.{ -l.surface_scale * fx * nx, -l.surface_scale * fy * ny, 1 }) orelse .{ 0, 0, 1 };
+
+            // The light's direction, and its colour here.
+            const z = l.surface_scale * alphaAt(src, w, x, y);
+            const fxp: f64 = @floatFromInt(x);
+            const fyp: f64 = @floatFromInt(y);
+            const dir: [3]f64 = switch (l.light) {
+                .distant => distant,
+                .point => |pt| unitOr(.{ pt[0] - fxp, pt[1] - fyp, pt[2] - z }),
+                .spot => |sp| unitOr(.{ sp.at[0] - fxp, sp.at[1] - fyp, sp.at[2] - z }),
+            };
+            var tint: [3]f64 = .{ l.color[0], l.color[1], l.color[2] };
+            if (l.light == .spot) {
+                const sp = l.light.spot;
+                const along = if (spot_axis) |s| -dot(dir, s) else 0;
+                const inside = along > 0 and (sp.cone == null or along >= @cos(std.math.degreesToRadians(sp.cone.?)));
+                const k = if (inside) std.math.pow(f64, along, sp.exponent) else 0;
+                // Rounded to a byte, as resvg rounds the spot light's colour.
+                for (&tint) |*t| t.* = @round(std.math.clamp(t.* * k, 0, 1) * 255) / 255;
+            }
+
+            const factor = if (l.specular) blk: {
+                const h = normalize(.{ dir[0], dir[1], dir[2] + 1 }) orelse break :blk 0;
+                const n_dot_h = dot(normal, h);
+                break :blk l.constant * (if (n_dot_h > 0) std.math.pow(f64, n_dot_h, l.exponent) else 0);
+            } else l.constant * dot(normal, dir);
+
+            var px: [3]u8 = undefined;
+            for (&px, tint) |*v, t| {
+                const scaled = t * factor;
+                v.* = if (std.math.isFinite(scaled)) @intFromFloat(@round(std.math.clamp(scaled, 0, 1) * 255)) else 0;
+            }
+            dst[@intCast(y * w + x)] = .{
+                .r = px[0],
+                .g = px[1],
+                .b = px[2],
+                .a = if (l.specular) @max(px[0], @max(px[1], px[2])) else 255,
+            };
+        }
+    }
+}
+
+fn dot(a: [3]f64, b: [3]f64) f64 {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+fn normalize(v: [3]f64) ?[3]f64 {
+    const len = @sqrt(dot(v, v));
+    if (!(len > 0) or !std.math.isFinite(len)) return null;
+    return .{ v[0] / len, v[1] / len, v[2] / len };
+}
+
+/// A direction of no length stays as it is, as resvg leaves it.
+fn unitOr(v: [3]f64) [3]f64 {
+    return normalize(v) orelse v;
+}
+
 // -- tests -------------------------------------------------------------------
 
 fn surfaceOf(px: RGBA) !z2d.Surface {
@@ -1142,4 +1288,68 @@ test "stitched noise repeats across its tile" {
         try testing.expectApproxEqAbs(a, b, 1e-9);
         try testing.expectApproxEqAbs(a, c, 1e-9);
     }
+}
+
+fn lit(alpha: []const u8, width: i32, l: Lighting) ![]RGBA {
+    const gpa = testing.allocator;
+    const h: i32 = @intCast(@divExact(@as(i32, @intCast(alpha.len)), width));
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, width, h);
+    defer in.deinit(gpa);
+    for (in.image_surface_rgba.buf, alpha) |*px, a| px.* = .{ .r = 0, .g = 0, .b = 0, .a = a };
+    var out = try z2d.Surface.init(.image_surface_rgba, gpa, width, h);
+    defer out.deinit(gpa);
+    light(&out, &in, image.extent(&in), image.extent(&in), l);
+    return gpa.dupe(RGBA, out.image_surface_rgba.buf);
+}
+
+test "a flat surface under a light straight overhead is lit fully, and opaque" {
+    const got = try lit(&(.{128} ** 9), 3, .{
+        .specular = false,
+        .surface_scale = 5,
+        .constant = 1,
+        .exponent = 1,
+        .color = .{ 1, 0.5, 0 },
+        .light = .{ .distant = .{ 0, 90 } },
+    });
+    defer testing.allocator.free(got);
+    for (got) |px| try testing.expectEqual(RGBA{ .r = 255, .g = 128, .b = 0, .a = 255 }, px);
+}
+
+test "a slope faces towards the light or away from it" {
+    // Alpha rising to the right: the surface leans left, so a light low in
+    // the west lights it and one low in the east barely does.
+    const ramp = [_]u8{ 0, 128, 255 } ** 3;
+    const west = try lit(&ramp, 3, .{ .specular = false, .surface_scale = 4, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = .{ .distant = .{ 180, 30 } } });
+    defer testing.allocator.free(west);
+    const east = try lit(&ramp, 3, .{ .specular = false, .surface_scale = 4, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = .{ .distant = .{ 0, 30 } } });
+    defer testing.allocator.free(east);
+    try testing.expect(west[4].r > 200);
+    try testing.expect(east[4].r < 20);
+}
+
+test "the edge kernels are the specification's factors" {
+    // On a ramp of one level per pixel, every kernel -- interior, edge and
+    // corner -- sees the same slope, so every pixel is lit the same.
+    var ramp: [16]u8 = undefined;
+    for (&ramp, 0..) |*a, i| a.* = @intCast((i % 4) * 60);
+    const got = try lit(&ramp, 4, .{ .specular = false, .surface_scale = 1, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = .{ .distant = .{ 0, 90 } } });
+    defer testing.allocator.free(got);
+    for (got) |px| try testing.expectEqual(got[0].r, px.r);
+}
+
+test "a specular highlight's alpha is its brightest channel" {
+    const got = try lit(&(.{0} ** 9), 3, .{ .specular = true, .surface_scale = 1, .constant = 0.5, .exponent = 4, .color = .{ 1, 0.5, 0.25 }, .light = .{ .distant = .{ 0, 90 } } });
+    defer testing.allocator.free(got);
+    try testing.expectEqual(RGBA{ .r = 128, .g = 64, .b = 32, .a = 128 }, got[4]);
+}
+
+test "a spot light is dark outside its cone" {
+    const flat = [_]u8{0} ** 25;
+    const spot: Light = .{ .spot = .{ .at = .{ 0, 2, 3 }, .points_at = .{ 0, 2, 0 }, .exponent = 1, .cone = 30 } };
+    const got = try lit(&flat, 5, .{ .specular = false, .surface_scale = 1, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = spot });
+    defer testing.allocator.free(got);
+    // Straight below it, lit; four pixels across at a height of three is
+    // well outside thirty degrees.
+    try testing.expect(got[10].r > 200);
+    try testing.expectEqual(@as(u8, 0), got[14].r);
 }

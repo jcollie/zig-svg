@@ -1516,6 +1516,7 @@ const Chain = struct {
                     self.noteUse(i, d.in2);
                 },
                 .turbulence => {},
+                .lighting => |l| self.noteUse(i, l.in),
             }
         }
     }
@@ -1802,7 +1803,55 @@ const Chain = struct {
                 });
                 self.finish(i, out, box, space);
             },
+            .lighting => |l| {
+                const in = try self.resolve(i, l.in, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, in.box);
+                fe.light(&out, in.sfc, self.f.region, box, .{
+                    .specular = l.specular,
+                    .surface_scale = l.surface_scale,
+                    .constant = l.constant,
+                    .exponent = l.exponent,
+                    .color = colorIn(l.color orelse self.f.current, space),
+                    .light = self.lightOnCanvas(l.light),
+                });
+                self.finish(i, out, box, space);
+            },
         }
+    }
+
+    /// A light source in canvas pixels: a position through the matrix in
+    /// force, after `objectBoundingBox` units where those are in force, and
+    /// a height scaled as Filter Effects 1 scales one -- by the diagonal
+    /// over the square root of two, of the box and of the matrix.
+    fn lightOnCanvas(self: *const Chain, light: filter.Light) fe.Light {
+        const bbox = self.f.bbox;
+        const bbox_units = self.f.spec.primitive_units == .object_bounding_box;
+        const z_scale = @sqrt(self.f.scale_x * self.f.scale_x + self.f.scale_y * self.f.scale_y) / std.math.sqrt2 *
+            (if (bbox_units) @sqrt(bbox.width * bbox.width + bbox.height * bbox.height) / std.math.sqrt2 else 1);
+        const place = struct {
+            fn f(chain: *const Chain, p: [3]f64, zs: f64) [3]f64 {
+                var x = p[0];
+                var y = p[1];
+                if (chain.f.spec.primitive_units == .object_bounding_box) {
+                    x = chain.f.bbox.x + x * chain.f.bbox.width;
+                    y = chain.f.bbox.y + y * chain.f.bbox.height;
+                }
+                chain.f.ctm.userToDevice(&x, &y);
+                return .{ x, y, p[2] * zs };
+            }
+        }.f;
+        return switch (light) {
+            .distant => |d| .{ .distant = .{ d.azimuth, d.elevation } },
+            .point => |pt| .{ .point = place(self, pt, z_scale) },
+            .spot => |s| .{ .spot = .{
+                .at = place(self, s.at, z_scale),
+                .points_at = place(self, s.points_at, z_scale),
+                .exponent = s.exponent,
+                .cone = s.cone,
+            } },
+        };
     }
 
     fn finish(
@@ -1841,6 +1890,21 @@ fn roundToPixel(v: f64) i32 {
     if (!std.math.isFinite(v)) return 0;
     const limit = @as(f64, @floatFromInt(std.math.maxInt(i32) / 2));
     return @intFromFloat(@round(std.math.clamp(v, -limit, limit)));
+}
+
+/// A colour's channels, as fractions, in the space a primitive runs in; its
+/// alpha is left behind. `lighting-color`'s, which §15.14 converts as it
+/// does `flood-color`.
+fn colorIn(c: color.Color, space: filter.ColorSpace) [3]f32 {
+    const bytes: [3]u8 = switch (space) {
+        .srgb => .{ c.r, c.g, c.b },
+        .linear_rgb => .{ image.linearize(c.r), image.linearize(c.g), image.linearize(c.b) },
+    };
+    return .{
+        @as(f32, @floatFromInt(bytes[0])) / 255,
+        @as(f32, @floatFromInt(bytes[1])) / 255,
+        @as(f32, @floatFromInt(bytes[2])) / 255,
+    };
 }
 
 /// `flood-color` and `flood-opacity`, premultiplied and in the space the

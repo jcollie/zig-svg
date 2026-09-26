@@ -117,6 +117,10 @@ pub const Error = error{
     /// `numOctaves` that is not a whole number of none or more, or a `type`
     /// or `stitchTiles` that is not one of its keywords.
     BadTurbulence,
+    /// An `feDiffuseLighting` or `feSpecularLighting` with no light source,
+    /// a negative constant, a `specularExponent` outside one to 128, or a
+    /// number that does not parse.
+    BadLighting,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -210,6 +214,39 @@ pub const Kind = union(enum) {
     /// §15.23: Perlin noise, from the specification's own reference code.
     /// Reads nothing.
     turbulence: Turbulence,
+    /// §15.14 and §15.22: the input's alpha taken as a surface and lit.
+    lighting: Lighting,
+};
+
+pub const Lighting = struct {
+    in: Input,
+    /// `feSpecularLighting` rather than `feDiffuseLighting`.
+    specular: bool,
+    surface_scale: f64 = 1,
+    /// `diffuseConstant` or `specularConstant`.
+    constant: f64 = 1,
+    /// `specularExponent`, for a specular one.
+    exponent: f64 = 1,
+    /// `lighting-color`; null for `currentColor`, which is the filtered
+    /// element's.
+    color: ?color.Color,
+    light: Light,
+};
+
+/// The first light-source child of a lighting primitive.
+pub const Light = union(enum) {
+    /// §15.25, in degrees.
+    distant: struct { azimuth: f64 = 0, elevation: f64 = 0 },
+    /// §15.26, in `primitiveUnits`.
+    point: [3]f64,
+    /// §15.27.
+    spot: struct {
+        at: [3]f64,
+        points_at: [3]f64,
+        exponent: f64 = 1,
+        /// Degrees; null for no cone.
+        cone: ?f64 = null,
+    },
 };
 
 pub const Turbulence = struct {
@@ -609,6 +646,8 @@ fn readPrimitives(
             } };
         } else if (std.mem.eql(u8, name, "feConvolveMatrix")) blk: {
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
+        } else if (std.mem.eql(u8, name, "feDiffuseLighting") or std.mem.eql(u8, name, "feSpecularLighting")) blk: {
+            break :blk .{ .lighting = try lightingOf(tree, sheet, child, std.mem.eql(u8, name, "feSpecularLighting")) };
         } else if (std.mem.eql(u8, name, "feTurbulence")) blk: {
             break :blk .{ .turbulence = try turbulenceOf(tree, child) };
         } else if (std.mem.eql(u8, name, "feDisplacementMap")) blk: {
@@ -805,6 +844,76 @@ fn convolveMatrix(
         .edge = edge,
         .preserve_alpha = preserve_alpha,
     };
+}
+
+fn lightingOf(
+    tree: *const ztree.Document,
+    sheet: *const css.Stylesheet,
+    node: ztree.NodeId,
+    specular: bool,
+) Error!Lighting {
+    var l: Lighting = .{
+        .in = inputOf(tree, node, "in"),
+        .specular = specular,
+        .color = color.Color{ .r = 255, .g = 255, .b = 255 },
+        .light = undefined,
+    };
+    if (try optionalNumber(tree, node, "surfaceScale")) |v| l.surface_scale = v;
+    if (try optionalNumber(tree, node, if (specular) "specularConstant" else "diffuseConstant")) |v| {
+        if (v < 0) return error.BadLighting;
+        l.constant = v;
+    }
+    if (specular) if (try optionalNumber(tree, node, "specularExponent")) |v| {
+        if (v < 1 or v > 128) return error.BadLighting;
+        l.exponent = v;
+    };
+    if (css.property(sheet, tree, node, "lighting-color")) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        // Resolved against the filtered element, as `flood-color` is.
+        l.color = if (std.mem.eql(u8, t, "currentColor")) null else try color.parseColor(t);
+    }
+
+    const light = for (tree.node(node).children.items) |child| {
+        const n = tree.node(child);
+        if (n.kind != .element) continue;
+        const name = n.name.local;
+        if (std.mem.eql(u8, name, "feDistantLight")) break Light{ .distant = .{
+            .azimuth = try optionalNumber(tree, child, "azimuth") orelse 0,
+            .elevation = try optionalNumber(tree, child, "elevation") orelse 0,
+        } };
+        if (std.mem.eql(u8, name, "fePointLight")) break Light{ .point = try position(tree, child, "x", "y", "z") };
+        if (std.mem.eql(u8, name, "feSpotLight")) {
+            const e = try optionalNumber(tree, child, "specularExponent") orelse 1;
+            break Light{
+                .spot = .{
+                    .at = try position(tree, child, "x", "y", "z"),
+                    .points_at = try position(tree, child, "pointsAtX", "pointsAtY", "pointsAtZ"),
+                    // Filter Effects 1: a spot light's exponent is any positive
+                    // number, and one where it is not.
+                    .exponent = if (e > 0) e else 1,
+                    .cone = try optionalNumber(tree, child, "limitingConeAngle"),
+                },
+            };
+        }
+    } else return error.BadLighting;
+    l.light = light;
+    return l;
+}
+
+fn position(tree: *const ztree.Document, node: ztree.NodeId, x: []const u8, y: []const u8, z: []const u8) Error![3]f64 {
+    return .{
+        try optionalNumber(tree, node, x) orelse 0,
+        try optionalNumber(tree, node, y) orelse 0,
+        try optionalNumber(tree, node, z) orelse 0,
+    };
+}
+
+/// A finite number, or null when the attribute is absent.
+fn optionalNumber(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) Error!?f64 {
+    const raw = trimmedAttr(tree, node, name) orelse return null;
+    const v = std.fmt.parseFloat(f64, raw) catch return error.BadLighting;
+    if (!std.math.isFinite(v)) return error.BadLighting;
+    return v;
 }
 
 fn turbulenceOf(tree: *const ztree.Document, node: ztree.NodeId) Error!Turbulence {
@@ -1208,5 +1317,36 @@ test "turbulence defaults to one octave of turbulence at no frequency" {
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadTurbulence, readTest(src));
+    }
+}
+
+test "a lighting primitive reads its first light source and defaults the rest" {
+    var f = try primitivesOf("<feDiffuseLighting><feDistantLight azimuth=\"45\"/><fePointLight/></feDiffuseLighting>" ++
+        "<feSpecularLighting specularExponent=\"20\" specularConstant=\"0.5\" lighting-color=\"currentColor\"><desc/><feSpotLight x=\"1\" pointsAtZ=\"-2\" limitingConeAngle=\"30\" specularExponent=\"0\"/></feSpecularLighting>");
+    defer f.deinit(testing.allocator);
+    const d = f.primitives[0].kind.lighting;
+    try testing.expect(!d.specular);
+    try testing.expectEqual(@as(f64, 1), d.surface_scale);
+    try testing.expectEqual(@as(f64, 45), d.light.distant.azimuth);
+    try testing.expectEqual(@as(u8, 255), d.color.?.g);
+    const s = f.primitives[1].kind.lighting;
+    try testing.expect(s.specular);
+    try testing.expectEqual(@as(f64, 20), s.exponent);
+    try testing.expectEqual(@as(?color.Color, null), s.color);
+    try testing.expectEqual([3]f64{ 1, 0, 0 }, s.light.spot.at);
+    try testing.expectEqual(@as(f64, -2), s.light.spot.points_at[2]);
+    try testing.expectEqual(@as(?f64, 30), s.light.spot.cone);
+    // A spot light's exponent of nothing is taken as one.
+    try testing.expectEqual(@as(f64, 1), s.light.spot.exponent);
+
+    for ([_][]const u8{
+        "<feDiffuseLighting/>",
+        "<feDiffuseLighting diffuseConstant=\"-1\"><feDistantLight/></feDiffuseLighting>",
+        "<feSpecularLighting specularExponent=\"200\"><feDistantLight/></feSpecularLighting>",
+        "<feSpecularLighting><fePointLight z=\"high\"/></feSpecularLighting>",
+    }) |body| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
+        try testing.expectError(error.BadLighting, readTest(src));
     }
 }

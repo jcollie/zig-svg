@@ -173,6 +173,15 @@ DIVERGENCES = {
     # moves with every pixel. The same noise unstitched, `filter-turbulence`,
     # agrees to a few levels. Measured at 15.500 and 26.615%.
     "filter-turbulence-stitch": (16.5, 0.28, "resvg stitches a tile measured in pixels from the current pixel"),
+    # A coloured `lighting-color` in linearRGB. §15.14 takes it into the
+    # filter's colour space as `flood-color` is taken, and resvg converts a
+    # flood's colour but not a light's, so its light is the sRGB bytes read
+    # as linear and comes out washed pale: the same colour lit straight
+    # overhead beside the same colour flooded draws (229,168,122) and
+    # (200,100,50) in resvg, and (200,100,50) twice here. Every light in
+    # `filter-lighting` that is not white runs in sRGB and agrees. Measured
+    # at 28.500 and 50.000%.
+    "filter-lighting-color-linear": (30.0, 0.51, "resvg does not convert lighting-color into linearRGB, as it does flood-color"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

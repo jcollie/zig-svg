@@ -122,6 +122,12 @@ pub const Error = error{
     /// a negative constant, a `specularExponent` outside one to 128, or a
     /// number that does not parse.
     BadLighting,
+    /// A `filter` list that is not a list of Filter Effects 1's functions:
+    /// an unknown function, an unclosed parenthesis, or an argument of the
+    /// wrong kind -- a negative amount, a percentage where a length goes.
+    BadFilterFunction,
+    /// More functions in one `filter` list than `max_functions`.
+    TooManyFilterFunctions,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -131,6 +137,10 @@ pub const max_href_hops = 16;
 /// the kernel's area in multiplications, so this bounds the work of one
 /// primitive at 256 per pixel; the kernels documents use are three or five.
 pub const max_convolve_order = 16;
+
+/// The most functions one `filter` list may hold. Each is a filter run over
+/// the whole region in turn.
+pub const max_functions = 16;
 
 /// The most primitives one filter may chain. Each is a full-canvas surface
 /// while it is live, so this is a memory bound as much as a sanity one.
@@ -474,6 +484,234 @@ pub fn read(
         }
     }
     return result;
+}
+
+/// A `filter` list of Filter Effects 1's functions, read into the filters
+/// they abbreviate, one per function and in order: each reads what the one
+/// before produced as its `SourceGraphic`. The caller owns the slice and
+/// each filter in it.
+///
+/// A function runs in sRGB, as §12 of Filter Effects 1 says and resvg does,
+/// over its element's bounding box widened by a tenth each way -- or by a
+/// half, for `blur()` and `drop-shadow()`, which spread -- since a function
+/// has no region of its own to say; resvg makes the same choice. A `url()`
+/// among them is read as `read` reads it, and one naming nothing is a
+/// filter with no primitives, so that, as a lone dangling reference does,
+/// it leaves the element undrawn.
+pub fn parseFunctions(
+    gpa: Allocator,
+    raw: []const u8,
+    tree: *const ztree.Document,
+    ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
+    sheet: *const css.Stylesheet,
+    viewport: length.Viewport,
+) Error![]Filter {
+    var out: std.ArrayList(Filter) = .empty;
+    errdefer {
+        for (out.items) |*f| f.deinit(gpa);
+        out.deinit(gpa);
+    }
+    var rest = std.mem.trim(u8, raw, " \t\r\n");
+    while (rest.len > 0) {
+        if (out.items.len == max_functions) return error.TooManyFilterFunctions;
+        const open = std.mem.indexOfScalar(u8, rest, '(') orelse return error.BadFilterFunction;
+        const name = std.mem.trim(u8, rest[0..open], " \t\r\n");
+        const close = matching(rest, open) orelse return error.BadFilterFunction;
+        const args = std.mem.trim(u8, rest[open + 1 .. close], " \t\r\n");
+        rest = std.mem.trimStart(u8, rest[close + 1 ..], " \t\r\n");
+        try out.ensureUnusedCapacity(gpa, 1);
+        out.appendAssumeCapacity(try function(gpa, name, args, tree, ids, sheet, viewport));
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// The parenthesis closing the one at `open`, counting any inside it.
+fn matching(s: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    for (s[open..], open..) |c, i| {
+        if (c == '(') depth += 1;
+        if (c == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+fn function(
+    gpa: Allocator,
+    name: []const u8,
+    args: []const u8,
+    tree: *const ztree.Document,
+    ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
+    sheet: *const css.Stylesheet,
+    viewport: length.Viewport,
+) Error!Filter {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(name, "url")) {
+        const target = std.mem.trim(u8, args, " \t\r\n'\"");
+        if (target.len < 2 or target[0] != '#') return error.BadFilterFunction;
+        const node = ids.get(target[1..]) orelse return .{};
+        return try read(gpa, tree, ids, sheet, node, viewport) orelse .{};
+    }
+
+    var kind: Kind = undefined;
+    var spreads = false;
+    var numbers: []f64 = &.{};
+    errdefer gpa.free(numbers);
+    if (eq(name, "blur")) {
+        const s = if (args.len == 0) 0 else try cssLength(args, viewport);
+        kind = .{ .gaussian_blur = .{ .in = .source_graphic, .std_dev_x = s, .std_dev_y = s } };
+        spreads = true;
+    } else if (eq(name, "drop-shadow")) {
+        kind = .{ .drop_shadow = try dropShadowFunction(args, viewport) };
+        spreads = true;
+    } else if (eq(name, "hue-rotate")) {
+        kind = .{ .color_matrix = .{ .in = .source_graphic, .matrix = hueRotateMatrix(if (args.len == 0) 0 else try cssAngle(args)) } };
+    } else {
+        // The rest take one amount: a number or a percentage, one by
+        // default, and never negative.
+        const amount = if (args.len == 0) 1 else try cssAmount(args);
+        const capped = @min(amount, 1);
+        if (eq(name, "grayscale")) {
+            kind = .{ .color_matrix = .{ .in = .source_graphic, .matrix = grayscaleMatrix(capped) } };
+        } else if (eq(name, "sepia")) {
+            kind = .{ .color_matrix = .{ .in = .source_graphic, .matrix = sepiaMatrix(capped) } };
+        } else if (eq(name, "saturate")) {
+            kind = .{ .color_matrix = .{ .in = .source_graphic, .matrix = saturateMatrix(amount) } };
+        } else if (eq(name, "brightness") or eq(name, "contrast")) {
+            const f: TransferFunction = .{
+                .kind = .linear,
+                .slope = amount,
+                .intercept = if (eq(name, "contrast")) 0.5 - 0.5 * amount else 0,
+            };
+            kind = .{ .component_transfer = .{ .in = .source_graphic, .funcs = .{ f, f, f, .{} } } };
+        } else if (eq(name, "invert")) {
+            numbers = try gpa.dupe(f64, &.{ capped, 1 - capped });
+            const f: TransferFunction = .{ .kind = .table, .first = 0, .count = 2 };
+            kind = .{ .component_transfer = .{ .in = .source_graphic, .funcs = .{ f, f, f, .{} } } };
+        } else if (eq(name, "opacity")) {
+            numbers = try gpa.dupe(f64, &.{ 0, capped });
+            kind = .{ .component_transfer = .{ .in = .source_graphic, .funcs = .{ .{}, .{}, .{}, .{ .kind = .table, .first = 0, .count = 2 } } } };
+        } else return error.BadFilterFunction;
+    }
+
+    const primitives = try gpa.alloc(Primitive, 1);
+    primitives[0] = .{ .kind = kind, .color_space = .srgb };
+    return .{
+        .x = if (spreads) -0.5 else -0.1,
+        .y = if (spreads) -0.5 else -0.1,
+        .width = if (spreads) 2 else 1.2,
+        .height = if (spreads) 2 else 1.2,
+        .primitives = primitives,
+        .numbers = numbers,
+    };
+}
+
+/// `grayscale()`, from Filter Effects 1 §13.2: the Rec. 709 luminance
+/// weights, as that definition writes them -- not quite `saturate`'s.
+fn grayscaleMatrix(a: f64) [20]f64 {
+    const s = 1 - a;
+    return .{
+        0.2126 + 0.7874 * s, 0.7152 - 0.7152 * s, 0.0722 - 0.0722 * s, 0, 0,
+        0.2126 - 0.2126 * s, 0.7152 + 0.2848 * s, 0.0722 - 0.0722 * s, 0, 0,
+        0.2126 - 0.2126 * s, 0.7152 - 0.7152 * s, 0.0722 + 0.9278 * s, 0, 0,
+        0,                   0,                   0,                   1, 0,
+    };
+}
+
+fn sepiaMatrix(a: f64) [20]f64 {
+    const s = 1 - a;
+    return .{
+        0.393 + 0.607 * s, 0.769 - 0.769 * s, 0.189 - 0.189 * s, 0, 0,
+        0.349 - 0.349 * s, 0.686 + 0.314 * s, 0.168 - 0.168 * s, 0, 0,
+        0.272 - 0.272 * s, 0.534 - 0.534 * s, 0.131 + 0.869 * s, 0, 0,
+        0,                 0,                 0,                 1, 0,
+    };
+}
+
+/// A number or a percentage, never negative.
+fn cssAmount(t: []const u8) Error!f64 {
+    const pct = std.mem.endsWith(u8, t, "%");
+    const v = std.fmt.parseFloat(f64, if (pct) t[0 .. t.len - 1] else t) catch return error.BadFilterFunction;
+    if (!std.math.isFinite(v) or v < 0) return error.BadFilterFunction;
+    return if (pct) v / 100 else v;
+}
+
+/// A CSS angle, in degrees; a unit is required except on zero.
+fn cssAngle(t: []const u8) Error!f64 {
+    const units = [_]struct { []const u8, f64 }{
+        .{ "deg", 1 }, .{ "grad", 0.9 }, .{ "rad", 180.0 / std.math.pi }, .{ "turn", 360 },
+    };
+    for (units) |u| {
+        if (std.ascii.endsWithIgnoreCase(t, u[0])) {
+            const v = std.fmt.parseFloat(f64, t[0 .. t.len - u[0].len]) catch return error.BadFilterFunction;
+            if (!std.math.isFinite(v)) return error.BadFilterFunction;
+            return v * u[1];
+        }
+    }
+    const v = std.fmt.parseFloat(f64, t) catch return error.BadFilterFunction;
+    if (v != 0) return error.BadFilterFunction;
+    return 0;
+}
+
+/// A CSS length in user units, never a percentage.
+fn cssLength(t: []const u8, viewport: length.Viewport) Error!f64 {
+    if (std.mem.endsWith(u8, t, "%")) return error.BadFilterFunction;
+    const v = length.parse(t, .x, viewport) catch return error.BadFilterFunction;
+    if (!std.math.isFinite(v)) return error.BadFilterFunction;
+    return v;
+}
+
+/// `drop-shadow()`: two or three lengths -- offset, then blur -- and a colour
+/// before or after them, `currentColor` when there is none.
+fn dropShadowFunction(args: []const u8, viewport: length.Viewport) Error!@FieldType(Kind, "drop_shadow") {
+    var lengths: [3]f64 = .{ 0, 0, 0 };
+    var n: usize = 0;
+    var shade: ?color.Color = null;
+    var colored = false;
+    // Set once a colour has followed some lengths: any more lengths after
+    // that would sit either side of it.
+    var closed = false;
+    var i: usize = 0;
+    while (i < args.len) {
+        while (i < args.len and std.ascii.isWhitespace(args[i])) i += 1;
+        if (i == args.len) break;
+        // One token, which may itself hold parentheses: `rgb(1 2 3)`.
+        const start = i;
+        var depth: usize = 0;
+        while (i < args.len and (depth > 0 or !std.ascii.isWhitespace(args[i]))) : (i += 1) {
+            if (args[i] == '(') depth += 1;
+            if (args[i] == ')') depth -|= 1;
+        }
+        const tok = args[start..i];
+        const c = tok[0];
+        if (std.ascii.isDigit(c) or c == '-' or c == '+' or c == '.') {
+            // Lengths are one run: a colour cannot sit between them.
+            if (n == 3 or closed) return error.BadFilterFunction;
+            lengths[n] = try cssLength(tok, viewport);
+            n += 1;
+        } else {
+            if (colored) return error.BadFilterFunction;
+            colored = true;
+            closed = n > 0;
+            shade = if (std.ascii.eqlIgnoreCase(tok, "currentColor"))
+                null
+            else
+                color.parseColor(tok) catch return error.BadFilterFunction;
+        }
+    }
+    if (n < 2) return error.BadFilterFunction;
+    if (lengths[2] < 0) return error.BadFilterFunction;
+    return .{
+        .in = .source_graphic,
+        .dx = lengths[0],
+        .dy = lengths[1],
+        .std_dev_x = lengths[2],
+        .std_dev_y = lengths[2],
+        .color = shade,
+        .opacity = 1,
+    };
 }
 
 /// The filter this one takes its unnamed attributes and its primitives from.
@@ -1443,4 +1681,58 @@ test "an feImage reads its href, fitting and sampling" {
     try testing.expectEqualStrings("#a", b.href.?);
     try testing.expect(b.preserve_aspect_ratio.slice);
     try testing.expectEqual(resample.Sampling.nearest, b.sampling);
+}
+
+fn functionsOf(raw: []const u8) ![]Filter {
+    var doc = try document.read(testing.allocator, "<svg viewBox=\"0 0 100 100\"><filter id=\"f\"><feOffset/></filter><rect width=\"8\" height=\"8\"/></svg>");
+    defer doc.deinit();
+    return parseFunctions(testing.allocator, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport());
+}
+
+fn freeFunctions(fs: []Filter) void {
+    for (fs) |*f| f.deinit(testing.allocator);
+    testing.allocator.free(fs);
+}
+
+test "a filter list reads each function into the filter it abbreviates" {
+    const fs = try functionsOf(" grayscale(50%)  url(#f) blur(2px) drop-shadow(1px -2px 3px red) invert() hue-rotate(0.5turn) url(#none) ");
+    defer freeFunctions(fs);
+    try testing.expectEqual(@as(usize, 7), fs.len);
+    // grayscale at a half, in sRGB, over the box widened by a tenth.
+    try testing.expectApproxEqAbs(@as(f64, 0.2126 + 0.7874 * 0.5), fs[0].primitives[0].kind.color_matrix.matrix[0], 1e-12);
+    try testing.expectEqual(ColorSpace.srgb, fs[0].primitives[0].color_space);
+    try testing.expectEqual(@as(f64, -0.1), fs[0].x);
+    // The url is the filter it names.
+    try testing.expect(fs[1].primitives[0].kind == .offset);
+    // blur spreads, so its box is widened by a half.
+    try testing.expectEqual(@as(f64, 2), fs[2].primitives[0].kind.gaussian_blur.std_dev_x);
+    try testing.expectEqual(@as(f64, 2), fs[2].width);
+    const shadow = fs[3].primitives[0].kind.drop_shadow;
+    try testing.expectEqual(@as(f64, -2), shadow.dy);
+    try testing.expectEqual(@as(f64, 3), shadow.std_dev_y);
+    try testing.expectEqual(@as(u8, 255), shadow.color.?.r);
+    try testing.expectEqualSlices(f64, &.{ 1, 0 }, fs[4].numbers);
+    try testing.expectApproxEqAbs(@as(f64, -0.574), fs[5].primitives[0].kind.color_matrix.matrix[0], 1e-9);
+    // A url naming nothing is a filter with nothing in it.
+    try testing.expect(fs[6].isEmpty());
+}
+
+test "a drop shadow's colour goes either side of its lengths, but not between them" {
+    const before = try functionsOf("drop-shadow(rgba(0, 0, 0, 0.5) 2px 3px)");
+    defer freeFunctions(before);
+    try testing.expectEqual(@as(f64, 0.5), before[0].primitives[0].kind.drop_shadow.color.?.alpha);
+    const none = try functionsOf("drop-shadow(2px 3px)");
+    defer freeFunctions(none);
+    try testing.expectEqual(@as(?color.Color, null), none[0].primitives[0].kind.drop_shadow.color);
+    try testing.expectError(error.BadFilterFunction, functionsOf("drop-shadow(2px red 3px)"));
+}
+
+test "a filter list that does not parse is refused" {
+    for ([_][]const u8{
+        "sharpen(2)",       "blur(2px",                     "grayscale(-1)",             "blur(10%)", "hue-rotate(90)",
+        "drop-shadow(2px)", "drop-shadow(1px 2px 3px 4px)", "drop-shadow(1px 2px -3px)", "url(f)",    "blur 2px",
+    }) |raw| {
+        try testing.expectError(error.BadFilterFunction, functionsOf(raw));
+    }
+    try testing.expectError(error.TooManyFilterFunctions, functionsOf("invert() " ** 17));
 }

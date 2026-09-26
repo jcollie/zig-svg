@@ -212,6 +212,16 @@ pub const ViewBox = struct {
 };
 
 /// How a `viewBox` is fitted into the box it is drawn in -- SVG 1.1 §7.8.
+/// What an element's `filter` property says.
+pub const FilterValue = union(enum) {
+    /// `url(#id)`: a `<filter>`, or a dangling reference, which §15.7.1
+    /// makes the element not render.
+    reference: []const u8,
+    /// Filter Effects 1's filter functions, as written, borrowed from the
+    /// tree: `blur(2px) grayscale(50%) url(#f)`.
+    functions: []const u8,
+};
+
 pub const PreserveAspectRatio = struct {
     /// Where the extra space goes along each axis when the two do not have the
     /// same proportions.
@@ -433,7 +443,7 @@ pub const Image = struct {
     opacity: f64,
     clip_path: ?[]const u8,
     mask: ?[]const u8,
-    filter: ?[]const u8,
+    filter: ?FilterValue,
     /// The `color` in force, which a `currentColor` in its filter resolves to.
     current_color: ?color.Color,
     /// False under `visibility: hidden`; see `Shape.visible`.
@@ -461,7 +471,7 @@ pub const Group = struct {
     /// The id of a `<filter>` the finished layer is put through, or null.
     /// §15 applies it before the clip, the mask and the opacity, so it sees
     /// the layer as painted and they see what it produced.
-    filter: ?[]const u8,
+    filter: ?FilterValue,
     /// The `color` in force on the container, which is what a `currentColor`
     /// inside its filter resolves to. Carried because a filter's own elements
     /// inherit nothing from the document -- they are in `<defs>`.
@@ -499,7 +509,7 @@ pub const ViewportClip = struct {
 const Refs = struct {
     clip_path: ?[]const u8,
     mask: ?[]const u8,
-    filter: ?[]const u8,
+    filter: ?FilterValue,
 
     /// Whether the element needs a surface of its own. Any of the three does
     /// it: a clip and a mask because `dst_in` is a whole-surface operation,
@@ -545,7 +555,7 @@ pub const Shape = struct {
     clip_path: ?[]const u8,
     /// The id of a `<filter>` this shape's rendering is put through, or
     /// null. §15 applies it before the clip, the mask and the opacity.
-    filter: ?[]const u8,
+    filter: ?FilterValue,
     /// The id of a `<mask>` this shape is cut to, or null. Not inherited
     /// either, and a shape may carry both.
     mask: ?[]const u8,
@@ -1334,8 +1344,25 @@ pub const PathIterator = struct {
         return .{
             .clip_path = try self.referenceAttr(node, "clip-path"),
             .mask = try self.referenceAttr(node, "mask"),
-            .filter = try self.referenceAttr(node, "filter"),
+            .filter = self.filterValue(node),
         };
+    }
+
+    /// What an element's `filter` says: one `url(#...)`, or a list of CSS
+    /// filter functions -- perhaps with `url()`s among them -- left for
+    /// `filter.parseFunctions` to read, since that is where filters are
+    /// made. Null for `none`.
+    fn filterValue(self: *const PathIterator, node: ztree.NodeId) ?FilterValue {
+        const raw = self.presentation(node, "filter") orelse return null;
+        const t = std.mem.trim(u8, raw, " \t\r\n");
+        if (t.len == 0 or std.mem.eql(u8, t, "none")) return null;
+        // A single reference is the whole value, closed by its only
+        // parenthesis; `url(#a) blur(2px)` is a list that happens to start
+        // with one.
+        if (std.mem.indexOfScalar(u8, t, ')') == t.len - 1) {
+            if (referenceId(t)) |id| return .{ .reference = id };
+        }
+        return .{ .functions = t };
     }
 
     /// The id a `url(#...)` attribute names, or null when it names nothing.
@@ -3565,4 +3592,28 @@ test "a marker's attributes default as SVG says" {
     try testing.expectEqual(MarkerSpec.Orient.auto, b.orient);
     try testing.expect(!b.stroke_width_units and !b.clips and b.view_box != null);
     try testing.expectError(error.BadMarker, doc.markerSpec(doc.ids.get("c").?));
+}
+
+test "filter is one reference, or a list of functions" {
+    var doc = try read(testing.allocator, "<svg viewBox=\"0 0 8 8\">" ++
+        "<rect width=\"1\" height=\"1\" filter=\" url(#a) \"/>" ++
+        "<rect width=\"1\" height=\"1\" filter=\"url(#a) blur(2px)\"/>" ++
+        "<rect width=\"1\" height=\"1\" style=\"filter: grayscale(1)\"/>" ++
+        "<rect width=\"1\" height=\"1\" filter=\"none\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var seen: [3]FilterValue = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.filter) |f| {
+            seen[n] = f;
+            n += 1;
+        },
+        else => {},
+    };
+    // `none` is no filter at all.
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("a", seen[0].reference);
+    try testing.expectEqualStrings("url(#a) blur(2px)", seen[1].functions);
+    try testing.expectEqualStrings("grayscale(1)", seen[2].functions);
 }

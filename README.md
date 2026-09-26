@@ -359,6 +359,17 @@ subregion's corner instead, which is a recorded divergence. An element that
 filters itself through its own `feImage` is bounded by `Limits.max_mask_depth`,
 and a reference to nothing draws nothing.
 
+The `filter` property also takes Filter Effects 1's functions — `blur()`,
+`drop-shadow()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`,
+`invert()`, `opacity()`, `brightness()` and `contrast()` — in a list, with
+`url()`s among them, each run on what the one before produced. Each is the
+filter its definition gives, in sRGB, over the element's bounding box widened
+by a tenth each way, or by a half for the two that spread: a function has no
+region of its own to say, and resvg makes the same choice. A list that does
+not parse is refused, where resvg drops the whole property; resvg also cannot
+read a functional colour such as `rgba()` inside `drop-shadow()`, which this
+can. At most `filter.max_functions` (16) are allowed in one list.
+
 **A filter runs on the canvas, not in user space.** A `stdDeviation` in user
 units becomes a standard deviation in device pixels by the scale of the matrix
 in force, and the rotation in that matrix is deliberately *not* carried: a
@@ -533,6 +544,7 @@ short of the specification.
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
 | `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`, `feSpecularLighting` and the three light sources, `feDropShadow`, `feImage` of a picture or an element; any other `fe` element is refused |
+| Filter functions in `filter` | all ten of Filter Effects 1, in a list with `url()`s, to `filter.max_functions` (16) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |
 | `filterRes` | ignored, as resvg ignores it |
@@ -1011,11 +1023,11 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Next are the CSS filter functions. Outside those, what SVG 1.1 has that this
-does not is `@media`, the CSS pseudo-classes, the `spacingAndGlyphs` form of
-`lengthAdjust`, and an `<image>` of another SVG document, which wants a render
-nested in a render with its own viewport and a share of the budget. Each is
-refused rather than ignored, so a document needing one says so.
+What SVG 1.1 has that this does not is `@media`, the CSS pseudo-classes, the
+`spacingAndGlyphs` form of `lengthAdjust`, and an `<image>` of another SVG
+document, which wants a render nested in a render with its own viewport and a
+share of the budget. Each is refused rather than ignored, so a document needing
+one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

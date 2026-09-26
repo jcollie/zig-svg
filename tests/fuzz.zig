@@ -142,7 +142,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feDiffuseLightingfeSpecularLightingsurfaceScalediffuseConstantspecularConstantspecularExponentlighting-color" ++
     "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle" ++
     "feDropShadowdxdystdDeviationflood-colorflood-opacity" ++
-    "feImagehrefxlink:hrefpreserveAspectRatioimage-renderingoptimizeSpeed#";
+    "feImagehrefxlink:hrefpreserveAspectRatioimage-renderingoptimizeSpeed#" ++
+    "blur(drop-shadow(grayscale(sepia(saturate(hue-rotate(invert(opacity(brightness(contrast(url(#)%pxdegturnradgrad";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -968,6 +969,9 @@ const document_corpus = [_][]const u8{
     // feImage of an element in bounding-box units, of a missing one, of the
     // element filtering itself, and of a picture.
     "<svg viewBox=\"0 0 8 8\"><defs><circle id=\"c\" cx=\"2\" cy=\"2\" r=\"2\" fill=\"red\"/></defs><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feImage href=\"#c\" x=\"0.5\"/><feImage href=\"#none\"/><feImage href=\"#r\" result=\"r\"/><feImage href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMaxYMid slice\" width=\"2\"/></filter><rect id=\"r\" width=\"4\" height=\"4\" filter=\"url(#f)\"/></svg>",
+    // Filter functions, alone and in a list with a url, in both the
+    // attribute and a style.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\"/></filter><rect width=\"4\" height=\"4\" fill=\"teal\" filter=\"sepia(50%) url(#f) hue-rotate(1rad) drop-shadow(red 1px 1px 1px)\"/><circle cx=\"6\" cy=\"6\" r=\"1\" style=\"filter: blur(0.5px) invert() opacity(0.5) contrast(3) brightness(0) url(#nothing)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

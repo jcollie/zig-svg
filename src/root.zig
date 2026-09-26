@@ -16,15 +16,14 @@
 //! The static half of SVG 1.1: paths and the basic shapes, `<g>`, `<a>`,
 //! `<use>` and `<symbol>`, nested `<svg>` viewports, `<switch>` and the
 //! conditional attributes, `display` and `visibility`, transforms, fills and
-//! strokes with every property that goes with them, markers and
-//! `paint-order`, gradients and patterns, clipping and masking, the commonest
-//! `<filter>`
-//! primitives, CSS in a `style` attribute or a `<style>` element, `<text>` and
-//! `<tspan>` with the fonts the caller supplies, and `<image>` with the
-//! pictures z2dimg decodes. The path data grammar of §8.3 is complete,
+//! strokes with every property that goes with them, markers and `paint-order`,
+//! gradients and patterns, clipping and masking, every `<filter>` primitive and
+//! the CSS filter functions, CSS in a `style` attribute or a `<style>` element,
+//! `<text>` and `<tspan>` with the fonts the caller supplies, and `<image>`
+//! with the pictures z2dimg decodes. The path data grammar of §8.3 is complete,
 //! elliptical arcs included, and so is §7.8's `preserveAspectRatio`.
-//! `README.md` has the table, and `tests/oracle` has a fixture for each of
-//! them checked against resvg.
+//! `README.md` has the table, and `tests/oracle` has a fixture for each of them
+//! checked against resvg.
 //!
 //! What it does not draw is the half that makes SVG a programming language
 //! rather than a picture format -- scripting, animation, `<foreignObject>`,

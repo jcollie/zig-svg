@@ -206,6 +206,14 @@ DIVERGENCES = {
     # the origin where the two come to the same thing, agrees. Measured at
     # 12.109 and 7.963%.
     "filter-image-element-offset": (13.0, 0.085, "resvg draws an feImage element from the subregion's corner, not user space"),
+    # The CSS filter functions that blur: `blur()` and `drop-shadow()`. Every
+    # colour and every offset agrees; what differs is the blur kernel, as in
+    # the entries above, a level or four across the whole of a large blurred
+    # area rather than along an edge. (The shadows are black on purpose: a
+    # coloured `drop-shadow()` meets the sRGB conversion recorded for
+    # `filter-drop-shadow-srgb`, since functions always run in sRGB.)
+    # Measured at 1.396 and 0.549%.
+    "filter-functions-spread": (1.6, 0.006, "blur kernel, in blur() and drop-shadow()"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

@@ -661,6 +661,8 @@ const WireError = enum(u16) {
     bad_displacement_map = 87,
     bad_turbulence = 88,
     bad_lighting = 89,
+    bad_filter_function = 90,
+    too_many_filter_functions = 91,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -754,6 +756,8 @@ fn wireFromError(err: anyerror) WireError {
         error.BadDisplacementMap => .bad_displacement_map,
         error.BadTurbulence => .bad_turbulence,
         error.BadLighting => .bad_lighting,
+        error.BadFilterFunction => .bad_filter_function,
+        error.TooManyFilterFunctions => .too_many_filter_functions,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -862,6 +866,8 @@ fn wireToError(status: u16) Error {
         .bad_displacement_map => error.BadDisplacementMap,
         .bad_turbulence => error.BadTurbulence,
         .bad_lighting => error.BadLighting,
+        .bad_filter_function => error.BadFilterFunction,
+        .too_many_filter_functions => error.TooManyFilterFunctions,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1162,6 +1168,8 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadDisplacementMap, .bad_displacement_map },
         .{ error.BadTurbulence, .bad_turbulence },
         .{ error.BadLighting, .bad_lighting },
+        .{ error.BadFilterFunction, .bad_filter_function },
+        .{ error.TooManyFilterFunctions, .too_many_filter_functions },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

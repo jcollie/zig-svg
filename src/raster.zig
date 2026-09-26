@@ -1303,9 +1303,15 @@ const Filtered = struct {
     doc: *const document.Document,
     pass: Pass,
     opts: Options,
+    /// The filters after this one in a `filter` list, run in turn on what
+    /// this one produced. Owned, and each owns its own `rest`, which is
+    /// always empty.
+    rest: []Filtered = &.{},
 
     fn deinit(self: *Filtered, gpa: Allocator) void {
         self.spec.deinit(gpa);
+        for (self.rest) |*r| r.deinit(gpa);
+        gpa.free(self.rest);
     }
 };
 
@@ -1321,7 +1327,7 @@ const Filtered = struct {
 fn buildFilter(
     gpa: Allocator,
     doc: *const document.Document,
-    id: ?[]const u8,
+    value: ?document.FilterValue,
     ctm: z2d.Transformation,
     subject: Subject,
     current: color.Color,
@@ -1330,17 +1336,79 @@ fn buildFilter(
     opts: Options,
     pass: Pass,
 ) Error!?Filtered {
-    const name = id orelse return null;
-
-    var spec: filter.Filter = blk: {
-        const node = doc.ids.get(name) orelse break :blk .{};
-        break :blk try filter.read(gpa, doc.tree, &doc.ids, &doc.stylesheet, node, doc.viewport()) orelse .{};
-    };
-    errdefer spec.deinit(gpa);
-
+    const v = value orelse return null;
     // Measured only when something actually asks in bounding-box units, which
-    // is the common case for the region and the rare one for the primitives.
+    // is the common case for the region and the rare one for the primitives,
+    // and then once for every filter in a list.
     var measure: Measure = .{ .subject = subject };
+    const common: FilterContext = .{
+        .doc = doc,
+        .ctm = ctm,
+        .current = current,
+        .width = width,
+        .height = height,
+        .opts = opts,
+        .pass = pass,
+    };
+    switch (v) {
+        .reference => |name| {
+            const spec: filter.Filter = blk: {
+                const node = doc.ids.get(name) orelse break :blk .{};
+                break :blk try filter.read(gpa, doc.tree, &doc.ids, &doc.stylesheet, node, doc.viewport()) orelse .{};
+            };
+            // `filterStage` owns `spec` from here, failing or not.
+            return try filterStage(gpa, spec, &measure, common);
+        },
+        .functions => |raw| {
+            const specs = try filter.parseFunctions(gpa, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport());
+            // Each spec passes to `filterStage` as it is handed over, which
+            // frees it if it fails; what has not been handed over yet is
+            // freed here. So the count moves *before* each call.
+            var handed: usize = 0;
+            defer gpa.free(specs);
+            errdefer for (specs[handed..]) |*s| s.deinit(gpa);
+            if (specs.len == 0) return null;
+            handed = 1;
+            var first = try filterStage(gpa, specs[0], &measure, common);
+            errdefer first.deinit(gpa);
+            const rest = try gpa.alloc(Filtered, specs.len - 1);
+            var built: usize = 0;
+            errdefer {
+                for (rest[0..built]) |*r| r.deinit(gpa);
+                gpa.free(rest);
+            }
+            for (specs[1..], rest) |spec, *slot| {
+                handed += 1;
+                slot.* = try filterStage(gpa, spec, &measure, common);
+                built += 1;
+            }
+            first.rest = rest;
+            return first;
+        },
+    }
+}
+
+/// What every filter in one element's `filter` shares.
+const FilterContext = struct {
+    doc: *const document.Document,
+    ctm: z2d.Transformation,
+    current: color.Color,
+    width: i32,
+    height: i32,
+    opts: Options,
+    pass: Pass,
+};
+
+/// One filter worked out for this canvas. Takes `spec` whether it succeeds
+/// or not.
+fn filterStage(gpa: Allocator, spec_in: filter.Filter, measure: *Measure, c: FilterContext) Error!Filtered {
+    var spec = spec_in;
+    errdefer spec.deinit(gpa);
+    const doc = c.doc;
+    const ctm = c.ctm;
+    const opts = c.opts;
+    const width = c.width;
+    const height = c.height;
     const bbox: Box = if (spec.units == .object_bounding_box or
         spec.primitive_units == .object_bounding_box)
         try measure.get(gpa, doc, opts)
@@ -1363,13 +1431,13 @@ fn buildFilter(
         .region = pixelBoxOf(mappedBounds(ctm, region_user)).intersect(canvas),
         .region_user = region_user,
         .doc = doc,
-        .pass = pass,
+        .pass = c.pass,
         .opts = opts,
         .scale_x = std.math.hypot(ctm.ax, ctm.cx),
         .scale_y = std.math.hypot(ctm.by, ctm.dy),
         .ctm = ctm,
         .bbox = bbox,
-        .current = current,
+        .current = c.current,
     };
 }
 
@@ -1402,8 +1470,14 @@ fn pixelBoxToUser(b: image.PixelBox) Box {
 }
 
 /// Run a filter chain over the layer it applies to, replacing the layer's
-/// content with what came out.
+/// content with what came out -- and then each filter after it in a
+/// `filter` list, over what the one before made.
 fn runFilter(gpa: Allocator, target: *z2d.Surface, f: Filtered) Error!void {
+    try runOne(gpa, target, f);
+    for (f.rest) |r| try runOne(gpa, target, r);
+}
+
+fn runOne(gpa: Allocator, target: *z2d.Surface, f: Filtered) Error!void {
     const clear: z2d.pixel.RGBA = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
     const n = f.spec.primitives.len;
 

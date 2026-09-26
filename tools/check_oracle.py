@@ -165,6 +165,14 @@ DIVERGENCES = {
     # formula gives two. `filter-displacement-map`, at a scale of one where
     # the two agree, matches to a level. Measured at 48.113 and 40.975%.
     "filter-displacement-map-scale": (50.0, 0.42, "resvg displaces by the square of the scale"),
+    # `feTurbulence stitchTiles="stitch"`. §15.23 stitches across the
+    # primitive subregion in user space. resvg hands the reference code the
+    # current pixel's index as the tile's origin and the region's width in
+    # pixels as its width, while the noise itself is sampled in user units,
+    # so its frequencies are nudged for the wrong tile and its wrap point
+    # moves with every pixel. The same noise unstitched, `filter-turbulence`,
+    # agrees to a few levels. Measured at 15.500 and 26.615%.
+    "filter-turbulence-stitch": (16.5, 0.28, "resvg stitches a tile measured in pixels from the current pixel"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

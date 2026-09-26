@@ -595,6 +595,208 @@ pub fn displace(
     }
 }
 
+/// How a canvas pixel maps back to the user space the noise is a function
+/// of: its position less `origin`, divided by `scale`.
+pub const NoiseSpace = struct {
+    origin_x: f64,
+    origin_y: f64,
+    scale_x: f64,
+    scale_y: f64,
+};
+
+/// `feTurbulence`, §15.23: every pixel of `box` in `out` a sample of Perlin
+/// noise, one independent noise per channel.
+///
+/// This is the reference code the specification gives, ported as it stands --
+/// the generator, the lattice, the gradients and the stitching arithmetic
+/// down to the order of the operations -- because any other noise, however
+/// good, is a different picture. Each pixel is sampled at its corner mapped
+/// into user space, which is where resvg samples it too. With `stitch` the
+/// frequencies are nudged so that the noise tiles across the primitive's
+/// subregion, in user space as §15.23 says.
+///
+/// The noise is straight colour in the primitive's colour space, and is
+/// multiplied by its own alpha on the way into the surface.
+pub fn turbulence(out: *z2d.Surface, box: image.PixelBox, t: filter.Turbulence, space: NoiseSpace) void {
+    const clipped = box.intersect(image.extent(out));
+    if (clipped.isEmpty() or !(space.scale_x > 0) or !(space.scale_y > 0)) return;
+    const noise: Noise = .init(t.seed);
+    const w = out.getWidth();
+    const dst = out.image_surface_rgba.buf;
+    // The stitching stitch_tile is the subregion, taken into user space.
+    const stitch_tile: [4]f64 = .{
+        (@as(f64, @floatFromInt(clipped.x0)) - space.origin_x) / space.scale_x,
+        (@as(f64, @floatFromInt(clipped.y0)) - space.origin_y) / space.scale_y,
+        @as(f64, @floatFromInt(clipped.x1 - clipped.x0)) / space.scale_x,
+        @as(f64, @floatFromInt(clipped.y1 - clipped.y0)) / space.scale_y,
+    };
+    var y = clipped.y0;
+    while (y < clipped.y1) : (y += 1) {
+        var x = clipped.x0;
+        while (x < clipped.x1) : (x += 1) {
+            const point: [2]f64 = .{
+                (@as(f64, @floatFromInt(x)) - space.origin_x) / space.scale_x,
+                (@as(f64, @floatFromInt(y)) - space.origin_y) / space.scale_y,
+            };
+            var c: [4]f32 = undefined;
+            for (0..4) |ch| {
+                const n = noise.turbulence(ch, point, stitch_tile, t);
+                const v = if (t.fractal_noise) (n + 1) / 2 else n;
+                c[ch] = @floatCast(std.math.clamp(v, 0, 1));
+            }
+            dst[@intCast(y * w + x)] = premultiplied(c);
+        }
+    }
+}
+
+const b_size = 0x100;
+const b_len = b_size + b_size + 2;
+const bm = 0xff;
+const perlin_n = 0x1000;
+const rand_m: i32 = 2147483647;
+const rand_a: i32 = 16807;
+const rand_q: i32 = 127773;
+const rand_r: i32 = 2836;
+
+/// The reference code's lattice and gradients, for one seed.
+const Noise = struct {
+    lattice: [b_len]usize,
+    gradient: [4][b_len][2]f64,
+
+    fn random(seed: i32) i32 {
+        var result = rand_a * @rem(seed, rand_q) - rand_r * @divTrunc(seed, rand_q);
+        if (result <= 0) result += rand_m;
+        return result;
+    }
+
+    fn init(seed_in: i32) Noise {
+        var self: Noise = undefined;
+        var seed = seed_in;
+        if (seed <= 0) seed = @rem(-seed, rand_m - 1) + 1;
+        if (seed > rand_m - 1) seed = rand_m - 1;
+        for (0..4) |k| {
+            for (0..b_size) |i| {
+                self.lattice[i] = i;
+                for (0..2) |j| {
+                    seed = random(seed);
+                    self.gradient[k][i][j] = @as(f64, @floatFromInt(@rem(seed, b_size + b_size) - b_size)) / b_size;
+                }
+                const g = &self.gradient[k][i];
+                const len = @sqrt(g[0] * g[0] + g[1] * g[1]);
+                g[0] /= len;
+                g[1] /= len;
+            }
+        }
+        var i: usize = b_size - 1;
+        while (i > 0) : (i -= 1) {
+            const k = self.lattice[i];
+            seed = random(seed);
+            const j: usize = @intCast(@rem(seed, b_size));
+            self.lattice[i] = self.lattice[j];
+            self.lattice[j] = k;
+        }
+        for (0..b_size + 2) |n| {
+            self.lattice[b_size + n] = self.lattice[n];
+            for (0..4) |k| self.gradient[k][b_size + n] = self.gradient[k][n];
+        }
+        return self;
+    }
+
+    const Stitch = struct { width: i32, height: i32, wrap_x: i32, wrap_y: i32 };
+
+    fn noise2(self: *const Noise, ch: usize, x: f64, y: f64, stitch: ?Stitch) f64 {
+        const tx = x + perlin_n;
+        var bx0: i32 = truncate(tx);
+        var bx1 = bx0 +% 1;
+        const rx0 = tx - @trunc(tx);
+        const rx1 = rx0 - 1;
+        const ty = y + perlin_n;
+        var by0: i32 = truncate(ty);
+        var by1 = by0 +% 1;
+        const ry0 = ty - @trunc(ty);
+        const ry1 = ry0 - 1;
+        if (stitch) |st| {
+            if (bx0 >= st.wrap_x) bx0 -%= st.width;
+            if (bx1 >= st.wrap_x) bx1 -%= st.width;
+            if (by0 >= st.wrap_y) by0 -%= st.height;
+            if (by1 >= st.wrap_y) by1 -%= st.height;
+        }
+        const i = self.lattice[@intCast(bx0 & bm)];
+        const j = self.lattice[@intCast(bx1 & bm)];
+        const b00 = self.lattice[i + @as(usize, @intCast(by0 & bm))];
+        const b10 = self.lattice[j + @as(usize, @intCast(by0 & bm))];
+        const b01 = self.lattice[i + @as(usize, @intCast(by1 & bm))];
+        const b11 = self.lattice[j + @as(usize, @intCast(by1 & bm))];
+        const sx = sCurve(rx0);
+        const sy = sCurve(ry0);
+        const g = &self.gradient[ch];
+        const a = lerp(sx, rx0 * g[b00][0] + ry0 * g[b00][1], rx1 * g[b10][0] + ry0 * g[b10][1]);
+        const b = lerp(sx, rx0 * g[b01][0] + ry1 * g[b01][1], rx1 * g[b11][0] + ry1 * g[b11][1]);
+        return lerp(sy, a, b);
+    }
+
+    fn turbulence(self: *const Noise, ch: usize, point: [2]f64, stitch_tile: [4]f64, t: filter.Turbulence) f64 {
+        var fx = t.base_frequency_x;
+        var fy = t.base_frequency_y;
+        var stitch: ?Stitch = null;
+        if (t.stitch) {
+            // Nudge each frequency to the nearer of the two that make a
+            // whole number of periods across the stitch_tile.
+            if (fx != 0) fx = nearestWhole(fx, stitch_tile[2]);
+            if (fy != 0) fy = nearestWhole(fy, stitch_tile[3]);
+            const sw = truncate(stitch_tile[2] * fx + 0.5);
+            const sh = truncate(stitch_tile[3] * fy + 0.5);
+            stitch = .{
+                .width = sw,
+                .height = sh,
+                .wrap_x = truncate(stitch_tile[0] * fx + perlin_n + @as(f64, @floatFromInt(sw))),
+                .wrap_y = truncate(stitch_tile[1] * fy + perlin_n + @as(f64, @floatFromInt(sh))),
+            };
+        }
+        var sum: f64 = 0;
+        var x = point[0] * fx;
+        var y = point[1] * fy;
+        var ratio: f64 = 1;
+        for (0..t.octaves) |_| {
+            const n = self.noise2(ch, x, y, stitch);
+            sum += (if (t.fractal_noise) n else @abs(n)) / ratio;
+            x *= 2;
+            y *= 2;
+            ratio *= 2;
+            if (stitch) |*st| {
+                // Subtracting perlin_n before the doubling and adding it back
+                // after comes to subtracting it once.
+                st.width *%= 2;
+                st.wrap_x = 2 *% st.wrap_x -% perlin_n;
+                st.height *%= 2;
+                st.wrap_y = 2 *% st.wrap_y -% perlin_n;
+            }
+        }
+        return sum;
+    }
+
+    fn nearestWhole(freq: f64, size: f64) f64 {
+        const lo = @floor(size * freq) / size;
+        const hi = @ceil(size * freq) / size;
+        return if (freq / lo < hi / freq) lo else hi;
+    }
+
+    fn sCurve(v: f64) f64 {
+        return v * v * (3 - 2 * v);
+    }
+
+    fn lerp(tt: f64, a: f64, b: f64) f64 {
+        return a + tt * (b - a);
+    }
+
+    /// C's conversion to an integer, towards zero, held inside `i32` so
+    /// that an absurd frequency wraps the lattice rather than trapping.
+    fn truncate(v: f64) i32 {
+        if (!std.math.isFinite(v)) return 0;
+        return @intFromFloat(std.math.clamp(@trunc(v), -2147483648.0, 2147483647.0));
+    }
+};
+
 // -- tests -------------------------------------------------------------------
 
 fn surfaceOf(px: RGBA) !z2d.Surface {
@@ -908,4 +1110,36 @@ test "a displacement fetches from a half-scale step either way, and nothing past
     try testing.expectEqual(@as(u8, 70), got[5].r);
     // From 8, past the edge.
     try testing.expectEqual(@as(u8, 0), got[6].a);
+}
+
+test "the noise generator is the reference code's" {
+    // The Park-Miller minimal standard: from a seed of one, 16807 and then
+    // 282475249, as every implementation of it gives.
+    try testing.expectEqual(@as(i32, 16807), Noise.random(1));
+    try testing.expectEqual(@as(i32, 282475249), Noise.random(16807));
+    // Every gradient is a unit vector, and the lattice is a permutation
+    // repeated.
+    const n: Noise = .init(0);
+    for (n.gradient) |channel| for (channel[0..b_size]) |g| {
+        try testing.expectApproxEqAbs(@as(f64, 1), @sqrt(g[0] * g[0] + g[1] * g[1]), 1e-9);
+    };
+    var seen: [b_size]bool = @splat(false);
+    for (n.lattice[0..b_size]) |v| seen[v] = true;
+    for (seen) |v| try testing.expect(v);
+    try testing.expectEqual(n.lattice[3], n.lattice[b_size + 3]);
+    // Noise is nothing on the lattice points themselves.
+    try testing.expectEqual(@as(f64, 0), n.noise2(0, 5, 7, null));
+}
+
+test "stitched noise repeats across its tile" {
+    const n: Noise = .init(3);
+    const t: filter.Turbulence = .{ .base_frequency_x = 0.13, .base_frequency_y = 0.07, .octaves = 3, .stitch = true };
+    const stitch_tile: [4]f64 = .{ 10, 20, 50, 40 };
+    for ([_][2]f64{ .{ 12.5, 21.25 }, .{ 30, 33 } }) |p| {
+        const a = n.turbulence(1, p, stitch_tile, t);
+        const b = n.turbulence(1, .{ p[0] + 50, p[1] }, stitch_tile, t);
+        const c = n.turbulence(1, .{ p[0], p[1] + 40 }, stitch_tile, t);
+        try testing.expectApproxEqAbs(a, b, 1e-9);
+        try testing.expectApproxEqAbs(a, c, 1e-9);
+    }
 }

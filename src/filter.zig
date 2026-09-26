@@ -113,6 +113,10 @@ pub const Error = error{
     /// An `feDisplacementMap` whose channel selector is not `R`, `G`, `B` or
     /// `A`, or whose `scale` does not parse.
     BadDisplacementMap,
+    /// An `feTurbulence` with a negative or unparseable `baseFrequency`, a
+    /// `numOctaves` that is not a whole number of none or more, or a `type`
+    /// or `stitchTiles` that is not one of its keywords.
+    BadTurbulence,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -203,6 +207,23 @@ pub const Kind = union(enum) {
     /// times a channel's distance from a half, in `primitiveUnits`. The
     /// channels are 0 to 3 for red, green, blue and alpha.
     displacement_map: struct { in: Input, in2: Input, scale: f64, x_channel: u2, y_channel: u2 },
+    /// §15.23: Perlin noise, from the specification's own reference code.
+    /// Reads nothing.
+    turbulence: Turbulence,
+};
+
+pub const Turbulence = struct {
+    base_frequency_x: f64 = 0,
+    base_frequency_y: f64 = 0,
+    /// At most `max_octaves`: past about nine, an octave adds less than one
+    /// level of an 8-bit channel, so the clamp changes no pixel.
+    octaves: u32 = 1,
+    /// Truncated towards zero, as Filter Effects 1 says.
+    seed: i32 = 0,
+    stitch: bool = false,
+    fractal_noise: bool = false,
+
+    pub const max_octaves = 24;
 };
 
 pub const EdgeMode = enum { duplicate, wrap, none };
@@ -588,6 +609,8 @@ fn readPrimitives(
             } };
         } else if (std.mem.eql(u8, name, "feConvolveMatrix")) blk: {
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
+        } else if (std.mem.eql(u8, name, "feTurbulence")) blk: {
+            break :blk .{ .turbulence = try turbulenceOf(tree, child) };
         } else if (std.mem.eql(u8, name, "feDisplacementMap")) blk: {
             const scale: f64 = if (trimmedAttr(tree, child, "scale")) |raw| s: {
                 const v = std.fmt.parseFloat(f64, raw) catch return error.BadDisplacementMap;
@@ -782,6 +805,42 @@ fn convolveMatrix(
         .edge = edge,
         .preserve_alpha = preserve_alpha,
     };
+}
+
+fn turbulenceOf(tree: *const ztree.Document, node: ztree.NodeId) Error!Turbulence {
+    var t: Turbulence = .{};
+    var buf: [2]f64 = undefined;
+    const f = try numberList(attr(tree, node, "baseFrequency") orelse "", &buf, error.BadTurbulence);
+    if (f.len > 0) {
+        t.base_frequency_x = f[0];
+        t.base_frequency_y = if (f.len > 1) f[1] else f[0];
+    }
+    if (t.base_frequency_x < 0 or t.base_frequency_y < 0) return error.BadTurbulence;
+    if (trimmedAttr(tree, node, "numOctaves")) |raw| {
+        const v = std.fmt.parseFloat(f64, raw) catch return error.BadTurbulence;
+        if (v != @floor(v) or v < 0) return error.BadTurbulence;
+        t.octaves = @intFromFloat(@min(v, Turbulence.max_octaves));
+    }
+    if (trimmedAttr(tree, node, "seed")) |raw| {
+        const v = std.fmt.parseFloat(f64, raw) catch return error.BadTurbulence;
+        if (!std.math.isFinite(v)) return error.BadTurbulence;
+        t.seed = @intFromFloat(std.math.clamp(@trunc(v), -std.math.maxInt(i32), std.math.maxInt(i32)));
+    }
+    const kind = trimmedAttr(tree, node, "type") orelse "turbulence";
+    t.fractal_noise = if (std.mem.eql(u8, kind, "fractalNoise"))
+        true
+    else if (std.mem.eql(u8, kind, "turbulence"))
+        false
+    else
+        return error.BadTurbulence;
+    const stitch = trimmedAttr(tree, node, "stitchTiles") orelse "noStitch";
+    t.stitch = if (std.mem.eql(u8, stitch, "stitch"))
+        true
+    else if (std.mem.eql(u8, stitch, "noStitch"))
+        false
+    else
+        return error.BadTurbulence;
+    return t;
 }
 
 /// `xChannelSelector` or `yChannelSelector`: alpha by default.
@@ -1124,5 +1183,30 @@ test "a displacement map's channels default to alpha, and its scale to nothing" 
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadDisplacementMap, readTest(src));
+    }
+}
+
+test "turbulence defaults to one octave of turbulence at no frequency" {
+    var f = try primitivesOf("<feTurbulence/>" ++
+        "<feTurbulence type=\"fractalNoise\" baseFrequency=\"0.1, 0.2\" numOctaves=\"99\" seed=\"-2.9\" stitchTiles=\"stitch\"/>");
+    defer f.deinit(testing.allocator);
+    const a = f.primitives[0].kind.turbulence;
+    try testing.expectEqual(Turbulence{}, a);
+    const b = f.primitives[1].kind.turbulence;
+    try testing.expect(b.fractal_noise and b.stitch);
+    try testing.expectEqual(@as(f64, 0.2), b.base_frequency_y);
+    try testing.expectEqual(@as(u32, Turbulence.max_octaves), b.octaves);
+    // Truncated towards zero.
+    try testing.expectEqual(@as(i32, -2), b.seed);
+    for ([_][]const u8{
+        "<feTurbulence baseFrequency=\"-0.1\"/>",
+        "<feTurbulence numOctaves=\"1.5\"/>",
+        "<feTurbulence numOctaves=\"-1\"/>",
+        "<feTurbulence type=\"perlin\"/>",
+        "<feTurbulence stitchTiles=\"yes\"/>",
+    }) |body| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
+        try testing.expectError(error.BadTurbulence, readTest(src));
     }
 }

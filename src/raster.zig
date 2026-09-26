@@ -1515,6 +1515,7 @@ const Chain = struct {
                     self.noteUse(i, d.in);
                     self.noteUse(i, d.in2);
                 },
+                .turbulence => {},
             }
         }
     }
@@ -1783,6 +1784,22 @@ const Chain = struct {
                     self.lengthX(d.scale),
                     self.lengthY(d.scale),
                 }, d.x_channel, d.y_channel);
+                self.finish(i, out, box, space);
+            },
+            .turbulence => |t| {
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                // Reads nothing, so by §15.7.6 it fills the filter region.
+                const box = self.subregion(i, p, self.f.region);
+                // The noise is a function of user space: each pixel is taken
+                // back through the scale and translation of the matrix in
+                // force, not its rotation, as resvg does.
+                fe.turbulence(&out, box, t, .{
+                    .origin_x = self.f.ctm.tx,
+                    .origin_y = self.f.ctm.ty,
+                    .scale_x = self.f.scale_x,
+                    .scale_y = self.f.scale_y,
+                });
                 self.finish(i, out, box, space);
             },
         }
@@ -4514,7 +4531,7 @@ test "a primitive this does not implement is refused" {
     // run with the link left out.
     try testing.expectError(error.UnsupportedFilterPrimitive, render(
         gpa,
-        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feTurbulence baseFrequency=\"0.1\"/></filter>" ++
+        "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feSparkle/></filter>" ++
             "<rect width=\"8\" height=\"8\" filter=\"url(#f)\"/></svg>",
         .{ .width = 8, .height = 8 },
     ));

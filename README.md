@@ -542,7 +542,7 @@ short of the specification.
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
-| `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
+| `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited; SVG 2's `miter-clip` join as well, cut square at the limit rather than beveled (resvg draws it; Chrome does not yet); `arcs` is refused, since nothing draws it |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; lengths with any unit, or percentages of the normalized diagonal, resolved where they are declared; up to `raster.max_dashes` (64) of them |
 | `vector-effect` | `non-scaling-stroke`, not inherited: the pen, and its dashes, are measured in the pixels of the picture drawn, so no transform or `viewBox` widens or skews them, and a stroke one wide is one pixel wide at any size — as Inkscape draws it, and as Chrome draws an `<img>` of it. The path, its paint and its markers are placed as ever; a `<text>`'s applies to its `<tspan>`s. The host is always the screen, as in both of those, so the `screen` qualifier is accepted and a written-out `viewport` is refused (`UnsupportedVectorEffect`), as are `non-scaling-size`, `non-rotation` and `fixed-position`, which nothing draws |
 | `paint-order` | yes, inherited — `fill`, `stroke` and `markers` in any order |

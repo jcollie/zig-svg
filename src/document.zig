@@ -2927,6 +2927,11 @@ fn parseLineJoin(text: []const u8) Error!z2d.options.JoinMode {
     if (std.mem.eql(u8, t, "miter")) return .miter;
     if (std.mem.eql(u8, t, "round")) return .round;
     if (std.mem.eql(u8, t, "bevel")) return .bevel;
+    // SVG 2's: a miter cut off square at the limit rather than beveled.
+    if (std.mem.eql(u8, t, "miter-clip")) return .miter_clip;
+    // SVG 2's `arcs` is refused with everything else: nothing draws it --
+    // resvg cannot parse it and Chrome ignores it -- and drawing a miter in
+    // its place would be a different join.
     return error.BadStrokeStyle;
 }
 

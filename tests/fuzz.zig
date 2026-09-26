@@ -152,7 +152,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility" ++
     "mix-blend-mode:isolation:isolateauto" ++
     "context-fillcontext-stroke" ++
-    "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position";
+    "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position" ++
+    "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -999,6 +1000,9 @@ const document_corpus = [_][]const u8{
     // Non-scaling strokes under a skew and a stretch, dashed, with a gradient,
     // a pattern, markers, text, and inside a mask and a pattern cell.
     "<svg viewBox=\"0 0 8 8\" width=\"16\" height=\"16\"><linearGradient id=\"g\"><stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><path d=\"M0 0 L2 2\" stroke=\"black\" vector-effect=\"non-scaling-stroke\"/></pattern><marker id=\"m\"><circle r=\"1\" stroke=\"green\" vector-effect=\"non-scaling-stroke\"/></marker><mask id=\"k\"><rect width=\"8\" height=\"8\" stroke=\"white\" stroke-width=\"3\" transform=\"scale(0.5 2)\" vector-effect=\"non-scaling-stroke\"/></mask><g transform=\"skewX(30) scale(3 0.5)\" mask=\"url(#k)\"><path d=\"M1 1 L2 6 L0.5 7\" stroke=\"url(#g)\" stroke-dasharray=\"1 0.5\" style=\"marker: url(#m); vector-effect: non-scaling-stroke\"/><rect width=\"2\" height=\"2\" fill=\"none\" stroke=\"url(#p)\" stroke-width=\"4\" vector-effect=\"non-scaling-stroke\"/></g><text x=\"1\" y=\"7\" font-size=\"3\" stroke=\"red\" transform=\"scale(2 0.5)\" vector-effect=\"non-scaling-stroke\">a<tspan>b</tspan></text></svg>",
+    // Every CSS Color 4 function, in each place a colour is written, and a
+    // colour-mix nested in another.
+    "<svg viewBox=\"0 0 8 8\" style=\"color: oklch(60% 0.2 30 / 0.8)\"><linearGradient id=\"g\"><stop stop-color=\"lab(50% 40 -20)\"/><stop offset=\"1\" stop-color=\"color(display-p3 1 0 0 / 50%)\"/></linearGradient><filter id=\"f\"><feFlood flood-color=\"hwb(200 10% 20%)\"/><feDiffuseLighting lighting-color=\"lch(60% 50 30)\"><feDistantLight/></feDiffuseLighting></filter><rect width=\"4\" height=\"4\" fill=\"hsl(0.5turn 50% none)\" stroke=\"currentColor\"/><rect x=\"4\" width=\"4\" height=\"4\" fill=\"url(#g)\" filter=\"url(#f)\"/><circle cx=\"4\" cy=\"6\" r=\"2\" fill=\"color-mix(in oklch longer hue, color-mix(in srgb, red, oklab(0.6 0.1 -0.1)) 30%, color(xyz-d50 0.2 0.3 0.4))\" style=\"filter: drop-shadow(1px 1px hsl(120deg 100% 25%))\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

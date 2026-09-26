@@ -534,6 +534,7 @@ short of the specification.
 | A foreign namespace | passed over, not refused — an Inkscape file reads |
 | `transform` | all six functions, on `<svg>`, `<g>`, any shape, and a `<clipPath>` |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
+| CSS Color 4 and 5 | everywhere a colour is written — `fill`, `stroke`, `color`, `stop-color`, `flood-color`, `lighting-color`, `drop-shadow()` — `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in every predefined space, and `color-mix()`, read by [zig-css](https://git.jcollie.dev/jeff/zig-css); a colour sRGB cannot show is gamut-mapped into it as Color 4 §14.2 says, not clipped. A `color-mix()` with `currentcolor` in it is refused (`UnsupportedColorMix`) |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
@@ -949,6 +950,18 @@ and a percentage alpha `rgba(255, 0, 0, 50%)`. None of the three appears in the
 corpus, since a fixture using one would be testing resvg's gap rather than this
 code.
 
+Of the rest of CSS Color 4, resvg reads only the legacy comma `hsl()`, which
+`fill-hsl.svg` holds it to, exactly. The others — `hwb()`, the Lab family,
+`color()`, `color-mix()` — resvg and Inkscape both paint black, so they are
+checked number by number instead, in `src/color.zig`, against
+[ColorAide](https://github.com/facelessuser/coloraide): every value within a
+level, gamut mapping included. Chrome agrees on every colour sRGB can show,
+and clips the ones it cannot where Color 4 maps them. One more departure
+follows from reading the specification exactly: an `hsl()` saturation past
+100% is kept, as Color 4 says, and the colour it makes is lighter than white,
+which the mapping draws as white — ColorAide agrees, where Chrome and resvg
+clamp the saturation and paint the saturated colour.
+
 Some fixtures are held to their own tolerances, named in `DIVERGENCES` at the
 top of `tools/check_oracle.py` with the reason beside each and printed as
 *diff* rather than *ok* so they stay visible. Five are `<filter>`, for two
@@ -1163,6 +1176,14 @@ Kept in the Zotero collection **zig-svg**.
   (SVG) 2* (W3C Candidate Recommendation). <https://www.w3.org/TR/SVG2/> —
   §8.13 is `vector-effect`, with the host coordinate space its effects are
   measured in.
+- World Wide Web Consortium (W3C). (2026). *CSS Color Module Level 4* (W3C
+  Candidate Recommendation Draft). <https://www.w3.org/TR/css-color-4/> — every
+  colour function, and §14.2's gamut mapping into sRGB.
+- World Wide Web Consortium (W3C). (2026). *CSS Color Module Level 5* (W3C
+  Working Draft). <https://www.w3.org/TR/css-color-5/> — `color-mix()`.
+- Muse, I. *ColorAide*. <https://github.com/facelessuser/coloraide> — the
+  independent implementation of those two the modern colours are checked
+  against, since neither oracle reads them.
 - Inkscape Project. *Inkscape*. <https://inkscape.org/> — the second oracle,
   for the `vector-effect` fixtures resvg cannot judge.
 - Reizner, Y. *resvg*. Linebender. <https://github.com/linebender/resvg> — the

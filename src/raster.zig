@@ -6762,3 +6762,29 @@ test "a gradient under a transform that collapses the plane draws nothing, and f
     defer sfc.deinit(gpa);
     try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 4).?.rgba.a);
 }
+
+test "CSS Color 4 reaches every property a colour is written in" {
+    const gpa = testing.allocator;
+    var sfc = try render(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 1\">" ++
+        "<linearGradient id=\"g\"><stop stop-color=\"lab(50% 40 -20)\"/><stop offset=\"1\" stop-color=\"lab(50% 40 -20)\"/></linearGradient>" ++
+        "<filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"><feFlood flood-color=\"color(srgb 0.2 0.4 0.6)\"/></filter>" ++
+        "<rect width=\"1\" height=\"1\" fill=\"oklch(70% 0.15 150)\"/>" ++
+        "<rect x=\"1\" width=\"1\" height=\"1\" style=\"color: hsl(0.5turn 50% 50%)\" fill=\"currentColor\"/>" ++
+        "<rect x=\"2\" width=\"1\" height=\"1\" fill=\"url(#g)\"/>" ++
+        "<rect x=\"3\" width=\"1\" height=\"1\" filter=\"url(#f)\"/></svg>", .{ .width = 4, .height = 1 });
+    defer sfc.deinit(gpa);
+    // The values from the colour tests; the flood goes through linearRGB and
+    // back, which is where a level can go.
+    const want = [4][3]u8{ .{ 76, 184, 106 }, .{ 64, 191, 191 }, .{ 171, 90, 154 }, .{ 51, 102, 153 } };
+    for (want, 0..) |rgb, x| {
+        const px = sfc.getPixel(@intCast(x), 0).?.rgba;
+        for (rgb, [3]u8{ px.r, px.g, px.b }) |w, h| {
+            if (@abs(@as(i16, w) - @as(i16, h)) > 1) {
+                std.debug.print("x={d}: {d},{d},{d}\n", .{ x, px.r, px.g, px.b });
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+    try testing.expectError(error.UnsupportedColorMix, render(gpa, "<svg viewBox=\"0 0 1 1\"><rect width=\"1\" height=\"1\" " ++
+        "filter=\"drop-shadow(1px 1px color-mix(in srgb, currentColor, red))\"/></svg>", .{ .width = 1, .height = 1 }));
+}

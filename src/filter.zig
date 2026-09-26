@@ -698,7 +698,13 @@ fn dropShadowFunction(args: []const u8, viewport: length.Viewport) Error!@FieldT
             shade = if (std.ascii.eqlIgnoreCase(tok, "currentColor"))
                 null
             else
-                color.parseColor(tok) catch return error.BadFilterFunction;
+                color.parseColor(tok) catch |err| switch (err) {
+                    // A colour this reads but cannot mix is not a malformed
+                    // function, and saying so would send the reader looking
+                    // for the wrong mistake.
+                    error.UnsupportedColorMix => return err,
+                    else => return error.BadFilterFunction,
+                };
         }
     }
     if (n < 2) return error.BadFilterFunction;

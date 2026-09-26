@@ -15,6 +15,38 @@
 //! none   currentColor
 //! ```
 //!
+//! ## The rest of CSS Color 4
+//!
+//! Every other colour function is zig-css's to read -- `hsl()` and `hwb()`,
+//! `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in each of its spaces,
+//! and CSS Color 5's `color-mix()` -- and it reads them exactly, keeping a
+//! colour in the space it was written in:
+//!
+//! ```
+//! hsl(120deg 100% 25% / 50%)   hwb(200 10% 20%)   lab(50% 40 -20)
+//! oklch(70% 0.15 150)          color(display-p3 1 0 0)
+//! color-mix(in oklab, red 30%, blue)
+//! ```
+//!
+//! What this draws on is eight bits of sRGB a channel, so each comes here as
+//! the sRGB colour it is shown as: one sRGB cannot show is brought into it by
+//! Color 4 §14.2's gamut mapping, keeping its lightness and hue and giving up
+//! chroma, rather than clipped channel by channel. That is the step where
+//! renderers differ -- Chrome clips -- and the one worth knowing about: an
+//! `oklch()` far outside sRGB comes out less saturated here than there, and
+//! nearer the colour it was meant to be. Every value was checked against
+//! coloraide, an independent implementation of the same specification.
+//!
+//! The mapping has one answer that surprises: an `hsl()` saturation past
+//! 100% is kept, as Color 4 says, and the colour it makes is lighter than
+//! sRGB's white, which the mapping answers with white. Chrome and resvg
+//! clamp the saturation first and paint the fully saturated colour.
+//!
+//! A `color-mix()` with `currentcolor` in it is refused
+//! (`error.UnsupportedColorMix`). It cannot be mixed until the element's
+//! `color` is known, which is after the value is read, and mixing it with
+//! anything else would be a colour the document did not ask for.
+//!
 //! ## Two case rules, and they are different
 //!
 //! A colour **name** is matched without regard to case -- `RED`, `Red` and
@@ -54,11 +86,16 @@ const std = @import("std");
 const ascii = std.ascii;
 const testing = std.testing;
 
+const css = @import("css");
+
 pub const Error = error{
     /// A `fill` this module cannot read.
     BadColor,
     /// An `opacity` or `fill-opacity` that is not a number or a percentage.
     BadOpacity,
+    /// A `color-mix()` with `currentcolor` in it, which this cannot mix
+    /// before the element's `color` is known.
+    UnsupportedColorMix,
 };
 
 /// A colour, in straight (not premultiplied) alpha.
@@ -174,13 +211,14 @@ fn byte(pair: [2]u8) u8 {
 }
 
 /// `rgb(…)` and `rgba(…)`, with the components separated by commas or by
-/// spaces, and the alpha by a comma or a slash.
+/// spaces, and the alpha by a comma or a slash; and every other function,
+/// through `parseColor4`.
 fn parseFunctional(text: []const u8) Error!Color {
     const open = std.mem.findScalar(u8, text, '(').?;
     if (text[text.len - 1] != ')') return error.BadColor;
     const name = std.mem.trim(u8, text[0..open], " \t\r\n");
     const is_rgba = ascii.eqlIgnoreCase(name, "rgba");
-    if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return error.BadColor;
+    if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return parseColor4(text);
 
     // `rgb` and `rgba` have been interchangeable since CSS Color 4, so the
     // name decides nothing; the argument count does.
@@ -199,6 +237,26 @@ fn parseFunctional(text: []const u8) Error!Color {
         .b = try component(parts[2]),
         .alpha = if (n == 4) try alphaValue(parts[3]) else 1.0,
     };
+}
+
+/// A colour function other than `rgb()`, read by zig-css and shown in sRGB.
+///
+/// `rgb()` stays this module's own. It is the form resvg checks, and a
+/// component out of range, a stray argument and a mixed separator are each
+/// answered here the way they always have been; handing it over would move
+/// those answers for no gain in what can be drawn.
+fn parseColor4(text: []const u8) Error!Color {
+    const parsed = css.values.parseColor(text) orelse return error.BadColor;
+    const absolute = switch (parsed) {
+        .absolute => |a| a,
+        // Only a bare `currentcolor` is this, and that has no parentheses.
+        .current => return error.BadColor,
+        .mix => return error.UnsupportedColorMix,
+    };
+    const rgba = absolute.toRgba();
+    // `calc()` can write a NaN, and a NaN alpha would reach every blend.
+    if (!std.math.isFinite(rgba.a)) return error.BadColor;
+    return .{ .r = rgba.r, .g = rgba.g, .b = rgba.b, .alpha = rgba.a };
 }
 
 /// One `rgb()` component: `0`–`255`, or a percentage of 255.
@@ -465,7 +523,11 @@ test "a functional form that is malformed is refused" {
         "rgb(255,0)",
         "rgb(1,2,3,4,5)",
         "rgb(255,0,0",
-        "hsl(0,100%,50%)",
+        "hsl(0,100%)",
+        "oklch(70% 0.1)",
+        "lab(50% 40 -20) red",
+        "color(nowhere 1 0 0)",
+        "hsl(none, 100%, 50%)",
         "rgb(a,b,c)",
         "rgb()",
     }) |t| {
@@ -545,4 +607,56 @@ test "a non-finite number never gets out of here" {
     try testing.expectApproxEqAbs(@as(f64, 0.0), try parseOpacity("-inf"), 1e-12);
     try expectColor(.{ .r = 255, .g = 0, .b = 0 }, "rgb(inf, -inf, 0)");
     try testing.expectError(error.BadColor, parseColor("rgb(nan, 0, 0)"));
+}
+
+test "the rest of CSS Color 4, as coloraide shows each in sRGB" {
+    // Each expected value is coloraide 8.8.1's, converted to sRGB and fitted
+    // with CSS Color 4's gamut mapping (its `oklch-chroma`), rounded to eight
+    // bits: an independent implementation of the same specification. Chrome
+    // paints every in-gamut one the same, give or take a level where a
+    // channel lands on a half -- `hwb()` here is 26,145,204 in Chrome.
+    const Case = struct { text: []const u8, rgb: [3]u8, alpha: f64 = 1 };
+    for ([_]Case{
+        .{ .text = "hsl(120, 100%, 25%)", .rgb = .{ 0, 128, 0 } },
+        .{ .text = "hsla(240, 100%, 50%, 0.5)", .rgb = .{ 0, 0, 255 }, .alpha = 0.5 },
+        .{ .text = "hsl(120deg 100% 25% / 50%)", .rgb = .{ 0, 128, 0 }, .alpha = 0.5 },
+        .{ .text = "hsl(0.5turn 50% 50%)", .rgb = .{ 64, 191, 191 } },
+        .{ .text = "HWB(200 10% 20%)", .rgb = .{ 25, 144, 204 } },
+        .{ .text = "lab(50% 40 -20)", .rgb = .{ 171, 90, 154 } },
+        .{ .text = "lch(60% 50 30)", .rgb = .{ 220, 111, 103 } },
+        .{ .text = "oklab(0.6 0.1 -0.1)", .rgb = .{ 159, 99, 186 } },
+        .{ .text = "oklch(70% 0.15 150)", .rgb = .{ 76, 184, 106 } },
+        .{ .text = "color(srgb 0.2 0.4 0.6)", .rgb = .{ 51, 102, 153 } },
+        .{ .text = "color(srgb-linear 0.5 0.5 0.5)", .rgb = .{ 188, 188, 188 } },
+        .{ .text = "color-mix(in srgb, red, blue)", .rgb = .{ 128, 0, 128 } },
+        .{ .text = "color-mix(in oklab, white 25%, black)", .rgb = .{ 34, 34, 34 } },
+        // Outside sRGB, and mapped rather than clipped: Chrome clips these to
+        // 255,0,0 and 0,255,0.
+        .{ .text = "color(display-p3 1 0 0)", .rgb = .{ 255, 11, 12 } },
+        .{ .text = "oklch(90% 0.4 150)", .rgb = .{ 65, 255, 135 } },
+        // Saturation past 100%. Color 4 clamps only a negative one, so this
+        // is a green brighter than sRGB has, whose OkLCh lightness is past
+        // one -- and §14.2's mapping answers any such colour with white.
+        // coloraide agrees. Chrome and resvg clamp the saturation first and
+        // paint 0,255,0; nothing in tests/oracle writes one.
+        .{ .text = "hsl(120, 150%, 50%)", .rgb = .{ 255, 255, 255 } },
+    }) |c| {
+        const got = parseColor(c.text) catch |err| {
+            std.debug.print("{s}: {t}\n", .{ c.text, err });
+            return err;
+        };
+        const channels = [3]u8{ got.r, got.g, got.b };
+        for (c.rgb, channels) |want, have| {
+            if (@abs(@as(i16, want) - @as(i16, have)) > 1) {
+                std.debug.print("{s}: {d},{d},{d}\n", .{ c.text, got.r, got.g, got.b });
+                return error.TestExpectedEqual;
+            }
+        }
+        try testing.expectApproxEqAbs(c.alpha, got.alpha, 1e-6);
+    }
+}
+
+test "a color-mix with currentcolor in it is refused, and so is its paint" {
+    try testing.expectError(error.UnsupportedColorMix, parseColor("color-mix(in srgb, currentcolor, red)"));
+    try testing.expectError(error.UnsupportedColorMix, parsePaint("color-mix(in oklch, red 10%, currentColor)"));
 }

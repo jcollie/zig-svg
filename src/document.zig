@@ -1633,6 +1633,28 @@ pub const PathIterator = struct {
         return self.textAfter(owner, after, &passed);
     }
 
+    /// A `fill` or `stroke`, its fallback already chosen where there is one.
+    ///
+    /// §11.2: the fallback is painted when the reference does not resolve to
+    /// a paint server, which does not depend on where the paint is used --
+    /// so it is settled here, where it is declared, and nothing later has to
+    /// carry both. A dangling reference with no fallback is still refused,
+    /// later, where it is painted.
+    fn readPaint(self: *const PathIterator, raw: []const u8) Error!color.Paint {
+        const written = try color.parsePaintWithFallback(raw);
+        const fallback = written.fallback orelse return written.paint;
+        return if (self.isPaintServer(written.paint.reference)) written.paint else fallback;
+    }
+
+    /// Whether `id` names a gradient or a pattern.
+    fn isPaintServer(self: *const PathIterator, id: []const u8) bool {
+        const node = self.doc.ids.get(id) orelse return false;
+        if (!self.isSvgContent(node)) return false;
+        const tree = self.doc.tree;
+        return localIs(tree, node, "linearGradient") or localIs(tree, node, "radialGradient") or
+            localIs(tree, node, "pattern");
+    }
+
     fn preservesSpace(self: *const PathIterator, node: ztree.NodeId) Error!bool {
         return preservesSpaceIn(self.doc.tree, node);
     }
@@ -2254,12 +2276,12 @@ pub const PathIterator = struct {
         var own = self.viewport;
         if (font_size) |size| own.font_size = size;
         return .{
-            .fill = if (self.presentation(node, "fill")) |v| try color.parsePaint(v) else null,
+            .fill = if (self.presentation(node, "fill")) |v| try self.readPaint(v) else null,
             .fill_opacity = if (self.presentation(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
             .fill_rule = if (self.presentation(node, "fill-rule")) |v| try parseFillRule(v) else null,
             .clip_rule = if (self.presentation(node, "clip-rule")) |v| try parseFillRule(v) else null,
             .current_color = if (self.presentation(node, "color")) |v| try color.parseColor(v) else null,
-            .stroke = if (self.presentation(node, "stroke")) |v| try color.parsePaint(v) else null,
+            .stroke = if (self.presentation(node, "stroke")) |v| try self.readPaint(v) else null,
             .stroke_width = try self.optionalPresentationLength(node, "stroke-width", .other),
             .stroke_opacity = if (self.presentation(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,
             .stroke_linecap = if (self.presentation(node, "stroke-linecap")) |v| try parseLineCap(v) else null,

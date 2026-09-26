@@ -6997,3 +6997,17 @@ test "what transform, transform-origin and transform-box cannot read is refused"
         };
     }
 }
+
+test "a paint's fallback is painted when its reference is no paint server" {
+    const gpa = testing.allocator;
+    // §11.2: an element that is not a gradient or a pattern is as invalid a
+    // reference as one that is not there. Chrome paints the fallback; resvg
+    // paints nothing, which is why tests/oracle does not hold this case.
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 1 1\"><rect id=\"r\" width=\"0\" height=\"0\"/>" ++
+        "<rect width=\"1\" height=\"1\" fill=\"url(#r) #000080\"/></svg>", .{ .width = 1, .height = 1 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 128), sfc.getPixel(0, 0).?.rgba.b);
+    // Without a fallback it is still refused, where it is painted.
+    try testing.expectError(error.UnsupportedPaintServer, render(gpa, "<svg viewBox=\"0 0 1 1\"><rect id=\"r\" width=\"0\" height=\"0\"/>" ++
+        "<rect width=\"1\" height=\"1\" fill=\"url(#r)\"/></svg>", .{ .width = 1, .height = 1 }));
+}

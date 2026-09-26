@@ -144,6 +144,33 @@ pub fn parsePaint(text: []const u8) Error!Paint {
     return .{ .color = try parseColor(t) };
 }
 
+/// A `fill` or `stroke` that may name a fallback: SVG 1.1 §11.2's
+/// `url(#id) none`, `url(#id) currentColor` or `url(#id) <color>`, painted
+/// when the reference does not resolve to a paint server.
+pub const PaintWithFallback = struct {
+    paint: Paint,
+    /// Null when none was written, and only ever `none`, `current` or a
+    /// colour when one was.
+    fallback: ?Paint = null,
+};
+
+/// Read a `fill` or `stroke`, with its fallback if it names one.
+pub fn parsePaintWithFallback(text: []const u8) Error!PaintWithFallback {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len < 4 or !ascii.eqlIgnoreCase(t[0..4], "url(")) return .{ .paint = try parsePaint(t) };
+    const close = std.mem.findScalar(u8, t, ')') orelse return error.BadColor;
+    const id = parseReference(t[0 .. close + 1]) orelse return error.BadColor;
+    const rest = std.mem.trim(u8, t[close + 1 ..], " \t\r\n");
+    if (rest.len == 0) return .{ .paint = .{ .reference = id } };
+    const fallback = try parsePaint(rest);
+    return switch (fallback) {
+        .none, .current, .color => .{ .paint = .{ .reference = id }, .fallback = fallback },
+        // A reference falling back to a reference, or to a context paint, is
+        // not in the grammar.
+        else => error.BadColor,
+    };
+}
+
 /// The id inside a `url(#id)`, or null when this is not one.
 ///
 /// Only a fragment of this document. `url(other.svg#g)` names a file, and
@@ -573,6 +600,19 @@ test "a url reference is read as one" {
     // reference at all -- and it is not a colour either.
     try testing.expectError(error.BadColor, parsePaint("url(other.svg#g)"));
     try testing.expectError(error.BadColor, parsePaint("url(#)"));
+}
+
+test "a reference may name a fallback, which is never another reference" {
+    const a = try parsePaintWithFallback("url(#g) teal");
+    try testing.expectEqualStrings("g", a.paint.reference);
+    try testing.expectEqual(@as(u8, 128), a.fallback.?.color.g);
+    try testing.expectEqual(Paint.none, (try parsePaintWithFallback("URL( #g )  none")).fallback.?);
+    try testing.expectEqual(Paint.current, (try parsePaintWithFallback("url('#g') currentColor")).fallback.?);
+    try testing.expectEqual(@as(?Paint, null), (try parsePaintWithFallback("url(#g)")).fallback);
+    try testing.expectEqual(Paint.none, (try parsePaintWithFallback("none")).paint);
+    for ([_][]const u8{ "url(#g) url(#h)", "url(#g) context-fill", "url(#g) wobble", "url(#g", "url(a.svg#g) red" }) |t| {
+        try testing.expectError(error.BadColor, parsePaintWithFallback(t));
+    }
 }
 
 test "none and currentColor are not colours" {

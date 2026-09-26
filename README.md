@@ -1084,6 +1084,16 @@ capping its initial polygon — found by this very mode, and enough to make it
 unusable here. The z2d this builds against fixes it, and carries a test of its
 own so it cannot come back unnoticed.
 
+**The driver sets text in the devshell's test font.** It reads `SVG_TEST_FONT`,
+as `zig build oracle` does, and hands the face to every target; without it,
+every document with text in it would stop at `NoFontSupplied` before a glyph
+was laid out, and for a long while that is exactly what happened — text layout
+was never fuzzed. The first runs with a font found a glyph far enough off the
+page to panic z2d's rasterizer, a run ending part way through a character that
+made a decoder assert, running out of memory reported as a bad font, and a leak
+in z2d's glyph cache. A test build cannot read the environment, so under
+`zig build test` the targets still have no font.
+
 ## Looking at a picture
 
 ```console
@@ -1094,12 +1104,12 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 ## Features to come
 
 What SVG 1.1 has that this does not is vertical and right-to-left text —
-`writing-mode`, `direction: rtl` and `unicode-bidi` — which want a layout of
-their own and the Unicode bidirectional algorithm, `@media`, the CSS
-pseudo-classes, the `spacingAndGlyphs` form of `lengthAdjust`, and an `<image>`
-of another SVG document, which wants a render nested in a render with its own
-viewport and a share of the budget. Each is refused rather than ignored, so a
-document needing one says so.
+`writing-mode`, `direction: rtl` and `unicode-bidi` — which want the Unicode
+bidirectional algorithm, contextual shaping from the font's `GSUB` for Arabic
+and the other joining scripts, and vertical metrics z2d does not read yet;
+`@media` and the CSS pseudo-classes; `<tref>`; and a decoration along a
+`<textPath>` or across glyphs placed one by one. Each is refused rather than
+ignored, so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

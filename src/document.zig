@@ -178,6 +178,8 @@ pub const Error = error{
     /// A `dominant-baseline` or `alignment-baseline` that is none of its
     /// keywords.
     BadBaseline,
+    /// A `shape-rendering` or `text-rendering` that is none of its keywords.
+    BadRenderingHint,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -387,6 +389,12 @@ pub const Inherited = struct {
     /// `dominant-baseline`, which SVG 2 and CSS Inline 3 make inherited.
     dominant_baseline: ?shapes.Text.Baseline = null,
 
+    /// `shape-rendering` and `text-rendering`, as whether each asks for
+    /// edges without anti-aliasing: `crispEdges` or `optimizeSpeed` for
+    /// shapes, `optimizeSpeed` for text. Both inherited.
+    crisp_shapes: ?bool = null,
+    crisp_text: ?bool = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -420,6 +428,8 @@ pub const Inherited = struct {
             .letter_spacing = child.letter_spacing orelse self.letter_spacing,
             .word_spacing = child.word_spacing orelse self.word_spacing,
             .dominant_baseline = child.dominant_baseline orelse self.dominant_baseline,
+            .crisp_shapes = child.crisp_shapes orelse self.crisp_shapes,
+            .crisp_text = child.crisp_text orelse self.crisp_text,
         };
     }
 };
@@ -627,6 +637,9 @@ pub const Shape = struct {
     /// The order the fill, the stroke and the markers are painted in.
     paint_order: [3]PaintLayer,
     /// The decorations a run of text carries; nothing for any other shape.
+    /// Drawn without anti-aliasing: `shape-rendering: crispEdges` or
+    /// `optimizeSpeed`, or for text `text-rendering: optimizeSpeed`.
+    crisp: bool = false,
     decorations: Decorations = .{},
     /// The ids of the `<marker>` elements for the start, the middle vertices
     /// and the end, or null for none. Only a `<path>`, `<line>`,
@@ -1216,6 +1229,9 @@ pub const PathIterator = struct {
                 .text_anchor = parent.inherited.text_anchor,
                 .visible = parent.inherited.visible orelse true,
                 .paint_order = parent.inherited.paint_order orelse PaintLayer.normal,
+                // Text answers to `text-rendering` and not `shape-rendering`,
+                // as resvg has it.
+                .crisp = parent.inherited.crisp_text orelse false,
                 .decorations = decorations,
                 // A run has no `opacity` of its own: the element it sits in does,
                 // and that element opened a layer for it if it needed one.
@@ -1678,6 +1694,7 @@ pub const PathIterator = struct {
                 .text_anchor = effective.text_anchor,
                 .visible = effective.visible orelse true,
                 .paint_order = effective.paint_order orelse PaintLayer.normal,
+                .crisp = effective.crisp_shapes orelse false,
                 .marker_start = if (takesMarkers(geometry)) nonEmpty(effective.marker_start) else null,
                 .marker_mid = if (takesMarkers(geometry)) nonEmpty(effective.marker_mid) else null,
                 .marker_end = if (takesMarkers(geometry)) nonEmpty(effective.marker_end) else null,
@@ -1981,6 +1998,8 @@ pub const PathIterator = struct {
             .letter_spacing = if (self.presentation(node, "letter-spacing")) |v| try parseSpacing(v, own) else null,
             .word_spacing = if (self.presentation(node, "word-spacing")) |v| try parseSpacing(v, own) else null,
             .dominant_baseline = if (self.presentation(node, "dominant-baseline")) |v| try parseBaseline(v, true) else null,
+            .crisp_shapes = if (self.presentation(node, "shape-rendering")) |v| try parseRenderingHint(v, &.{ "crispEdges", "optimizeSpeed" }, &.{ "auto", "geometricPrecision" }) else null,
+            .crisp_text = if (self.presentation(node, "text-rendering")) |v| try parseRenderingHint(v, &.{"optimizeSpeed"}, &.{ "auto", "optimizeLegibility", "geometricPrecision" }) else null,
         };
     }
 
@@ -2314,6 +2333,16 @@ fn parseBaseline(raw: []const u8, dominant: bool) Error!?shapes.Text.Baseline {
         if (std.mem.eql(u8, t, "after-edge")) return .after_edge;
     }
     return error.BadBaseline;
+}
+
+/// `shape-rendering` or `text-rendering`: true for one of `crisp`, false for
+/// one of `smooth`, null for `inherit`.
+fn parseRenderingHint(raw: []const u8, crisp: []const []const u8, smooth: []const []const u8) Error!?bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "inherit")) return null;
+    for (crisp) |k| if (std.mem.eql(u8, t, k)) return true;
+    for (smooth) |k| if (std.mem.eql(u8, t, k)) return false;
+    return error.BadRenderingHint;
 }
 
 /// `letter-spacing` or `word-spacing`: `normal`, which is none, or a length.
@@ -4011,4 +4040,27 @@ test "an alignment baseline wins over the dominant one, which is inherited" {
         "<svg viewBox=\"0 0 8 8\"><text alignment-baseline=\"no-change\">a</text></svg>",
         "<svg viewBox=\"0 0 8 8\"><text dominant-baseline=\"top\">a</text></svg>",
     }) |src| try testing.expectError(error.BadBaseline, read(gpa, src));
+}
+
+test "crisp edges are asked for per shape, and by text-rendering for text" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g shape-rendering=\"crispEdges\" text-rendering=\"optimizeSpeed\">" ++
+        "<rect width=\"1\" height=\"1\"/><rect width=\"1\" height=\"1\" shape-rendering=\"auto\"/><text>a</text></g>" ++
+        "<text shape-rendering=\"optimizeSpeed\">b</text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var got: [4]bool = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| {
+            got[n] = sh.crisp;
+            n += 1;
+        },
+        else => {},
+    };
+    // The text outside the group asked for crisp *shapes*, which text does
+    // not answer to.
+    try testing.expectEqualSlices(bool, &.{ true, false, true, false }, got[0..n]);
+    try testing.expectError(error.BadRenderingHint, read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" shape-rendering=\"sharp\"/></svg>"));
+    try testing.expectError(error.BadRenderingHint, read(gpa, "<svg viewBox=\"0 0 8 8\"><text text-rendering=\"crispEdges\">a</text></svg>"));
 }

@@ -148,7 +148,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "letter-spacingword-spacingnormalem" ++
     "baseline-shiftsubsuperbaseline" ++
     "text-decorationunderlineoverlineline-through" ++
-    "dominant-baselinealignment-baselinecentralmiddlehangingmathematicaltext-before-edgetext-after-edgeideographic";
+    "dominant-baselinealignment-baselinecentralmiddlehangingmathematicaltext-before-edgetext-after-edgeideographic" ++
+    "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -985,6 +986,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><g text-decoration=\"overline\" fill=\"red\"><text x=\"4\" y=\"5\" font-size=\"3\" text-anchor=\"end\" stroke=\"blue\" text-decoration=\"underline\">a <tspan text-decoration=\"line-through none\" baseline-shift=\"sub\" fill=\"url(#x)\">b</tspan> <tspan visibility=\"hidden\" text-decoration=\"underline\">c</tspan></text></g></svg>",
     // Baselines inherited, overridden, and under a decoration and a shift.
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"4\" font-size=\"3\" dominant-baseline=\"central\" text-decoration=\"underline\">a<tspan alignment-baseline=\"hanging\" baseline-shift=\"super\">b</tspan><tspan dominant-baseline=\"no-change\" alignment-baseline=\"after-edge\">c</tspan></text></svg>",
+    // Crisp edges on shapes, text, markers and a pattern's content.
+    "<svg viewBox=\"0 0 8 8\" shape-rendering=\"crispEdges\"><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><circle cx=\"1\" cy=\"1\" r=\"0.7\"/></pattern><marker id=\"m\"><rect width=\"2\" height=\"2\" shape-rendering=\"auto\"/></marker><path d=\"M1 1 L7 3 L2 7\" fill=\"url(#p)\" stroke=\"red\" marker-mid=\"url(#m)\"/><text x=\"1\" y=\"7\" font-size=\"3\" text-rendering=\"optimizeSpeed\" text-decoration=\"underline\">t</text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

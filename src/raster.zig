@@ -757,6 +757,13 @@ fn paintDecoration(
     };
 }
 
+/// The anti-aliasing a shape is painted with: none where
+/// `shape-rendering` or `text-rendering` asks for crisp edges, the caller's
+/// otherwise. As resvg, a clip path or a mask keeps its anti-aliasing.
+fn antiAliasing(shape: document.Shape, opts: Options) z2d.options.AntiAliasMode {
+    return if (shape.crisp) .none else opts.anti_aliasing_mode;
+}
+
 /// Fills one shape onto `surface`: SVG 1.1 §11.3's first painting pass.
 ///
 /// `pen` is where a run of text starts, and is left where it ends.
@@ -795,7 +802,7 @@ fn paintFill(
             .tiled => |t| {
                 var region = try fillCoverage(gpa, surface, p.nodes.items, .{
                     .fill_rule = fill_rule,
-                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .anti_aliasing_mode = antiAliasing(shape, opts),
                     .tolerance = opts.tolerance,
                 });
                 defer region.deinit(gpa);
@@ -815,7 +822,7 @@ fn paintFill(
             else => if (built.pattern()) |source| {
                 try z2d.painter.fill(gpa, surface, &source, p.nodes.items, .{
                     .fill_rule = fill_rule,
-                    .anti_aliasing_mode = opts.anti_aliasing_mode,
+                    .anti_aliasing_mode = antiAliasing(shape, opts),
                     .tolerance = opts.tolerance,
                 });
             },
@@ -882,7 +889,7 @@ fn paintStroke(
             .dashes = nib.dashes(),
             .dash_offset = nib.dash_offset,
             .transformation = pen_ctm,
-            .anti_aliasing_mode = opts.anti_aliasing_mode,
+            .anti_aliasing_mode = antiAliasing(shape, opts),
             .tolerance = opts.tolerance,
         };
         // A pattern on a `stroke` covers the stroked outline rather

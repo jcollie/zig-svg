@@ -197,6 +197,15 @@ DIVERGENCES = {
     # crimson converted from linear, rather than (220,20,60). In linearRGB,
     # its default, it converts the right way. Measured at 2.570 and 5.263%.
     "filter-drop-shadow-srgb": (2.8, 0.055, "resvg converts an sRGB shadow colour as if it were linear"),
+    # `feImage` naming an element. Filter Effects 1 draws it "according to
+    # the behavior of the use element", in the filtered element's user
+    # space, and the subregion only cuts it: a circle at (16,16) under a
+    # region from y=20 shows its bottom edge. resvg translates what it draws
+    # to the subregion's corner and so draws the whole circle eight units
+    # right and twenty down. `filter-image-element`, whose region starts at
+    # the origin where the two come to the same thing, agrees. Measured at
+    # 12.109 and 7.963%.
+    "filter-image-element-offset": (13.0, 0.085, "resvg draws an feImage element from the subregion's corner, not user space"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

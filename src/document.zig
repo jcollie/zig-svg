@@ -752,6 +752,17 @@ pub const Document = struct {
         return it;
     }
 
+    /// A walk of `node` alone, under `ctm`, as a `<use>` of it would draw it:
+    /// the element and what is inside it, inheriting from where it is
+    /// written. What an `feImage` naming an element draws.
+    pub fn elementOf(self: *const Document, node: ztree.NodeId, ctm: z2d.Transformation) Error!PathIterator {
+        const parent = self.tree.node(node).parent orelse return self.subtree(node, ctm);
+        if (self.tree.node(parent).kind != .element) return self.subtree(node, ctm);
+        var it = try self.contentOf(parent, ctm);
+        it.stack[0].only_child = node;
+        return it;
+    }
+
     /// The runs of one `<text>`, for measuring.
     ///
     /// `subtree` deliberately leaves the root's own attributes alone, because
@@ -2059,7 +2070,7 @@ fn parseVisibility(raw: []const u8) Error!bool {
 /// `high-quality` are what `auto` already does here, and `crisp-edges` asks
 /// for "an algorithm that preserves contrast" which in practice every
 /// implementation, resvg included, answers with nearest-neighbour.
-fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
+pub fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
     const t = std.mem.trim(u8, raw, " \t\r\n");
     const smooth = [_][]const u8{ "auto", "optimizeQuality", "smooth", "high-quality" };
     const nearest = [_][]const u8{ "optimizeSpeed", "pixelated", "crisp-edges" };

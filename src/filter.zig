@@ -70,6 +70,7 @@ const color = @import("color.zig");
 const css = @import("css");
 const document = @import("document.zig");
 const length = @import("length.zig");
+const resample = @import("resample.zig");
 
 pub const Error = error{
     /// A `filterUnits` or `primitiveUnits` that is neither `userSpaceOnUse`
@@ -219,6 +220,17 @@ pub const Kind = union(enum) {
     /// Filter Effects 1's `feDropShadow`: the input over a blurred, offset,
     /// flooded copy of its own alpha. Its defaults are its own -- two for
     /// each of `dx`, `dy` and `stdDeviation`.
+    /// §15.18 of SVG 1.1, 9.15 of Filter Effects 1: a picture, fitted into
+    /// the subregion as an `<image>` is into its rectangle, or an element of
+    /// the document drawn as a `<use>` of it would be. Reads nothing.
+    image: struct {
+        /// The `feImage` element, which a decoded picture is kept under.
+        node: ztree.NodeId,
+        /// As written; null where there is none, which draws nothing.
+        href: ?[]const u8,
+        preserve_aspect_ratio: document.PreserveAspectRatio = .{},
+        sampling: resample.Sampling = .smooth,
+    },
     drop_shadow: struct {
         in: Input,
         dx: f64 = 2,
@@ -661,6 +673,21 @@ fn readPrimitives(
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
         } else if (std.mem.eql(u8, name, "feDiffuseLighting") or std.mem.eql(u8, name, "feSpecularLighting")) blk: {
             break :blk .{ .lighting = try lightingOf(tree, sheet, child, std.mem.eql(u8, name, "feSpecularLighting")) };
+        } else if (std.mem.eql(u8, name, "feImage")) blk: {
+            const href = tree.attributeValue(child, "", "href") orelse
+                tree.attributeValue(child, document.xlink_ns, "href");
+            break :blk .{ .image = .{
+                .node = child,
+                .href = if (href) |h| std.mem.trim(u8, h, " \t\r\n") else null,
+                .preserve_aspect_ratio = if (attr(tree, child, "preserveAspectRatio")) |raw|
+                    try document.PreserveAspectRatio.parse(raw)
+                else
+                    .{},
+                .sampling = if (css.property(sheet, tree, child, "image-rendering")) |raw|
+                    try document.parseImageRendering(raw)
+                else
+                    .smooth,
+            } };
         } else if (std.mem.eql(u8, name, "feDropShadow")) blk: {
             var sx: f64 = 2;
             var sy: f64 = 2;
@@ -1401,4 +1428,19 @@ test "a drop shadow has its own defaults" {
     try testing.expectEqual(@as(?color.Color, null), b.color);
     try testing.expectEqual(@as(f64, 0.5), b.opacity);
     try testing.expectError(error.BadStdDeviation, primitivesOf("<feDropShadow stdDeviation=\"-2\"/>"));
+}
+
+test "an feImage reads its href, fitting and sampling" {
+    // Read with the document kept alive: the href is borrowed from its tree.
+    var doc = try document.read(testing.allocator, "<svg viewBox=\"0 0 8 8\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><filter id=\"f\"><feImage/>" ++
+        "<feImage xlink:href=\" #a \" preserveAspectRatio=\"xMinYMax slice\" image-rendering=\"optimizeSpeed\"/>" ++
+        "</filter><rect width=\"8\" height=\"8\"/></svg>");
+    defer doc.deinit();
+    var f = (try read(testing.allocator, doc.tree, &doc.ids, &doc.stylesheet, doc.ids.get("f").?, doc.viewport())).?;
+    defer f.deinit(testing.allocator);
+    try testing.expectEqual(@as(?[]const u8, null), f.primitives[0].kind.image.href);
+    const b = f.primitives[1].kind.image;
+    try testing.expectEqualStrings("#a", b.href.?);
+    try testing.expect(b.preserve_aspect_ratio.slice);
+    try testing.expectEqual(resample.Sampling.nearest, b.sampling);
 }

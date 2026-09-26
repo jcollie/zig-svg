@@ -141,7 +141,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feTurbulencebaseFrequencynumOctavesseedstitchTilesstitchnoStitchfractalNoiseturbulence" ++
     "feDiffuseLightingfeSpecularLightingsurfaceScalediffuseConstantspecularConstantspecularExponentlighting-color" ++
     "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle" ++
-    "feDropShadowdxdystdDeviationflood-colorflood-opacity";
+    "feDropShadowdxdystdDeviationflood-colorflood-opacity" ++
+    "feImagehrefxlink:hrefpreserveAspectRatioimage-renderingoptimizeSpeed#";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -964,6 +965,9 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feDiffuseLighting in=\"SourceAlpha\" surfaceScale=\"3\" lighting-color=\"currentColor\"><fePointLight x=\"0.2\" y=\"0.1\" z=\"0.5\"/></feDiffuseLighting></filter><filter id=\"g\"><feSpecularLighting in=\"SourceAlpha\" specularExponent=\"128\" result=\"s\"><feSpotLight x=\"1\" y=\"1\" z=\"9\" pointsAtX=\"4\" pointsAtY=\"4\" limitingConeAngle=\"-20\" specularExponent=\"-1\"/></feSpecularLighting><feComposite in=\"SourceGraphic\" in2=\"s\" operator=\"arithmetic\" k2=\"1\" k3=\"1\"/><feDiffuseLighting><feDistantLight azimuth=\"1e30\" elevation=\"-90\"/></feDiffuseLighting></filter><circle cx=\"3\" cy=\"3\" r=\"2\" color=\"red\" filter=\"url(#f)\"/><rect x=\"4\" y=\"4\" width=\"3\" height=\"3\" filter=\"url(#g)\"/></svg>",
     // A drop shadow on its own defaults, and one of the current colour.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feDropShadow/><feDropShadow in=\"SourceAlpha\" dx=\"-1e9\" stdDeviation=\"0 1\" flood-color=\"currentColor\" flood-opacity=\"0.3\"/></filter><rect width=\"4\" height=\"4\" color=\"blue\" filter=\"url(#f)\"/></svg>",
+    // feImage of an element in bounding-box units, of a missing one, of the
+    // element filtering itself, and of a picture.
+    "<svg viewBox=\"0 0 8 8\"><defs><circle id=\"c\" cx=\"2\" cy=\"2\" r=\"2\" fill=\"red\"/></defs><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feImage href=\"#c\" x=\"0.5\"/><feImage href=\"#none\"/><feImage href=\"#r\" result=\"r\"/><feImage href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMaxYMid slice\" width=\"2\"/></filter><rect id=\"r\" width=\"4\" height=\"4\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

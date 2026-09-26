@@ -571,6 +571,7 @@ fn drawItems(
                     width,
                     height,
                     opts,
+                    pass,
                 ) catch |err| {
                     if (cut) |c| {
                         var owned = c;
@@ -632,6 +633,7 @@ fn drawItems(
                 width,
                 height,
                 opts,
+                pass,
             ) catch |err| {
                 if (cut) |c| {
                     var owned = c;
@@ -1098,6 +1100,7 @@ fn drawImage(
             width,
             height,
             opts,
+            pass,
         ) catch |err| {
             if (cut) |c| {
                 var owned = c;
@@ -1290,6 +1293,16 @@ const Filtered = struct {
     bbox: Box,
     /// What a `currentColor` in an `feFlood` resolves to.
     current: color.Color,
+    /// The region in the filtered element's user space, before it was
+    /// rounded out to pixels: what an `feImage`'s picture is fitted into by
+    /// default.
+    region_user: Box,
+    /// What an `feImage` needs to draw with, since it is the one primitive
+    /// that draws: the document, the budgets of the pass the filtered
+    /// element is in, and the options.
+    doc: *const document.Document,
+    pass: Pass,
+    opts: Options,
 
     fn deinit(self: *Filtered, gpa: Allocator) void {
         self.spec.deinit(gpa);
@@ -1315,6 +1328,7 @@ fn buildFilter(
     width: i32,
     height: i32,
     opts: Options,
+    pass: Pass,
 ) Error!?Filtered {
     const name = id orelse return null;
 
@@ -1347,6 +1361,10 @@ fn buildFilter(
     return .{
         .spec = spec,
         .region = pixelBoxOf(mappedBounds(ctm, region_user)).intersect(canvas),
+        .region_user = region_user,
+        .doc = doc,
+        .pass = pass,
+        .opts = opts,
         .scale_x = std.math.hypot(ctm.ax, ctm.cx),
         .scale_y = std.math.hypot(ctm.by, ctm.dy),
         .ctm = ctm,
@@ -1518,6 +1536,7 @@ const Chain = struct {
                 .turbulence => {},
                 .lighting => |l| self.noteUse(i, l.in),
                 .drop_shadow => |d| self.noteUse(i, d.in),
+                .image => {},
             }
         }
     }
@@ -1841,7 +1860,85 @@ const Chain = struct {
                 out.composite(in.sfc, .src_over, 0, 0, .{ .precision = .float });
                 self.finish(i, out, box, space);
             },
+            .image => |im| {
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, self.f.region);
+                try self.drawImage(&out, p, im);
+                // Drawn, so sRGB, as `SourceGraphic` is: the chain converts
+                // it wherever it is read.
+                self.finish(i, out, box, .srgb);
+            },
         }
+    }
+
+    /// What an `feImage` draws, into `out`.
+    ///
+    /// An element is drawn as a `<use>` of it would be, in the filtered
+    /// element's user space -- or its bounding box, under `objectBoundingBox`
+    /// primitive units -- as Filter Effects 1 says; the subregion only cuts
+    /// it. A picture is fitted into the subregion as an `<image>` is into its
+    /// rectangle, by `preserveAspectRatio`, fetched and decoded under the same
+    /// budgets and the same resolver.
+    fn drawImage(self: *Chain, out: *z2d.Surface, p: filter.Primitive, im: anytype) Error!void {
+        const href = im.href orelse return;
+        const f = self.f;
+        if (href.len > 0 and href[0] == '#') {
+            // Naming nothing is an empty picture, which Filter Effects 1
+            // makes transparent black.
+            const target = f.doc.ids.get(href[1..]) orelse return;
+            if (f.pass.depth >= f.opts.limits.max_mask_depth) return error.TooManyMaskHops;
+            const space: z2d.Transformation = if (f.spec.primitive_units == .object_bounding_box)
+                f.ctm.translate(f.bbox.x, f.bbox.y).scale(f.bbox.width, f.bbox.height)
+            else
+                f.ctm;
+            var layers: Layers = .{ .bottom = out };
+            defer layers.deinit(self.gpa);
+            var it = try f.doc.elementOf(target, space);
+            var deeper = f.pass;
+            deeper.base = .identity;
+            deeper.depth += 1;
+            return drawItems(self.gpa, &layers, f.doc, &it, deeper, f.opts);
+        }
+
+        const picture = try f.pass.images.get(self.gpa, im.node, href, f.opts.images);
+        const size: Size = .{
+            .width = @floatFromInt(picture.width()),
+            .height = @floatFromInt(picture.height()),
+        };
+        const rect = self.subregionUser(p, f.region_user);
+        if (!(rect.width > 0) or !(rect.height > 0)) return;
+        const as_image: document.Image = .{
+            .node = im.node,
+            .href = href,
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width,
+            .height = rect.height,
+            .preserve_aspect_ratio = im.preserve_aspect_ratio,
+            .sampling = im.sampling,
+            .opacity = 1,
+            .clip_path = null,
+            .mask = null,
+            .filter = null,
+            .current_color = null,
+            .visible = true,
+            .transform = f.ctm,
+        };
+        try paintImage(self.gpa, out, f.pass.images, picture, as_image, rect, size, f.ctm, 1.0, f.opts);
+    }
+
+    /// A primitive's subregion in user space: `default` with each edge the
+    /// primitive names replaced, in its `primitiveUnits`.
+    fn subregionUser(self: *const Chain, p: filter.Primitive, default: Box) Box {
+        const bbox = self.f.bbox;
+        const bbox_units = self.f.spec.primitive_units == .object_bounding_box;
+        return .{
+            .x = if (p.x) |v| (if (bbox_units) bbox.x + v * bbox.width else v) else default.x,
+            .y = if (p.y) |v| (if (bbox_units) bbox.y + v * bbox.height else v) else default.y,
+            .width = if (p.width) |v| (if (bbox_units) v * bbox.width else v) else default.width,
+            .height = if (p.height) |v| (if (bbox_units) v * bbox.height else v) else default.height,
+        };
     }
 
     /// A light source in canvas pixels: a position through the matrix in
@@ -6111,4 +6208,30 @@ test "markers are refused past the budget, and from anything but a marker" {
         "<path d=\"M0 0 L5 5\" marker-end=\"url(#r)\"/></svg>", .{ .width = 10, .height = 10 }));
     try testing.expectError(error.UnknownReference, render(gpa, "<svg viewBox=\"0 0 10 10\">" ++
         "<path d=\"M0 0 L5 5\" marker-end=\"url(#nothing)\"/></svg>", .{ .width = 10, .height = 10 }));
+}
+
+test "an feImage draws a picture into its subregion, an element where it is, and nothing for nothing" {
+    const gpa = testing.allocator;
+    // A one-pixel red PNG, fitted into the left half.
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 20 10\"><filter id=\"f\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"20\" height=\"10\">" ++
+        "<feImage href=\"" ++ png ++ "\" width=\"10\" preserveAspectRatio=\"none\"/></filter>" ++
+        "<rect width=\"1\" height=\"1\" filter=\"url(#f)\"/></svg>", .{ .width = 20, .height = 10 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(5, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(15, 5).?.rgba.a);
+
+    var el = try render(gpa, "<svg viewBox=\"0 0 20 10\"><defs><rect id=\"r\" x=\"12\" width=\"4\" height=\"10\"/></defs>" ++
+        "<filter id=\"f\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"20\" height=\"10\"><feImage href=\"#r\"/></filter>" ++
+        "<filter id=\"g\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"20\" height=\"10\"><feImage href=\"#nothing\"/></filter>" ++
+        "<rect width=\"1\" height=\"1\" filter=\"url(#f)\"/><rect width=\"10\" height=\"10\" filter=\"url(#g)\"/></svg>", .{ .width = 20, .height = 10 });
+    defer el.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), el.getPixel(14, 5).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), el.getPixel(4, 5).?.rgba.a);
+}
+
+test "an feImage of an element that filters itself with it is bounded" {
+    const gpa = testing.allocator;
+    try testing.expectError(error.TooManyMaskHops, render(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<filter id=\"f\"><feImage href=\"#r\"/></filter><rect id=\"r\" width=\"4\" height=\"4\" filter=\"url(#f)\"/></svg>", .{ .width = 8, .height = 8 }));
 }

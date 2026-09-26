@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48"><defs><circle id="dot" cx="16" cy="16" r="8" fill="crimson"/></defs><filter id="a" filterUnits="userSpaceOnUse" x="8" y="20" width="48" height="24"><feImage href="#dot"/></filter><rect width="1" height="1" filter="url(#a)"/></svg>

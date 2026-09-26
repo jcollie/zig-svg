@@ -652,6 +652,8 @@ const WireError = enum(u16) {
     bad_paint_order = 78,
     bad_marker = 79,
     too_many_markers = 80,
+    bad_color_matrix = 81,
+    bad_transfer_function = 82,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -736,6 +738,8 @@ fn wireFromError(err: anyerror) WireError {
         error.BadPaintOrder => .bad_paint_order,
         error.BadMarker => .bad_marker,
         error.TooManyMarkers => .too_many_markers,
+        error.BadColorMatrix => .bad_color_matrix,
+        error.BadTransferFunction => .bad_transfer_function,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -835,6 +839,8 @@ fn wireToError(status: u16) Error {
         .bad_paint_order => error.BadPaintOrder,
         .bad_marker => error.BadMarker,
         .too_many_markers => error.TooManyMarkers,
+        .bad_color_matrix => error.BadColorMatrix,
+        .bad_transfer_function => error.BadTransferFunction,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1126,6 +1132,8 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadPaintOrder, .bad_paint_order },
         .{ error.BadMarker, .bad_marker },
         .{ error.TooManyMarkers, .too_many_markers },
+        .{ error.BadColorMatrix, .bad_color_matrix },
+        .{ error.BadTransferFunction, .bad_transfer_function },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

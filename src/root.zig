@@ -84,6 +84,8 @@ pub const pattern = @import("pattern.zig");
 pub const filter = @import("filter.zig");
 /// The pixel operations those primitives are made of.
 pub const image = @import("image.zig");
+/// The rest of them: the colour, compositing and neighbourhood operations.
+pub const fe = @import("fe.zig");
 /// The pictures an `<image>` names: fetched from a `data:` URL or the
 /// caller, decoded by z2dimg, and kept for the length of a render.
 pub const bitmap = @import("bitmap.zig");
@@ -157,6 +159,7 @@ test {
     _ = gradient;
     _ = pattern;
     _ = filter;
+    _ = fe;
     _ = image;
     _ = bitmap;
     _ = resample;

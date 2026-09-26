@@ -26,6 +26,7 @@ const bitmap = @import("bitmap.zig");
 const color = @import("color.zig");
 const css = @import("css");
 const document = @import("document.zig");
+const fe = @import("fe.zig");
 const filter = @import("filter.zig");
 const gradient = @import("gradient.zig");
 const image = @import("image.zig");
@@ -1497,6 +1498,8 @@ const Chain = struct {
                 .merge => |m| for (self.f.spec.merge_nodes[m.first..][0..m.count]) |in| {
                     self.noteUse(i, in);
                 },
+                .color_matrix => |c| self.noteUse(i, c.in),
+                .component_transfer => |c| self.noteUse(i, c.in),
             }
         }
     }
@@ -1674,6 +1677,25 @@ const Chain = struct {
                     covered = covered.unite(in.box);
                 }
                 self.finish(i, out, self.subregion(i, p, covered), space);
+            },
+            .color_matrix => |c| {
+                const in = try self.resolve(i, c.in, space);
+                var out = try in.sfc.clone(self.gpa);
+                errdefer out.deinit(self.gpa);
+                // The whole subregion and not only what the input covered: a
+                // matrix with a constant in its alpha row lights up pixels
+                // that were transparent.
+                const box = self.subregion(i, p, in.box);
+                fe.colorMatrix(&out, box, &c.matrix);
+                self.finish(i, out, box, space);
+            },
+            .component_transfer => |c| {
+                const in = try self.resolve(i, c.in, space);
+                var out = try in.sfc.clone(self.gpa);
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, in.box);
+                fe.componentTransfer(&out, box, &c.funcs, self.f.spec.numbers);
+                self.finish(i, out, box, space);
             },
         }
     }

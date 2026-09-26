@@ -136,6 +136,12 @@ DIVERGENCES = {
     # is only whitespace and draws "de". The whole of the difference is the
     # "e" sitting one space further right. Measured at 7.187 and 3.259%.
     "text-space-only-tspan": (8.0, 0.04, "a whitespace-only run is a space; resvg drops it"),
+    # `feColorMatrix type="saturate"` above one. SVG 1.1 gave the value a
+    # range of zero to one; Filter Effects 1 lifted the top, and a value past
+    # it oversaturates -- which is what this draws and what browsers draw.
+    # resvg still clamps to one, and draws the input unchanged. Measured at
+    # 4.108 and 9.440%.
+    "filter-color-matrix-saturate-over": (4.5, 0.10, "saturate above one oversaturates; resvg clamps it to one"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

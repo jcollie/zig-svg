@@ -276,11 +276,19 @@ and compositing it down. §15 orders that carefully — the filter
 runs first, and the element's `clip-path`, `mask` and `opacity` then apply to
 what the filter produced rather than to what it read.
 
-`feGaussianBlur`, `feOffset`, `feFlood` and `feMerge` are implemented, with
-`in`, `result`, `SourceGraphic` and `SourceAlpha` wiring them together, which
-is between them the canonical drop shadow and most of what documents in the
-wild actually use. Any other `fe` element is **refused**, because a chain with
-a link missing is not the picture the document asked for.
+`feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix` and
+`feComponentTransfer` are implemented, with `in`, `result`, `SourceGraphic` and
+`SourceAlpha` wiring them together. Any other `fe` element is **refused**,
+because a chain with a link missing is not the picture the document asked for.
+
+The two colour primitives work on colour with the alpha divided out, as §15.10
+and §15.11 define them, so a matrix with a constant in its alpha row can light
+up pixels that were transparent — anywhere in the primitive's subregion, not
+only where its input drew. `saturate` above one oversaturates, as Filter
+Effects 1 allows and browsers draw; resvg still clamps it to one, and the
+fixture that shows it is a recorded divergence. A matrix with the wrong number
+of `values`, a negative `saturate`, and a transfer function with no `type` or
+an unknown one are refused, where resvg quietly draws the identity.
 
 **A filter runs on the canvas, not in user space.** A `stdDeviation` in user
 units becomes a standard deviation in device pixels by the scale of the matrix
@@ -455,7 +463,7 @@ short of the specification.
 | `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
-| `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`; any other `fe` element is refused |
+| `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`; any other `fe` element is refused |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |
 | `filterRes` | ignored, as resvg ignores it |
@@ -934,9 +942,10 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Next are the filter primitives this does not yet have: `feColorMatrix`,
-`feComposite`, `feBlend`, `feComponentTransfer`, `feTile`, `feMorphology`,
-`feImage`, and the three that need a light model. Outside those, what SVG 1.1
+Next are the filter primitives this does not yet have: `feComposite`,
+`feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`,
+`feTurbulence`, `feImage`, `feDropShadow`, the two that need a light model, and
+the CSS filter functions. Outside those, what SVG 1.1
 has that this does not is `@media`, the CSS pseudo-classes, the
 `spacingAndGlyphs` form of `lengthAdjust`, and an `<image>` of another SVG
 document, which wants a render nested in a render with its own viewport and a

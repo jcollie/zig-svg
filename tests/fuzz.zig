@@ -1032,6 +1032,9 @@ const document_corpus = [_][]const u8{
     // Position lists across tspans, rotate inherited and repeated, textLength
     // nested with both adjustments, anchored chunks, and a textPath counted in.
     "<svg viewBox=\"0 0 64 32\" font-size=\"6\"><path id=\"p\" d=\"M2 30 Q32 20 62 30\"/><text x=\"2 8 14\" y=\"8 10\" dx=\"0 1\" rotate=\"5 -5\" textLength=\"50\" text-anchor=\"middle\">ab<tspan x=\"30\" dy=\"1 2 3\" rotate=\"20\" textLength=\"12\" lengthAdjust=\"spacingAndGlyphs\">cde</tspan>fg<textPath href=\"#p\">on it</textPath>hi</text><text x=\"4\" y=\"20\" text-decoration=\"underline\" textLength=\"30\">u<tspan dx=\"2\">nder</tspan></text></svg>",
+    // tref: its characters in its own style, twice in one text, with lists,
+    // naming nested text, and naming an element with none.
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 64 32\" font-size=\"6\"><defs><text id=\"t\">Re<tspan>f<a>er</a></tspan>red</text><g id=\"e\"/></defs><text x=\"2\" y=\"10\" xml:space=\"preserve\">a <tref xlink:href=\"#t\" x=\"8 12\" rotate=\"4\" fill=\"red\"/> <tref href=\"#t\" textLength=\"20\"/><tref href=\"#e\"/></text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

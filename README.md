@@ -587,6 +587,7 @@ short of the specification.
 | `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
 | `text-anchor` | yes — `start`, `middle`, `end` |
 | `rotate`, `textLength`, `lengthAdjust` | yes, reaching into `<tspan>`s as the position lists do; `rotate`'s last angle stands for the characters past its end; `textLength` is applied innermost first, by `spacing` or by `spacingAndGlyphs`, an element already adjusted moving as one character within the one around it, as SVG 2's algorithm has it |
+| `<tref>` | yes, as SVG 1.1 §10.6 has it — the character data of the element it names, all of it and in order, drawn as though it were the `<tref>`'s own, in its style and at its positions, as resvg draws it (Chrome dropped it with SVG 2) |
 | `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style` | yes — §6.3's declaration block, which outranks the attributes |
@@ -1107,8 +1108,8 @@ What SVG 1.1 has that this does not is vertical and right-to-left text —
 `writing-mode`, `direction: rtl` and `unicode-bidi` — which want the Unicode
 bidirectional algorithm, contextual shaping from the font's `GSUB` for Arabic
 and the other joining scripts, and vertical metrics z2d does not read yet;
-`@media` and the CSS pseudo-classes; `<tref>`; and a decoration along a
-`<textPath>` or across glyphs placed one by one. Each is refused rather than
+`@media` and the CSS pseudo-classes; and a decoration along a `<textPath>` or
+across glyphs placed one by one. Each is refused rather than
 ignored, so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and

@@ -3721,9 +3721,17 @@ const TextLayouts = struct {
 const TextLayout = struct {
     runs: std.ArrayList(RunPlace) = .empty,
     glyphs: std.ArrayList(GlyphPlace) = .empty,
-    /// Which run a run's characters are, by where they are in the tree's
-    /// arena -- which is what a run drawn through a `<use>` still points at.
-    by_run: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Which run is which, by where its characters are in the tree's arena
+    /// -- which is what a run drawn through a `<use>` still points at -- and
+    /// the element they are drawn in, since two `<tref>`s may draw the same
+    /// characters in one `<text>`.
+    by_run: std.AutoHashMapUnmanaged(RunKey, usize) = .empty,
+
+    const RunKey = struct { chars: usize, element: ztree.NodeId };
+
+    fn keyOf(run: shapes.Text) RunKey {
+        return .{ .chars = @intFromPtr(run.utf8.ptr), .element = run.element };
+    }
 
     const RunPlace = struct {
         first: usize,
@@ -3768,8 +3776,8 @@ const TextLayout = struct {
         self.by_run.deinit(gpa);
     }
 
-    fn runFor(self: *const TextLayout, utf8: []const u8) ?RunPlace {
-        const i = self.by_run.get(@intFromPtr(utf8.ptr)) orelse return null;
+    fn runFor(self: *const TextLayout, run: shapes.Text) ?RunPlace {
+        const i = self.by_run.get(keyOf(run)) orelse return null;
         return self.runs.items[i];
     }
 };
@@ -3963,7 +3971,7 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
             place.x0 = pen_x;
             place.x1 = pen_x;
             place.baseline = pen_y;
-            try out.by_run.put(gpa, @intFromPtr(r.run.utf8.ptr), out.runs.items.len);
+            try out.by_run.put(gpa, TextLayout.keyOf(r.run), out.runs.items.len);
             try out.runs.append(gpa, place);
             continue;
         }
@@ -4013,7 +4021,7 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
         place.x0 = pen_x;
         place.x1 = pen_x;
         place.baseline = pen_y - shift;
-        try out.by_run.put(gpa, @intFromPtr(r.run.utf8.ptr), out.runs.items.len);
+        try out.by_run.put(gpa, TextLayout.keyOf(r.run), out.runs.items.len);
         try out.runs.append(gpa, place);
     }
     const glyphs = out.glyphs.items;
@@ -4194,7 +4202,7 @@ fn buildText(
     var own: TextLayouts = .{};
     defer own.deinit(gpa);
     const layout = try (pen.layouts orelse &own).get(gpa, doc, run.owner, opts);
-    const place = layout.runFor(run.utf8) orelse return;
+    const place = layout.runFor(run) orelse return;
     pen.run_x0 = place.x0;
     pen.run_x1 = place.x1;
     pen.run_baseline = place.baseline;

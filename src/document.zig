@@ -1267,6 +1267,12 @@ pub const PathIterator = struct {
         /// the `<use>` names, walked as though it were the `<use>`'s only
         /// child. Null for every other frame, whose children are its own.
         only_child: ?ztree.NodeId = null,
+        /// For a `<tref>`, the element whose character data it draws, and the
+        /// last of that element's text nodes drawn so far: SVG 1.1 §10.6's
+        /// characters stand in for the `<tref>`'s children, which it has
+        /// none of.
+        tref_source: ?ztree.NodeId = null,
+        tref_last: ?ztree.NodeId = null,
         /// The size of the viewport a percentage inside this frame is of,
         /// when a nested `<svg>` or a `<symbol>` established one; null for
         /// the document's own.
@@ -1314,6 +1320,18 @@ pub const PathIterator = struct {
 
         while (true) {
             const top = &self.stack[self.depth];
+            // A `<tref>` is drawn as though its children were the character
+            // data of what it names, one text node at a time and in document
+            // order, each a run in the `<tref>`'s own style and positions.
+            if (top.tref_source) |source| {
+                if (nextTextIn(tree, source, top.tref_last)) |t| {
+                    top.tref_last = t;
+                    if (try self.runFrom(t, top.*)) |item| return item;
+                    continue;
+                }
+                top.tref_source = null;
+                top.next_child = std.math.maxInt(usize);
+            }
             const children: []const ztree.NodeId = if (top.only_child) |*only|
                 @as(*const [1]ztree.NodeId, only)
             else
@@ -1667,6 +1685,16 @@ pub const PathIterator = struct {
         return preservesSpaceIn(self.doc.tree, node);
     }
 
+    /// What a `<tref>` names, or null when it names nothing -- which the walk
+    /// has refused by the time anything else asks.
+    fn trefSource(self: *const PathIterator, tref: ztree.NodeId) ?ztree.NodeId {
+        const raw = self.doc.tree.attributeValue(tref, "", "href") orelse
+            self.doc.tree.attributeValue(tref, xlink_ns, "href") orelse return null;
+        const target = std.mem.trim(u8, raw, " \t\r\n");
+        if (target.len < 2 or target[0] != '#') return null;
+        return self.doc.ids.get(target[1..]);
+    }
+
     fn textAfter(self: *const PathIterator, node: ztree.NodeId, after: ztree.NodeId, passed: *bool) bool {
         const tree = self.doc.tree;
         for (tree.node(node).children.items) |c| {
@@ -1680,6 +1708,17 @@ pub const PathIterator = struct {
                 .element => {
                     if (!(isTextish(tree, c) or localIs(tree, c, "a"))) continue;
                     if (self.displayNone(c)) continue;
+                    if (localIs(tree, c, "tref")) {
+                        // Its characters are the ones it names.
+                        const source = self.trefSource(c) orelse continue;
+                        var t = nextTextIn(tree, source, null);
+                        while (t) |text| : (t = nextTextIn(tree, source, text)) {
+                            if (text == after) {
+                                passed.* = true;
+                            } else if (passed.* and !allWhitespace(tree.node(text).value)) return true;
+                        }
+                        continue;
+                    }
                     if (self.textAfter(c, after, passed)) return true;
                 },
                 else => {},
@@ -2040,6 +2079,9 @@ pub const PathIterator = struct {
             if (vp) |v| {
                 self.stack[self.depth].viewport_width = v.width;
                 self.stack[self.depth].viewport_height = v.height;
+            }
+            if (std.mem.eql(u8, name, "tref")) {
+                self.stack[self.depth].tref_source = try self.resolve(node);
             }
             // §5.8.3: a `<switch>` draws its first direct child whose
             // conditions pass, and none of the others -- which is how an
@@ -2459,7 +2501,43 @@ fn isContainer(name: []const u8) bool {
 /// comes first decides where the next begins.
 fn isTextishName(name: []const u8) bool {
     return std.mem.eql(u8, name, "text") or std.mem.eql(u8, name, "tspan") or
-        std.mem.eql(u8, name, "textPath");
+        std.mem.eql(u8, name, "textPath") or std.mem.eql(u8, name, "tref");
+}
+
+/// The next text node inside `root`, in document order, after `after` -- or
+/// the first, when `after` is null.
+///
+/// Walked by parent and sibling rather than by recursion, so that however
+/// deeply the element a `<tref>` names is nested, finding its characters
+/// costs no stack.
+fn nextTextIn(tree: *const ztree.Document, root: ztree.NodeId, after: ?ztree.NodeId) ?ztree.NodeId {
+    var node: ztree.NodeId = after orelse root;
+    // Entering the root, or stepping past a text node, which has no children.
+    var descend = after == null;
+    while (true) {
+        if (descend) {
+            const kids = tree.node(node).children.items;
+            if (kids.len > 0) {
+                node = kids[0];
+                if (tree.node(node).kind == .text) return node;
+                continue;
+            }
+        }
+        descend = true;
+        // Up until there is a next sibling, and never above the root.
+        while (true) {
+            if (node == root) return null;
+            const parent = tree.node(node).parent orelse return null;
+            const siblings = tree.node(parent).children.items;
+            const at = std.mem.findScalar(ztree.NodeId, siblings, node).?;
+            if (at + 1 < siblings.len) {
+                node = siblings[at + 1];
+                break;
+            }
+            node = parent;
+        }
+        if (tree.node(node).kind == .text) return node;
+    }
 }
 
 fn isTextish(tree: *const ztree.Document, node: ztree.NodeId) bool {
@@ -4731,4 +4809,36 @@ test "a radius that is auto, or absent from an ellipse, is the other one" {
         try testing.expectEqual(w.ry, e.ry);
     }
     try testing.expectError(error.BadLength, read(gpa, "<svg viewBox=\"0 0 8 8\"><ellipse rx=\"automatic\" ry=\"1\"/></svg>"));
+}
+
+test "a tref draws the character data of what it names, as its own" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 8 8\">" ++
+        "<defs><text id=\"t\" fill=\"blue\">Re<tspan fill=\"green\">fer</tspan>red</text></defs>" ++
+        "<text>a <tref xlink:href=\"#t\" x=\"5\" fill=\"red\"/> b</text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var got: [5][]const u8 = undefined;
+    var red: [5]bool = undefined;
+    var n: usize = 0;
+    var tref_x: ?f64 = null;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| {
+            got[n] = sh.geometry.text.utf8;
+            red[n] = if (sh.fill) |f| f == .color and f.color.r == 255 else false;
+            if (n == 1) tref_x = sh.geometry.text.x;
+            n += 1;
+        },
+        else => {},
+    };
+    // Every text node inside what it names, in order and in the `<tref>`'s
+    // own fill -- not the fills they were written in -- and its own `x`.
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqualStrings("Re", got[1]);
+    try testing.expectEqualStrings("fer", got[2]);
+    try testing.expectEqualStrings("red", got[3]);
+    for (1..4) |i| try testing.expect(red[i]);
+    try testing.expect(!red[0] and !red[4]);
+    try testing.expectEqual(@as(?f64, 5), tref_x);
+    try testing.expectError(error.UnknownReference, read(gpa, "<svg viewBox=\"0 0 8 8\"><text><tref href=\"#nothing\"/></text></svg>"));
 }

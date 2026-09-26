@@ -83,7 +83,8 @@ OUTLIER_FRACTION = 0.0025
 # is held to the tolerances above, so a new disagreement still shows up as a
 # failure rather than disappearing into a blanket allowance.
 #
-# All four are `<filter>`, and they are here for two separate reasons.
+# The first five are `<filter>`, and they are here for two separate
+# reasons; the rest each carry their reason beside them.
 #
 # **The kernel.** §15.17 defines `feGaussianBlur` as a Gaussian and then offers
 # an approximation -- "the implementation *can* approximate the Gaussian blur

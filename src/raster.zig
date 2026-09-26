@@ -3949,6 +3949,15 @@ fn makeSource(
         // §13.2.2's `spreadMethod`, whose three values are z2d's three extend
         // modes under the same meanings.
         .extend = spec.spread,
+        // Stops are interpolated as they are, not multiplied by their alpha
+        // first. SVG says only "linear interpolation per channel", and every
+        // SVG renderer reads that straight: Chromium, Gecko and WebKit each
+        // interpolate an SVG gradient's stops straight and keep premultiplied
+        // for CSS gradients alone, the SVG working group left it that way in
+        // 2016 (w3c/svgwg#180), and resvg agrees. The two differ only where a
+        // stop is translucent -- there a translucent stop's colour reaches
+        // across towards the opaque one, where premultiplied it would not.
+        .alpha = .straight,
     });
     errdefer g.deinit(gpa);
 

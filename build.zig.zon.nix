@@ -193,20 +193,20 @@ copyFarm name
       };
     }
     {
-      name = "z2d-0.12.2-pre-j5P_HnUtEgB-WFJ_HPagXmB5wIgULczoSsuw2GNoWQUh";
+      name = "z2d-0.12.2-pre-j5P_HkJXEgD3cxH79oFZ477m7Z6OTciowT6GqvhlDP77";
       path = fetchZigArtifact {
         name = "z2d";
-        url = "git+https://git.jcollie.dev/jeff/z2d.git#c016785e3c98f289b11041deb0e60fd0e3103b7f";
-        hash = "sha256-0ymKni+/eVe7CwwYRn8hTIDFkfGExQ8BU66P85E3diM=";
+        url = "git+https://git.jcollie.dev/jeff/z2d.git#7a93578a0876e6b965958872192f42927421739f";
+        hash = "sha256-6u/7fSP5IQTc4Bpr9InCoMof4qBz9SPSoelCaUPYVA8=";
         unpack = true;
       };
     }
     {
-      name = "z2dimg-0.0.0-N7PaCfgDJQDuLSbcHztfA2lTkEttYcStz49aJ9G-lVr0";
+      name = "z2dimg-0.0.0-N7PaCY8jJABxfwk5-I_iGEtJclqNXrRKVRQIOKJZe94k";
       path = fetchZigArtifact {
         name = "z2dimg";
-        url = "git+https://git.jcollie.dev/jeff/z2dimg.git#4af70f61b5c4f7e64602ae3f118c742b09eac866";
-        hash = "sha256-W1O7d8oH9o/cQD4P3675hsIA8sItIdfcpy7huT8n0tI=";
+        url = "git+https://git.jcollie.dev/jeff/z2dimg.git#5d0079ae5179b54510ffaf98fc5bf78f279ab069";
+        hash = "sha256-MvGdzjijj6ETDVYUD+6V3q5azGRcFPwI5nLUNHN4NpA=";
         unpack = true;
       };
     }

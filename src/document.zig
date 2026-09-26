@@ -830,6 +830,11 @@ pub const Document = struct {
     /// What measures an element for `transform-box: fill-box`, installed by
     /// the rasterizer for as long as it is drawing. See `Measurer`.
     measurer: ?Measurer = null,
+    /// Whether this is an SVG drawn as the picture of another document's
+    /// `<image>`. Such a document names pictures of its own by `data:` URL
+    /// only, as a browser's SVG-as-image does: nothing outside it is fetched
+    /// on its behalf, and the caller's resolver is not asked.
+    as_image: bool = false,
 
     pub fn deinit(self: *Document) void {
         self.stylesheet.deinit();

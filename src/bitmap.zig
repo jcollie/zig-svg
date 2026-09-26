@@ -26,7 +26,9 @@
 //! z2dimg reads the signature, which is what a browser does too, and a PNG
 //! labelled `image/jpeg` is drawn as the PNG it is. The one claim that is
 //! believed is `image/svg+xml`, because a document inside a document is a
-//! render of its own rather than a decode, and it is refused as such.
+//! render of its own rather than a decode: `Fetched.isSvg` says which it is,
+//! and the renderer draws an SVG itself rather than asking this to decode
+//! one.
 //!
 //! ## What is ignored
 //!
@@ -56,9 +58,8 @@ pub const Error = error{
     /// Bytes that claim to be an image of a kind z2dimg reads, and are broken:
     /// a length that does not fit, a stream that ends early.
     BadImageData,
-    /// Bytes that are no image z2dimg reads -- a format it does not know, a
-    /// variant of one it does that it refuses, or an SVG, which would be a
-    /// document inside a document.
+    /// Bytes that are no image z2dimg reads -- a format it does not know, or
+    /// a variant of one it does that it refuses.
     UnsupportedImageFormat,
     /// An image larger than what is left of `Limits.max_image_pixels`, or
     /// wider or taller than the picture itself may be.
@@ -123,6 +124,16 @@ pub const Bitmap = struct {
     }
 };
 
+/// Which element named a picture, in which document.
+///
+/// The document as well as the element, because an SVG drawn as a picture is
+/// a document of its own, whose node ids start from nothing again: element
+/// seven of the picture is not element seven of the page.
+pub const Key = struct {
+    tree: *const ztree.Document,
+    node: ztree.NodeId,
+};
+
 /// Every picture a render has decoded, by the `<image>` element that named it.
 ///
 /// Keyed by element rather than by URL, because the element is what is
@@ -131,7 +142,7 @@ pub const Bitmap = struct {
 /// are two decodes, which costs time and not correctness, and is not worth
 /// hashing a megabyte of base64 to avoid.
 pub const Cache = struct {
-    entries: std.AutoHashMapUnmanaged(ztree.NodeId, Bitmap) = .empty,
+    entries: std.AutoHashMapUnmanaged(Key, Bitmap) = .empty,
     budget: Budget,
 
     pub fn init(budget: Budget) Cache {
@@ -144,30 +155,42 @@ pub const Cache = struct {
         self.entries.deinit(gpa);
     }
 
-    /// The picture `node` names, decoded the first time it is asked for.
+    /// The picture `key` names, decoded the first time it is asked for.
+    ///
+    /// An SVG is not decoded here: the caller asks `Fetched.isSvg` first and
+    /// draws one itself, and one that reaches here anyway is no format z2dimg
+    /// reads.
     pub fn get(
         self: *Cache,
         gpa: Allocator,
-        node: ztree.NodeId,
+        key: Key,
         href: []const u8,
         resolver: ?Resolver,
     ) Error!*Bitmap {
-        if (self.entries.getPtr(node)) |b| return b;
+        if (self.entries.getPtr(key)) |b| return b;
         if (self.budget.images == 0) return error.TooManyImages;
 
         var fetched = try fetch(gpa, href, resolver);
         defer fetched.deinit();
+        if (fetched.isSvg()) return error.UnsupportedImageFormat;
         var surface = try decode(gpa, fetched.bytes, self.budget);
         errdefer surface.deinit(gpa);
 
         var bitmap: Bitmap = .{};
         errdefer bitmap.levels.deinit(gpa);
         try bitmap.levels.append(gpa, surface);
-        try self.entries.putNoClobber(gpa, node, bitmap);
+        try self.entries.putNoClobber(gpa, key, bitmap);
 
         self.budget.images -= 1;
         self.budget.pixels -= pixelCount(&surface);
-        return self.entries.getPtr(node).?;
+        return self.entries.getPtr(key).?;
+    }
+
+    /// Counts one picture that is not decoded here -- an SVG, drawn by the
+    /// renderer -- against the same limit on how many a render may have.
+    pub fn takeOne(self: *Cache) Error!void {
+        if (self.budget.images == 0) return error.TooManyImages;
+        self.budget.images -= 1;
     }
 
     /// `bitmap` halved `k` times, made the first time it is asked for.
@@ -209,33 +232,46 @@ fn pixelCount(sfc: *const z2d.Surface) u64 {
 }
 
 /// Encoded bytes, and whatever has to be released once they are decoded.
-const Fetched = struct {
+pub const Fetched = struct {
     bytes: []const u8,
     url: ?uri.data.Url = null,
+    /// A `data:` URL that said `image/svg+xml`.
+    claims_svg: bool = false,
 
-    fn deinit(self: *Fetched) void {
+    pub fn deinit(self: *Fetched) void {
         if (self.url) |u| u.deinit();
+    }
+
+    /// Whether this is an SVG document rather than a bitmap: said to be one,
+    /// or starting -- after any byte-order mark and whitespace -- with `<`,
+    /// which no format z2dimg reads can begin with. A resolver's answer has
+    /// no media type to believe, so it is read from the bytes as the other
+    /// formats are.
+    pub fn isSvg(self: *const Fetched) bool {
+        if (self.claims_svg) return true;
+        var rest = self.bytes;
+        if (std.mem.startsWith(u8, rest, "\xEF\xBB\xBF")) rest = rest[3..];
+        rest = std.mem.trimStart(u8, rest, " \t\r\n");
+        return rest.len > 0 and rest[0] == '<';
     }
 };
 
 /// The encoded bytes an `href` names.
-fn fetch(gpa: Allocator, raw: []const u8, resolver: ?Resolver) Error!Fetched {
+pub fn fetch(gpa: Allocator, raw: []const u8, resolver: ?Resolver) Error!Fetched {
     const href = std.mem.trim(u8, raw, " \t\r\n");
     if (isDataUrl(href)) {
         const url = uri.data.Url.parse(gpa, href) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.BadDataUrl,
         };
-        errdefer url.deinit();
-        // Believed, unlike every other media type: a nested document is not
-        // something a decoder is going to recognise, and saying so by name is
-        // better than reporting it as an unknown format.
-        if (url.media_type) |mt| {
-            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, mt, " \t"), "image/svg+xml")) {
-                return error.UnsupportedImageFormat;
-            }
-        }
-        return .{ .bytes = url.data, .url = url };
+        // Believed, unlike every other media type: a nested document is a
+        // render rather than a decode, and one said to be SVG is read as one
+        // whatever its first byte is.
+        const claims_svg = if (url.media_type) |mt|
+            std.ascii.eqlIgnoreCase(std.mem.trim(u8, mt, " \t"), "image/svg+xml")
+        else
+            false;
+        return .{ .bytes = url.data, .url = url, .claims_svg = claims_svg };
     }
     const r = resolver orelse return error.UnresolvedImage;
     return .{ .bytes = r.resolve(r.ctx, href) orelse return error.UnresolvedImage };
@@ -327,16 +363,20 @@ const test_budget: Budget = .{
     .max_height = 1 << 12,
 };
 
+/// A key for tests that have no document: the element is what matters, and
+/// the document is never looked at, only compared.
+const test_key: Key = .{ .tree = @ptrFromInt(@alignOf(ztree.Document)), .node = 1 };
+
 test "a data URL is decoded to premultiplied RGBA" {
     var cache: Cache = .init(test_budget);
     defer cache.deinit(testing.allocator);
-    const b = try cache.get(testing.allocator, 1, "data:image/png;base64," ++ red_png_base64, null);
+    const b = try cache.get(testing.allocator, test_key, "data:image/png;base64," ++ red_png_base64, null);
     try testing.expectEqual(@as(u32, 1), b.width());
     try testing.expectEqual(@as(u32, 1), b.height());
     const px = b.levels.items[0].image_surface_rgba.buf[0];
     try testing.expectEqual(z2d.pixel.RGBA{ .r = 255, .g = 0, .b = 0, .a = 255 }, px);
     // Asked for again, it is the same decode.
-    try testing.expectEqual(b, try cache.get(testing.allocator, 1, "ignored", null));
+    try testing.expectEqual(b, try cache.get(testing.allocator, test_key, "ignored", null));
     try testing.expectEqual(@as(usize, 15), cache.budget.images);
 }
 
@@ -344,27 +384,28 @@ test "base64 broken across lines is still base64" {
     var cache: Cache = .init(test_budget);
     defer cache.deinit(testing.allocator);
     const wrapped = "  data:image/png;base64," ++ red_png_base64[0..40] ++ "\n    " ++ red_png_base64[40..] ++ "\n";
-    _ = try cache.get(testing.allocator, 1, wrapped, null);
+    _ = try cache.get(testing.allocator, test_key, wrapped, null);
 }
 
 test "the media type is not what chooses the decoder" {
     var cache: Cache = .init(test_budget);
     defer cache.deinit(testing.allocator);
-    _ = try cache.get(testing.allocator, 1, "data:image/jpeg;base64," ++ red_png_base64, null);
+    _ = try cache.get(testing.allocator, test_key, "data:image/jpeg;base64," ++ red_png_base64, null);
 }
 
 test "every way an href can fail says which" {
     const gpa = testing.allocator;
     var cache: Cache = .init(test_budget);
     defer cache.deinit(gpa);
-    try testing.expectError(error.BadDataUrl, cache.get(gpa, 1, "data:image/png;base64", null));
-    try testing.expectError(error.BadDataUrl, cache.get(gpa, 1, "data:image/png;base64,!!!!", null));
-    try testing.expectError(error.UnresolvedImage, cache.get(gpa, 1, "picture.png", null));
-    try testing.expectError(error.UnsupportedImageFormat, cache.get(gpa, 1, "data:text/plain,hello", null));
-    try testing.expectError(error.UnsupportedImageFormat, cache.get(gpa, 1, "data:image/svg+xml,<svg/>", null));
+    try testing.expectError(error.BadDataUrl, cache.get(gpa, test_key, "data:image/png;base64", null));
+    try testing.expectError(error.BadDataUrl, cache.get(gpa, test_key, "data:image/png;base64,!!!!", null));
+    try testing.expectError(error.UnresolvedImage, cache.get(gpa, test_key, "picture.png", null));
+    try testing.expectError(error.UnsupportedImageFormat, cache.get(gpa, test_key, "data:text/plain,hello", null));
+    // An SVG is the renderer's to draw, and not a format to decode.
+    try testing.expectError(error.UnsupportedImageFormat, cache.get(gpa, test_key, "data:image/svg+xml,<svg/>", null));
     try testing.expectError(
         error.BadImageData,
-        cache.get(gpa, 1, "data:image/png;base64," ++ red_png_base64[0..60], null),
+        cache.get(gpa, test_key, "data:image/png;base64," ++ red_png_base64[0..60], null),
     );
     // None of those spent anything.
     try testing.expectEqual(test_budget, cache.budget);
@@ -385,25 +426,25 @@ test "a resolver answers for anything that is not a data URL" {
 
     var cache: Cache = .init(test_budget);
     defer cache.deinit(testing.allocator);
-    _ = try cache.get(testing.allocator, 1, " red.png ", resolver);
-    try testing.expectError(error.UnresolvedImage, cache.get(testing.allocator, 2, "blue.png", resolver));
+    _ = try cache.get(testing.allocator, test_key, " red.png ", resolver);
+    try testing.expectError(error.UnresolvedImage, cache.get(testing.allocator, .{ .tree = test_key.tree, .node = 2 }, "blue.png", resolver));
 }
 
 test "the budget is spent across pictures, and a picture past it is refused" {
     var cache: Cache = .init(.{ .pixels = 1, .images = 16, .max_width = 8, .max_height = 8 });
     defer cache.deinit(testing.allocator);
-    _ = try cache.get(testing.allocator, 1, "data:;base64," ++ red_png_base64, null);
+    _ = try cache.get(testing.allocator, test_key, "data:;base64," ++ red_png_base64, null);
     try testing.expectError(
         error.EmbeddedImageTooLarge,
-        cache.get(testing.allocator, 2, "data:;base64," ++ red_png_base64, null),
+        cache.get(testing.allocator, .{ .tree = test_key.tree, .node = 2 }, "data:;base64," ++ red_png_base64, null),
     );
 
     var few: Cache = .init(.{ .pixels = 1 << 10, .images = 1, .max_width = 8, .max_height = 8 });
     defer few.deinit(testing.allocator);
-    _ = try few.get(testing.allocator, 1, "data:;base64," ++ red_png_base64, null);
+    _ = try few.get(testing.allocator, test_key, "data:;base64," ++ red_png_base64, null);
     try testing.expectError(
         error.TooManyImages,
-        few.get(testing.allocator, 2, "data:;base64," ++ red_png_base64, null),
+        few.get(testing.allocator, .{ .tree = test_key.tree, .node = 2 }, "data:;base64," ++ red_png_base64, null),
     );
 }
 
@@ -411,10 +452,26 @@ test "reductions are made on demand and paid for" {
     const gpa = testing.allocator;
     var cache: Cache = .init(test_budget);
     defer cache.deinit(gpa);
-    const b = try cache.get(gpa, 1, "data:;base64," ++ red_png_base64, null);
+    const b = try cache.get(gpa, test_key, "data:;base64," ++ red_png_base64, null);
     const before = cache.budget.pixels;
     const l2 = try cache.level(gpa, b, 2);
     try testing.expectEqual(@as(i32, 1), l2.getWidth());
     try testing.expectEqual(@as(usize, 3), b.levels.items.len);
     try testing.expectEqual(before - 2, cache.budget.pixels);
+}
+
+test "an SVG is known by its media type, or by beginning with markup" {
+    const gpa = testing.allocator;
+    for ([_]struct { href: []const u8, svg: bool }{
+        .{ .href = "data:image/svg+xml,<svg/>", .svg = true },
+        .{ .href = "data:image/svg+xml;base64,IDxzdmcvPg==", .svg = true },
+        // Said to be something else, and markup all the same.
+        .{ .href = "data:image/png,%EF%BB%BF%20%3C?xml%20version=%221.0%22?%3E%3Csvg/%3E", .svg = true },
+        .{ .href = "data:image/png;base64," ++ red_png_base64, .svg = false },
+        .{ .href = "data:,hello", .svg = false },
+    }) |c| {
+        var f = try fetch(gpa, c.href, null);
+        defer f.deinit();
+        try testing.expectEqual(c.svg, f.isSvg());
+    }
 }

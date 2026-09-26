@@ -599,7 +599,7 @@ short of the specification.
 | `width`, `height` on `<image>` | yes, including SVG 2's `auto` — the picture's own size, or what the other side implies |
 | `preserveAspectRatio` on `<image>` | yes — the picture's own size stands in for a `viewBox` |
 | `image-rendering` | yes, inherited — Mitchell's cubic by default, as resvg; nearest for `optimizeSpeed`, `pixelated`, `crisp-edges` |
-| An SVG inside an `<image>` | **no** — `error.UnsupportedImageFormat` |
+| An SVG inside an `<image>` or an `feImage` | yes — drawn as vectors at the size it says it is, that size fitted into the rectangle by the `<image>`'s `preserveAspectRatio`, and cut to it, as resvg does; it takes `data:` URLs for pictures of its own and never the caller's resolver, the caller's stylesheets do not reach into it, and it counts as a level of nesting |
 | Pictures decoded | to `Limits.max_images` (256) and `Limits.max_image_pixels` (2²⁴, reductions included) |
 
 A shape that names no `fill` is painted in the colour the **caller** chose, not
@@ -648,8 +648,14 @@ var surface = try svg.render(gpa, source, .{
 What the bytes are is read from the bytes. The media type a `data:` URL claims
 is not what chooses the decoder — z2dimg reads the signature, as a browser
 does, and a PNG labelled `image/jpeg` is drawn as the PNG it is. The one claim
-believed is `image/svg+xml`, which is refused by name: a document inside a
-document is a render of its own rather than a decode.
+believed is `image/svg+xml`, because a document inside a document is a render
+of its own rather than a decode; a picture that begins with markup is taken for
+one too, since no bitmap format begins with `<`. Such a picture is read once
+per render and drawn through the same walk as the document around it, under
+the matrix that places it, so it is as sharp as the rest of the picture and
+spends the same budgets. Like a browser's SVG-as-image it is sealed: pictures
+of its own must be `data:` URLs, as the caller's resolver is not asked on its
+behalf, and the caller's stylesheets are the caller's document's alone.
 
 The picture is fitted into the element's rectangle by §7.8's rule, with its own
 pixel size standing in for a `viewBox`, and the rectangle is then filled with

@@ -154,7 +154,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "context-fillcontext-stroke" ++
     "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position" ++
     "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/" ++
-    "transform:transform-origintransform-boxfill-boxview-boxstroke-boxtranslateXscaleYskewrotate3dcenterleftrighttopbottom%pxemgradrad";
+    "transform:transform-origintransform-boxfill-boxview-boxstroke-boxtranslateXscaleYskewrotate3dcenterleftrighttopbottom%pxemgradrad" ++
+    "data:image/svg+xml,%3Csvg%3E%3C/svg%3E%27%20xml:spacepreservemiter-clip";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -1011,6 +1012,9 @@ const document_corpus = [_][]const u8{
     // Markers on every shape: square and rounded rectangles, circles and
     // ellipses, oriented, transformed, and on shapes too small to have sides.
     "<svg viewBox=\"0 0 16 16\"><marker id=\"m\" orient=\"auto-start-reverse\" markerWidth=\"2\" markerHeight=\"2\" refX=\"1\" refY=\"1\"><path d=\"M0 0 L2 1 L0 2 Z\"/></marker><g fill=\"none\" stroke=\"black\" style=\"marker: url(#m)\"><rect x=\"1\" y=\"1\" width=\"5\" height=\"4\"/><rect x=\"8\" y=\"1\" width=\"6\" height=\"4\" rx=\"9\"/><circle cx=\"4\" cy=\"11\" r=\"2.3\" transform=\"rotate(20 4 11)\"/><ellipse cx=\"11\" cy=\"11\" rx=\"3.1\" ry=\"1.7\"/><rect width=\"0\" height=\"3\"/><circle r=\"0\"/></g></svg>",
+    // SVGs as pictures: fitted three ways, nested, through feImage, auto-sized,
+    // and one whose picture names another picture by URL.
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><filter id=\"f\"><feImage href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='1'%3E%3Crect width='2' height='1'/%3E%3C/svg%3E\"/></filter><image width=\"8\" height=\"4\" preserveAspectRatio=\"xMinYMax slice\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 2'%3E%3Ccircle cx='1' cy='1' r='1' fill='red'/%3E%3Cimage width='2' height='2' href='data:image/svg+xml,%253Csvg xmlns=%2527http://www.w3.org/2000/svg%2527 width=%25271%2527 height=%25271%2527%253E%253Crect width=%25271%2527 height=%25271%2527/%253E%253C/svg%253E'/%3E%3C/svg%3E\"/><image x=\"8\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='6'%3E%3Crect width='4' height='6' fill='blue'/%3E%3C/svg%3E\" opacity=\"0.5\" transform=\"rotate(10)\"/><rect y=\"10\" width=\"6\" height=\"6\" filter=\"url(#f)\"/><image x=\"10\" y=\"10\" width=\"4\" height=\"4\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Cimage href='elsewhere.png' width='1' height='1'/%3E%3C/svg%3E\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

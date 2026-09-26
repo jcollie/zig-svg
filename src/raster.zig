@@ -453,7 +453,7 @@ fn drawDocument(
     defer measuring.deinit();
     doc.measurer = measuring.measurer();
     defer doc.measurer = null;
-    drawWalk(gpa, destination, doc, box, opts) catch |err| {
+    drawWalk(gpa, destination, doc, doc.transformFor(box.x, box.y, box.width, box.height), opts) catch |err| {
         // The measurer can only answer with the walk's own errors, so it
         // kept what really went wrong and said this instead.
         if (err == error.MeasureFailed) if (measuring.failure) |f| return f;
@@ -519,12 +519,13 @@ const Measuring = struct {
     }
 };
 
-/// `drawDocument` once the measurer is in place.
+/// `drawDocument` once the measurer is in place, under `base`: the
+/// document's `viewBox` mapped to where on the surface it goes.
 fn drawWalk(
     gpa: Allocator,
     destination: *z2d.Surface,
     doc: *const document.Document,
-    box: Box,
+    base: z2d.Transformation,
     opts: Options,
 ) Error!void {
     // Spent down across the whole document rather than reset per shape. See
@@ -549,14 +550,192 @@ fn drawWalk(
 
     var markers_left = opts.limits.max_markers;
 
+    var svgs: SvgImages = .{};
+    defer svgs.deinit(gpa);
+
     var walk = doc.paths();
     return drawItems(gpa, &layers, doc, &walk, .{
-        .base = doc.transformFor(box.x, box.y, box.width, box.height),
+        .base = base,
         .nodes_left = &nodes_left,
         .depth = 0,
         .images = &images,
         .markers_left = &markers_left,
+        .svgs = &svgs,
     }, opts);
+}
+
+/// Every SVG a render has drawn as a picture, read once each.
+///
+/// Each document is on the heap, because the measurer is lent to one by
+/// pointer and a map that grows moves its values. The bytes are kept beside
+/// what was read from them, so that nothing read can outlive its source.
+const SvgImages = struct {
+    entries: std.AutoHashMapUnmanaged(bitmap.Key, Entry) = .empty,
+
+    const Entry = struct {
+        doc: *document.Document,
+        bytes: []u8,
+    };
+
+    fn deinit(self: *SvgImages, gpa: Allocator) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |e| {
+            e.doc.deinit();
+            gpa.destroy(e.doc);
+            gpa.free(e.bytes);
+        }
+        self.entries.deinit(gpa);
+    }
+};
+
+/// What an `<image>` or an `feImage` draws: a decoded bitmap, or an SVG
+/// document drawn as a picture.
+const Picture = union(enum) {
+    bitmap: *bitmap.Bitmap,
+    svg: *document.Document,
+
+    /// Its own size: a bitmap's in pixels, and an SVG's what it says it is.
+    fn size(self: Picture) Size {
+        return switch (self) {
+            .bitmap => |b| .{ .width = @floatFromInt(b.width()), .height = @floatFromInt(b.height()) },
+            .svg => |d| .{ .width = d.width, .height = d.height },
+        };
+    }
+};
+
+/// The resolver a document may ask for its pictures: the caller's, unless
+/// the document is itself a picture, which gets `data:` URLs alone.
+fn resolverFor(doc: *const document.Document, opts: Options) ?bitmap.Resolver {
+    return if (doc.as_image) null else opts.images;
+}
+
+/// The picture that `node` of `doc` names, fetched and decoded -- or read,
+/// for an SVG -- the first time it is asked for.
+fn pictureFor(gpa: Allocator, doc: *const document.Document, node: ztree.NodeId, href: []const u8, pass: Pass, opts: Options) Error!Picture {
+    const key: bitmap.Key = .{ .tree = doc.tree, .node = node };
+    if (pass.svgs.entries.get(key)) |e| return .{ .svg = e.doc };
+    if (pass.images.entries.getPtr(key)) |b| return .{ .bitmap = b };
+
+    const resolver = resolverFor(doc, opts);
+    {
+        var fetched = try bitmap.fetch(gpa, href, resolver);
+        defer fetched.deinit();
+        if (fetched.isSvg()) {
+            try pass.images.takeOne();
+            const bytes = try gpa.dupe(u8, fetched.bytes);
+            errdefer gpa.free(bytes);
+            const nested = try gpa.create(document.Document);
+            errdefer gpa.destroy(nested);
+            // The caller's stylesheets are for the caller's document, and do
+            // not reach into a picture that happens to be drawn in it.
+            nested.* = try document.readWith(gpa, bytes, .{ .languages = opts.languages });
+            errdefer nested.deinit();
+            nested.as_image = true;
+            try pass.svgs.entries.putNoClobber(gpa, key, .{ .doc = nested, .bytes = bytes });
+            return .{ .svg = nested };
+        }
+    }
+    return .{ .bitmap = try pass.images.get(gpa, key, href, resolver) };
+}
+
+/// Draw an SVG as a picture onto `target`, fitted into `rect` and cut to it.
+///
+/// resvg's reading, which is SVG 1.1 §5.7's: the document is drawn at the
+/// size it says it is -- its own `viewBox` fitted to that by its own
+/// `preserveAspectRatio` -- and that size is fitted into the rectangle by the
+/// `<image>`'s. It is drawn as vectors, under the matrix that places it,
+/// rather than as a bitmap resampled, so that it is as sharp as anything else
+/// in the picture; into a surface of its own, cut to the rectangle, and
+/// composited at `opacity`.
+///
+/// It shares the render's budgets -- nodes, markers, pictures -- so that a
+/// document cannot buy more of them by drawing itself as a picture, and it is
+/// a level of nesting as a mask or a pattern is, which is what bounds a
+/// picture that is, one way or another, itself.
+fn paintSvg(
+    gpa: Allocator,
+    target: *z2d.Surface,
+    nested: *document.Document,
+    im: document.Image,
+    rect: Box,
+    ctm: z2d.Transformation,
+    opacity: f64,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    if (alphaByte(opacity) == 0) return;
+    if (pass.depth >= opts.limits.max_mask_depth) return error.TooManyMaskHops;
+    if (nested.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
+    if (!(nested.width > 0) or !(nested.height > 0)) return;
+
+    const placement = document.viewBoxTransform(
+        .{ .min_x = 0, .min_y = 0, .width = nested.width, .height = nested.height },
+        im.preserve_aspect_ratio,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+    );
+    const placed: Box = .{
+        .x = placement.tx,
+        .y = placement.ty,
+        .width = nested.width * placement.ax,
+        .height = nested.height * placement.dy,
+    };
+    const visible = intersect(rect, placed) orelse return;
+    const base = ctm.mul(placement).mul(nested.transformFor(0, 0, nested.width, nested.height));
+    if (!transform.isFinite(base)) return error.NonFiniteTransform;
+
+    var ink = try z2d.Surface.init(.image_surface_rgba, gpa, target.getWidth(), target.getHeight());
+    defer ink.deinit(gpa);
+    {
+        var measuring: Measuring = .{ .gpa = gpa, .doc = nested, .opts = opts };
+        defer measuring.deinit();
+        nested.measurer = measuring.measurer();
+        defer nested.measurer = null;
+
+        var layers: Layers = .{ .bottom = &ink };
+        defer layers.deinit(gpa);
+        var walk = nested.paths();
+        drawItems(gpa, &layers, nested, &walk, .{
+            .base = base,
+            .nodes_left = pass.nodes_left,
+            .depth = pass.depth + 1,
+            .images = pass.images,
+            .markers_left = pass.markers_left,
+            .svgs = pass.svgs,
+        }, opts) catch |err| {
+            if (err == error.MeasureFailed) if (measuring.failure) |f| return f;
+            return err;
+        };
+    }
+
+    // Cut to the rectangle, as a bitmap's overflow under `slice` is.
+    var outline: z2d.Path = .empty;
+    defer outline.deinit(gpa);
+    try document.buildShape(&outline, gpa, .{ .rect = .{
+        .x = visible.x,
+        .y = visible.y,
+        .width = visible.width,
+        .height = visible.height,
+        .rx = null,
+        .ry = null,
+    } }, ctm, .{ .max_nodes = 16 });
+    if (outline.nodes.items.len == 0) return;
+    var cut = try fillCoverage(gpa, &ink, outline.nodes.items, .{
+        .anti_aliasing_mode = opts.anti_aliasing_mode,
+        .tolerance = opts.tolerance,
+    });
+    defer cut.deinit(gpa);
+    const precision: z2d.compositor.SurfaceCompositor.RunOptions = .{ .precision = .float };
+    ink.composite(&cut, .dst_in, 0, 0, precision);
+    if (opacity < 1.0) {
+        const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(opacity) } };
+        z2d.compositor.SurfaceCompositor.run(&ink, 0, 0, 1, .{
+            .{ .operator = .dst_in, .src = .{ .pixel = faded } },
+        }, precision);
+    }
+    target.composite(&ink, .src_over, 0, 0, precision);
 }
 
 /// Spend `used` nodes from the document's budget, or refuse when it has run
@@ -597,6 +776,9 @@ const Pass = struct {
     images: *bitmap.Cache,
     /// The document's marker budget; see `Limits.max_markers`.
     markers_left: *usize,
+    /// The SVGs drawn as pictures so far, read once each for the whole
+    /// render as the bitmaps are decoded once.
+    svgs: *SvgImages,
     /// The markers this pass is drawing the content of, innermost first. A
     /// marker met again inside itself draws nothing, as resvg's does: its
     /// content inherits from the marker's ancestors, so a `marker` property
@@ -1181,6 +1363,7 @@ fn drawMarker(
         .depth = pass.depth + 1,
         .images = pass.images,
         .markers_left = pass.markers_left,
+        .svgs = pass.svgs,
         .drawing = &link,
     };
 
@@ -1274,11 +1457,8 @@ fn drawImage(
     pass: Pass,
     opts: Options,
 ) Error!void {
-    const picture = try pass.images.get(gpa, im.node, im.href, opts.images);
-    const size: Size = .{
-        .width = @floatFromInt(picture.width()),
-        .height = @floatFromInt(picture.height()),
-    };
+    const picture = try pictureFor(gpa, doc, im.node, im.href, pass, opts);
+    const size = picture.size();
     const rect = imageRect(im, size);
     const ctm = pass.base.mul(im.transform);
     const width = layers.bottom.getWidth();
@@ -1325,18 +1505,11 @@ fn drawImage(
         }
     }
 
-    try paintImage(
-        gpa,
-        layers.target(),
-        pass.images,
-        picture,
-        im,
-        rect,
-        size,
-        ctm,
-        if (own_layer) 1.0 else im.opacity,
-        opts,
-    );
+    const opacity = if (own_layer) 1.0 else im.opacity;
+    switch (picture) {
+        .bitmap => |b| try paintImage(gpa, layers.target(), pass.images, b, im, rect, size, ctm, opacity, opts),
+        .svg => |d| try paintSvg(gpa, layers.target(), d, im, rect, ctm, opacity, pass, opts),
+    }
     if (own_layer) try layers.close(gpa);
 }
 
@@ -1466,9 +1639,20 @@ fn imageRect(im: document.Image, size: Size) Box {
 /// An `<image>`'s rectangle for measuring, which needs the picture's own size
 /// only when a `width` or a `height` is `auto` -- and then reads it from the
 /// picture's header rather than decoding the whole thing.
-fn measureImage(gpa: Allocator, im: document.Image, opts: Options) Error!Box {
+fn measureImage(gpa: Allocator, doc: *const document.Document, im: document.Image, opts: Options) Error!Box {
     if (im.width != null and im.height != null) return imageRect(im, .{ .width = 1, .height = 1 });
-    const w, const h = try bitmap.intrinsicSize(gpa, im.href, opts.images, .{
+    const resolver = resolverFor(doc, opts);
+    {
+        // An SVG's own size is what it says it is, which takes reading it.
+        var fetched = try bitmap.fetch(gpa, im.href, resolver);
+        defer fetched.deinit();
+        if (fetched.isSvg()) {
+            var nested = try document.readWith(gpa, fetched.bytes, .{ .languages = opts.languages });
+            defer nested.deinit();
+            return imageRect(im, .{ .width = nested.width, .height = nested.height });
+        }
+    }
+    const w, const h = try bitmap.intrinsicSize(gpa, im.href, resolver, .{
         .pixels = opts.limits.max_image_pixels,
         .images = opts.limits.max_images,
         .max_width = opts.limits.max_width,
@@ -2186,11 +2370,8 @@ const Chain = struct {
             return drawItems(self.gpa, &layers, f.doc, &it, deeper, f.opts);
         }
 
-        const picture = try f.pass.images.get(self.gpa, im.node, href, f.opts.images);
-        const size: Size = .{
-            .width = @floatFromInt(picture.width()),
-            .height = @floatFromInt(picture.height()),
-        };
+        const picture = try pictureFor(self.gpa, f.doc, im.node, href, f.pass, f.opts);
+        const size = picture.size();
         const rect = self.subregionUser(p, f.region_user);
         if (!(rect.width > 0) or !(rect.height > 0)) return;
         const as_image: document.Image = .{
@@ -2210,7 +2391,10 @@ const Chain = struct {
             .visible = true,
             .transform = f.ctm,
         };
-        try paintImage(self.gpa, out, f.pass.images, picture, as_image, rect, size, f.ctm, 1.0, f.opts);
+        switch (picture) {
+            .bitmap => |b| try paintImage(self.gpa, out, f.pass.images, b, as_image, rect, size, f.ctm, 1.0, f.opts),
+            .svg => |d| try paintSvg(self.gpa, out, d, as_image, rect, f.ctm, 1.0, f.pass, f.opts),
+        }
     }
 
     /// A primitive's subregion in user space: `default` with each edge the
@@ -2889,6 +3073,7 @@ fn buildMask(
             .depth = pass.depth + 1,
             .images = pass.images,
             .markers_left = pass.markers_left,
+            .svgs = pass.svgs,
             .drawing = pass.drawing,
         }, opts);
     }
@@ -3313,6 +3498,7 @@ fn paintTiled(
                     .depth = pass.depth + 1,
                     .images = pass.images,
                     .markers_left = pass.markers_left,
+                    .svgs = pass.svgs,
                     .drawing = pass.drawing,
                 }, opts);
             }
@@ -4472,7 +4658,7 @@ fn extentOf(
             // A picture's box is its rectangle, under its transform. There is
             // no stroke to grow it by.
             .image => |im| {
-                const box = mappedBounds(im.transform, try measureImage(gpa, im, opts));
+                const box = mappedBounds(im.transform, try measureImage(gpa, doc, im, opts));
                 min_x = @min(min_x, box.x);
                 min_y = @min(min_y, box.y);
                 max_x = @max(max_x, box.x + box.width);
@@ -6537,7 +6723,9 @@ test "every way an image can be refused is its own error" {
         .{ .body = "<image href=\"a.png\" width=\"4\" height=\"4\"/>", .err = error.UnresolvedImage },
         .{ .body = "<image href=\"data:image/png;base64\" width=\"4\" height=\"4\"/>", .err = error.BadDataUrl },
         .{ .body = "<image href=\"data:image/png,hello\" width=\"4\" height=\"4\"/>", .err = error.UnsupportedImageFormat },
-        .{ .body = "<image href=\"data:image/svg+xml,&lt;svg/>\" width=\"4\" height=\"4\"/>", .err = error.UnsupportedImageFormat },
+        // An SVG is drawn, and one that says nothing of its size is refused
+        // as a document saying nothing of its size is.
+        .{ .body = "<image href=\"data:image/svg+xml,&lt;svg/>\" width=\"4\" height=\"4\"/>", .err = error.NoSize },
         .{ .body = "<image href=\"data:;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAAC\" width=\"4\" height=\"4\"/>", .err = error.BadImageData },
         .{ .body = "<image href=\"" ++ quad_png ++ "\" image-rendering=\"fuzzy\"/>", .err = error.BadImageRendering },
         .{
@@ -7010,4 +7198,68 @@ test "a paint's fallback is painted when its reference is no paint server" {
     // Without a fallback it is still refused, where it is painted.
     try testing.expectError(error.UnsupportedPaintServer, render(gpa, "<svg viewBox=\"0 0 1 1\"><rect id=\"r\" width=\"0\" height=\"0\"/>" ++
         "<rect width=\"1\" height=\"1\" fill=\"url(#r)\"/></svg>", .{ .width = 1, .height = 1 }));
+}
+
+test "an SVG is drawn as a picture, fitted, and on its own terms" {
+    const gpa = testing.allocator;
+    // A picture twice as wide as it is tall, fitted into a square under the
+    // default `xMidYMid meet`: a band across the middle, cut to the square.
+    const wide = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='10'%3E" ++
+        "%3Crect width='20' height='10' fill='%23f00'/%3E%3C/svg%3E";
+    var sfc = try render(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><image width=\"8\" height=\"8\" href=\"" ++ wide ++ "\"/></svg>", .{ .width = 8, .height = 8 });
+    defer sfc.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), sfc.getPixel(4, 4).?.rgba.r);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 0).?.rgba.a);
+    try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 7).?.rgba.a);
+
+    // With no size of its own, an `<image>` takes the picture's.
+    var auto = try render(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 40 20\"><image href=\"" ++ wide ++ "\"/></svg>", .{ .width = 40, .height = 20 });
+    defer auto.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), auto.getPixel(19, 9).?.rgba.r);
+    try testing.expectEqual(@as(u8, 0), auto.getPixel(21, 9).?.rgba.a);
+
+    // The caller's stylesheet is for the caller's document, and its resolver
+    // is not asked on the picture's behalf.
+    var styled = try render(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><image width=\"8\" height=\"8\" href=\"" ++ wide ++ "\"/></svg>", .{
+        .width = 8,
+        .height = 8,
+        .stylesheets = &.{"rect { fill: blue }"},
+    });
+    defer styled.deinit(gpa);
+    try testing.expectEqual(@as(u8, 255), styled.getPixel(4, 4).?.rgba.r);
+    const Anything = struct {
+        fn resolve(_: ?*anyopaque, _: []const u8) ?[]const u8 {
+            return "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><image width='1' height='1' href='again.svg'/></svg>";
+        }
+    };
+    try testing.expectError(error.UnresolvedImage, render(gpa, "<svg viewBox=\"0 0 8 8\"><image width=\"8\" height=\"8\" href=\"outer.svg\"/></svg>", .{
+        .width = 8,
+        .height = 8,
+        .images = .{ .resolve = Anything.resolve },
+    }));
+}
+
+test "pictures inside pictures are bounded" {
+    const gpa = testing.allocator;
+    // Five SVGs deep, each the picture of the one outside it, which is one
+    // more than the nesting a mask or a pattern may reach.
+    var buf: [4096]u8 = undefined;
+    var inner: []const u8 = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><rect width='1' height='1'/></svg>";
+    var storage: [6][4096]u8 = undefined;
+    for (0..5) |i| {
+        var escaped: std.ArrayList(u8) = .empty;
+        defer escaped.deinit(gpa);
+        for (inner) |c| switch (c) {
+            '<' => try escaped.appendSlice(gpa, "%3C"),
+            '>' => try escaped.appendSlice(gpa, "%3E"),
+            '%' => try escaped.appendSlice(gpa, "%25"),
+            '\'' => try escaped.appendSlice(gpa, "%27"),
+            '#' => try escaped.appendSlice(gpa, "%23"),
+            ' ' => try escaped.appendSlice(gpa, "%20"),
+            else => try escaped.append(gpa, c),
+        };
+        inner = try std.fmt.bufPrint(&storage[i], "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'><image width='1' height='1' href='data:image/svg+xml,{s}'/></svg>", .{escaped.items});
+    }
+    const doc = try std.fmt.bufPrint(&buf, "{s}", .{inner});
+    try testing.expectError(error.TooManyMaskHops, render(gpa, doc, .{ .width = 1, .height = 1 }));
 }

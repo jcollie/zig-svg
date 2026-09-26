@@ -136,6 +136,11 @@
               # agrees with whatever we misread; an independent implementation
               # of the same specification does not. See tools/check_oracle.py.
               pkgs.resvg
+              # The second oracle, for what resvg does not implement at all --
+              # `vector-effect`, which it parses and ignores. Held to the same
+              # tolerances; `REFERENCES` in tools/check_oracle.py says which
+              # fixtures go to it.
+              pkgs.inkscape
               (pkgs.python3.withPackages (ps: [ ps.pillow ]))
               # A font for the text fixtures, and the *same* font for both
               # renderers: resvg is given it with `--use-font-file` and told

@@ -539,6 +539,7 @@ short of the specification.
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
 | `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit` | yes, inherited |
 | `stroke-dasharray`, `stroke-dashoffset` | yes, inherited; up to `raster.max_dashes` (64) lengths |
+| `vector-effect` | `non-scaling-stroke`, not inherited: the pen, and its dashes, are measured in the pixels of the picture drawn, so no transform or `viewBox` widens or skews them, and a stroke one wide is one pixel wide at any size — as Inkscape draws it, and as Chrome draws an `<img>` of it. The path, its paint and its markers are placed as ever; a `<text>`'s applies to its `<tspan>`s. The host is always the screen, as in both of those, so the `screen` qualifier is accepted and a written-out `viewport` is refused (`UnsupportedVectorEffect`), as are `non-scaling-size`, `non-rotation` and `fixed-position`, which nothing draws |
 | `paint-order` | yes, inherited — `fill`, `stroke` and `markers` in any order |
 | `<marker>`, `marker-start`, `marker-mid`, `marker-end` | yes, inherited, on `<path>`, `<line>`, `<polyline>` and `<polygon>`; `marker` as the shorthand in CSS — `orient` (`auto`, `auto-start-reverse`, an angle), both `markerUnits`, `viewBox`, `preserveAspectRatio` and `overflow` |
 | Markers in one document | to `Limits.max_markers` (16384), counted before any is drawn |
@@ -903,8 +904,17 @@ $ zig build oracle
 $ python3 tools/check_oracle.py tests/oracle zig-out/oracle
 ok   arc-rotated-ellipse     mean  0.033  outliers  0.008%  worst  64
 ...
-86 compared against resvg, 0 beyond tolerance
+297 compared (2 against inkscape, 295 against resvg), 0 beyond tolerance, 23 marked as known divergences
 ```
+
+Two fixtures are held against [Inkscape](https://inkscape.org/) instead,
+named in `REFERENCES` at the top of `tools/check_oracle.py`. resvg 0.48 parses
+`vector-effect` and ignores it — a stretched rectangle draws the same with and
+without `non-scaling-stroke` — so there is nothing of its to compare with.
+Inkscape draws through Cairo, which is neither z2d nor tiny-skia, and it and
+Chrome agree to the pixel on what the property means, inside a nested `<svg>`
+as well. It is given no font of ours, so a fixture sent to it may not draw
+text. Both are held to the ordinary tolerances, and both meet them.
 
 Each fixture is rendered at the size the **document** says it is — its own
 `width` and `height`, or its `viewBox`'s extent — scaled so the longer side is
@@ -1149,6 +1159,12 @@ Kept in the Zotero collection **zig-svg**.
   <https://www.w3.org/TR/SVG11/> — §8.3 is the path data grammar implemented
   in `src/path.zig`, and appendix F.6 the endpoint-to-centre arc conversion in
   `src/arc.zig`.
+- World Wide Web Consortium (W3C). (2018, October). *Scalable Vector Graphics
+  (SVG) 2* (W3C Candidate Recommendation). <https://www.w3.org/TR/SVG2/> —
+  §8.13 is `vector-effect`, with the host coordinate space its effects are
+  measured in.
+- Inkscape Project. *Inkscape*. <https://inkscape.org/> — the second oracle,
+  for the `vector-effect` fixtures resvg cannot judge.
 - Reizner, Y. *resvg*. Linebender. <https://github.com/linebender/resvg> — the
   independent implementation of that specification this renderer is held
   against, and the reason `tools/check_oracle.py` exists.

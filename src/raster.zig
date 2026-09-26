@@ -885,9 +885,19 @@ fn paintStroke(
         // the matrix and shapes the pen itself. `uniformScale` says
         // why the two are not interchangeable in practice even though
         // they are in geometry.
+        //
+        // A `vector-effect: non-scaling-stroke` shapes the pen in SVG 2's
+        // host coordinate space instead, which for a picture drawn here is
+        // the surface's own pixels: no transform reaches it, the viewBox's
+        // included, so a stroke one wide is one pixel wide at any size --
+        // as Inkscape draws it, and as Chrome draws an `<img>` of it. Its
+        // points are placed exactly as any other's. A mask, a marker and a
+        // pattern cell are all drawn at the picture's own resolution, so
+        // they need nothing different.
+        const pen_space: z2d.Transformation = if (shape.non_scaling_stroke) .identity else ctm;
         var nib = s.*;
-        var pen_ctm: z2d.Transformation = ctm;
-        if (uniformScale(ctm)) |factor| {
+        var pen_ctm: z2d.Transformation = pen_space;
+        if (uniformScale(pen_space)) |factor| {
             nib.scaleBy(factor);
             pen_ctm = .identity;
         }
@@ -919,7 +929,7 @@ fn paintStroke(
                 surface,
                 built.tiled,
                 &region,
-                strokeBox(pathBox(p.nodes.items), nib.width, ctm),
+                strokeBox(pathBox(p.nodes.items), nib.width, pen_ctm),
                 space.subject,
                 space.ctm,
                 pass,
@@ -6702,6 +6712,45 @@ test "a caller's stylesheet outweighs an attribute, and loses a tie to the docum
     defer tie.deinit(testing.allocator);
     try testing.expectEqual(@as(u8, 255), tie.getPixel(12, 12).?.rgba.b);
     try testing.expectEqual(@as(u8, 0), tie.getPixel(12, 12).?.rgba.r);
+}
+
+test "a non-scaling stroke is as wide as it says in the surface's pixels" {
+    const gpa = testing.allocator;
+    // Thirty-two units shown at sixty-four pixels, and a rectangle stretched
+    // four times across: its sides are x=8 and x=56, its top y=4.
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 16\" width=\"64\" height=\"32\">" ++
+        "<rect x=\"1\" y=\"2\" width=\"6\" height=\"10\" transform=\"scale(4 1)\" fill=\"none\" stroke=\"black\" stroke-width=\"2\" {s}/></svg>";
+    const Case = struct { attr: []const u8, scale: u32, side: usize, top: usize };
+    for ([_]Case{
+        // Two pixels on every side, whatever the transform and the viewBox
+        // do.
+        .{ .attr = "vector-effect=\"non-scaling-stroke\"", .scale = 1, .side = 2, .top = 2 },
+        // And still two drawn at twice the document's size: the surface's
+        // pixels, as Inkscape draws it and as Chrome draws an `<img>` of it.
+        .{ .attr = "vector-effect=\"non-scaling-stroke\"", .scale = 2, .side = 2, .top = 2 },
+        // And the ordinary stroke, stretched with its rectangle, as resvg
+        // and Inkscape both draw it.
+        .{ .attr = "", .scale = 1, .side = 16, .top = 4 },
+    }) |c| {
+        var buf: [512]u8 = undefined;
+        var sfc = try render(gpa, try std.fmt.bufPrint(&buf, src, .{c.attr}), .{ .width = 64 * c.scale, .height = 32 * c.scale });
+        defer sfc.deinit(gpa);
+        const k: i32 = @intCast(c.scale);
+        // Across the left side at mid-height, and down through the top at
+        // mid-width.
+        var side: usize = 0;
+        var x: i32 = 0;
+        while (x < 32 * k) : (x += 1) {
+            if (sfc.getPixel(x, 14 * k).?.rgba.a > 128) side += 1;
+        }
+        var top: usize = 0;
+        var y: i32 = 0;
+        while (y < 10 * k) : (y += 1) {
+            if (sfc.getPixel(32 * k, y).?.rgba.a > 128) top += 1;
+        }
+        try testing.expectEqual(c.side, side);
+        try testing.expectEqual(c.top, top);
+    }
 }
 
 test "a gradient under a transform that collapses the plane draws nothing, and frees its stops" {

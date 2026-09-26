@@ -40,6 +40,12 @@ implemented" and is not a failure: the corpus deliberately holds documents that
 are on the feature list, and a missing feature should read as a missing feature
 rather than as a broken renderer. `--strict` makes them failures, which is what
 to use when the list is meant to be empty.
+
+A fixture named in `REFERENCES` is held against a different renderer, because
+resvg does not implement what it exercises at all -- there is no disagreement
+to argue, only nothing to compare with. Inkscape is the other one: it draws
+with Cairo, which is neither z2d nor tiny-skia, and it is on the machine
+anyway. Its output is left beside ours as NAME.inkscape.png.
 """
 
 import argparse
@@ -257,6 +263,41 @@ DIVERGENCES = {
 }
 
 
+# Fixtures held against another renderer than resvg, and why.
+#
+# Inkscape is given no font of ours -- it has no `--use-font-file` -- so a
+# fixture listed here must draw no text, or it would be comparing faces again.
+REFERENCES = {
+    # resvg 0.48 parses `vector-effect` and ignores it: the keyword is not in
+    # its binary, and a stretched rectangle draws the same with and without
+    # it. Chrome and Inkscape agree to the pixel on what it means -- a pen
+    # shaped in the pixels of the picture drawn, at whatever size it is drawn
+    # (Chrome's `<img>` of it; its device-pixel ratio is a zoom this has not).
+    "vector-effect": "inkscape",
+    # The same inside nested viewports, where SVG 2's default host would be
+    # the nested `<svg>`'s and not the screen. Chrome and Inkscape both draw
+    # the screen there, and so does this.
+    "vector-effect-nested": "inkscape",
+}
+
+
+def render_inkscape(inkscape, svg_path, png_path, width, height):
+    """Render one fixture with Inkscape, at exactly the size we rendered it.
+
+    Inkscape's `-w` and `-h` together are the size produced, not a box to fit,
+    and the page keeps its transparency unless the document gives it a colour.
+    """
+    if "<text" in svg_path.read_text(encoding="utf-8"):
+        raise ValueError(f"{svg_path.name} draws text, which Inkscape would set in a face of its own")
+    argv = [
+        inkscape, str(svg_path),
+        "--export-type=png",
+        f"--export-filename={png_path}",
+        "-w", str(width), "-h", str(height),
+    ]
+    subprocess.run(argv, check=True, capture_output=True)
+
+
 def render_reference(resvg, svg_path, png_path, width, height):
     """Render one fixture with resvg, at exactly the size we rendered it.
 
@@ -339,7 +380,7 @@ def main():
         "--reference",
         type=pathlib.Path,
         default=None,
-        help="where to leave resvg's output (default: alongside ours, as NAME.resvg.png)",
+        help="where to leave the reference renderings (default: alongside ours, as NAME.resvg.png or NAME.inkscape.png)",
     )
     parser.add_argument(
         "--strict",
@@ -352,6 +393,7 @@ def main():
     if resvg is None:
         print("resvg is not on PATH; run this inside `nix develop`", file=sys.stderr)
         return 2
+    inkscape = shutil.which("inkscape")
 
     manifest_path = args.ours / "manifest.txt"
     if not manifest_path.exists():
@@ -365,6 +407,7 @@ def main():
     failures = []
     skipped = []
     checked = 0
+    by_reference = {}
 
     for svg_path in sorted(args.fixtures.glob("*.svg")):
         name = svg_path.stem
@@ -374,8 +417,16 @@ def main():
             continue
 
         width, height = sizes[name]
-        theirs_path = reference_dir / f"{name}.resvg.png"
-        render_reference(resvg, svg_path, theirs_path, width, height)
+        reference = REFERENCES.get(name, "resvg")
+        theirs_path = reference_dir / f"{name}.{reference}.png"
+        if reference == "inkscape":
+            if inkscape is None:
+                print("inkscape is not on PATH; run this inside `nix develop`", file=sys.stderr)
+                return 2
+            render_inkscape(inkscape, svg_path, theirs_path, width, height)
+        else:
+            render_reference(resvg, svg_path, theirs_path, width, height)
+        by_reference[reference] = by_reference.get(reference, 0) + 1
 
         mean, outlier_fraction, worst = compare(ours_path, theirs_path)
         mean_limit, outlier_limit, reason = DIVERGENCES.get(
@@ -388,14 +439,16 @@ def main():
             f"{label} {name:<38} "
             f"mean {mean:6.3f}  outliers {outlier_fraction * 100:6.3f}%  worst {worst:3d}"
             + (f"   [{reason}]" if reason else "")
+            + (f"   [against {reference}]" if reference != "resvg" else "")
         )
         if not ok:
             failures.append(name)
 
     print()
     diverging = sum(1 for name in DIVERGENCES if name in sizes)
+    against = ", ".join(f"{n} against {r}" for r, n in sorted(by_reference.items()))
     print(
-        f"{checked} compared against resvg, {len(failures)} beyond tolerance"
+        f"{checked} compared ({against}), {len(failures)} beyond tolerance"
         + (f", {diverging} marked as known divergences" if diverging else "")
     )
     if skipped:

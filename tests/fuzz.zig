@@ -151,7 +151,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "dominant-baselinealignment-baselinecentralmiddlehangingmathematicaltext-before-edgetext-after-edgeideographic" ++
     "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility" ++
     "mix-blend-mode:isolation:isolateauto" ++
-    "context-fillcontext-stroke";
+    "context-fillcontext-stroke" ++
+    "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -995,6 +996,9 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"gold\"/><g style=\"isolation: isolate; mix-blend-mode: hue\" opacity=\"0.5\"><circle cx=\"3\" cy=\"3\" r=\"2\" style=\"mix-blend-mode: soft-light\" filter=\"blur(1px)\"/><text x=\"1\" y=\"7\" font-size=\"3\" style=\"mix-blend-mode: difference\">x</text></g></svg>",
     // Context paints through markers, nested uses and a pattern context.
     "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"1\" height=\"1\"><rect width=\"0.5\" height=\"0.5\" fill=\"context-fill\"/></pattern><marker id=\"m\"><circle r=\"1\" fill=\"context-stroke\" stroke=\"context-fill\"/></marker><g id=\"a\"><path d=\"M1 1 L6 2 L3 6\" fill=\"url(#p)\" stroke=\"context-fill\" style=\"marker: url(#m)\"/></g><use href=\"#a\" fill=\"url(#p)\" stroke=\"context-stroke\"/><use href=\"#u\" id=\"u2\"/></svg>",
+    // Non-scaling strokes under a skew and a stretch, dashed, with a gradient,
+    // a pattern, markers, text, and inside a mask and a pattern cell.
+    "<svg viewBox=\"0 0 8 8\" width=\"16\" height=\"16\"><linearGradient id=\"g\"><stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><path d=\"M0 0 L2 2\" stroke=\"black\" vector-effect=\"non-scaling-stroke\"/></pattern><marker id=\"m\"><circle r=\"1\" stroke=\"green\" vector-effect=\"non-scaling-stroke\"/></marker><mask id=\"k\"><rect width=\"8\" height=\"8\" stroke=\"white\" stroke-width=\"3\" transform=\"scale(0.5 2)\" vector-effect=\"non-scaling-stroke\"/></mask><g transform=\"skewX(30) scale(3 0.5)\" mask=\"url(#k)\"><path d=\"M1 1 L2 6 L0.5 7\" stroke=\"url(#g)\" stroke-dasharray=\"1 0.5\" style=\"marker: url(#m); vector-effect: non-scaling-stroke\"/><rect width=\"2\" height=\"2\" fill=\"none\" stroke=\"url(#p)\" stroke-width=\"4\" vector-effect=\"non-scaling-stroke\"/></g><text x=\"1\" y=\"7\" font-size=\"3\" stroke=\"red\" transform=\"scale(2 0.5)\" vector-effect=\"non-scaling-stroke\">a<tspan>b</tspan></text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

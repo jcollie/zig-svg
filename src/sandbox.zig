@@ -671,6 +671,8 @@ const WireError = enum(u16) {
     bad_baseline = 97,
     bad_rendering_hint = 98,
     bad_isolation = 99,
+    bad_vector_effect = 100,
+    unsupported_vector_effect = 101,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -774,6 +776,8 @@ fn wireFromError(err: anyerror) WireError {
         error.BadBaseline => .bad_baseline,
         error.BadRenderingHint => .bad_rendering_hint,
         error.BadIsolation => .bad_isolation,
+        error.BadVectorEffect => .bad_vector_effect,
+        error.UnsupportedVectorEffect => .unsupported_vector_effect,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -892,6 +896,8 @@ fn wireToError(status: u16) Error {
         .bad_baseline => error.BadBaseline,
         .bad_rendering_hint => error.BadRenderingHint,
         .bad_isolation => error.BadIsolation,
+        .bad_vector_effect => error.BadVectorEffect,
+        .unsupported_vector_effect => error.UnsupportedVectorEffect,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1202,6 +1208,8 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadBaseline, .bad_baseline },
         .{ error.BadRenderingHint, .bad_rendering_hint },
         .{ error.BadIsolation, .bad_isolation },
+        .{ error.BadVectorEffect, .bad_vector_effect },
+        .{ error.UnsupportedVectorEffect, .unsupported_vector_effect },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

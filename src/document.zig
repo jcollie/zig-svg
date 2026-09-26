@@ -187,6 +187,13 @@ pub const Error = error{
     BadIsolation,
     /// A `mix-blend-mode` that is not one of Compositing and Blending's.
     BadBlendMode,
+    /// A `vector-effect` that is none of SVG 2's keywords.
+    BadVectorEffect,
+    /// A `vector-effect` of `non-scaling-size`, `non-rotation` or
+    /// `fixed-position`, SVG 2 effects no renderer draws, or the `viewport`
+    /// host written out, which this draws as the screen; refused rather than
+    /// drawn as something else.
+    UnsupportedVectorEffect,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -729,6 +736,13 @@ pub const Shape = struct {
     /// Drawn without anti-aliasing: `shape-rendering: crispEdges` or
     /// `optimizeSpeed`, or for text `text-rendering: optimizeSpeed`.
     crisp: bool = false,
+    /// `vector-effect: non-scaling-stroke`: the stroke's pen is shaped in the
+    /// pixels of the surface drawn on rather than in the shape's user space,
+    /// so no transform -- the viewBox's included -- widens, narrows or skews
+    /// it. The path
+    /// and the stroke's paint are placed as ever. Not inherited; a run of
+    /// text takes it from its `<text>`.
+    non_scaling_stroke: bool = false,
     /// Where a fill or stroke that came from `context-fill` or
     /// `context-stroke` belongs, when it is a paint server: laid out in that
     /// element's space rather than this shape's.
@@ -1331,6 +1345,9 @@ pub const PathIterator = struct {
                 // Text answers to `text-rendering` and not `shape-rendering`,
                 // as resvg has it.
                 .crisp = parent.inherited.crisp_text orelse false,
+                // A `<tspan>` is not stroked as a box of its own, so the
+                // `<text>` it is in says, as in browsers.
+                .non_scaling_stroke = try self.vectorEffectOf(owner),
                 .decorations = decorations,
                 // A run has no `opacity` of its own: the element it sits in does,
                 // and that element opened a layer for it if it needed one.
@@ -1814,6 +1831,7 @@ pub const PathIterator = struct {
                 .visible = effective.visible orelse true,
                 .paint_order = effective.paint_order orelse PaintLayer.normal,
                 .crisp = effective.crisp_shapes orelse false,
+                .non_scaling_stroke = try self.vectorEffectOf(node),
                 .marker_start = if (takesMarkers(geometry)) nonEmpty(effective.marker_start) else null,
                 .marker_mid = if (takesMarkers(geometry)) nonEmpty(effective.marker_mid) else null,
                 .marker_end = if (takesMarkers(geometry)) nonEmpty(effective.marker_end) else null,
@@ -2035,6 +2053,13 @@ pub const PathIterator = struct {
     /// Only *presentation properties* go through here. A geometry attribute --
     /// a `<rect>`'s `width`, a `<circle>`'s `r` -- is not a property in SVG
     /// 1.1 and is not readable from `style`, so those keep using `attr`.
+    /// Whether `node` asks for `vector-effect: non-scaling-stroke`. The
+    /// property is not inherited, so only the element's own counts.
+    fn vectorEffectOf(self: *const PathIterator, node: ztree.NodeId) Error!bool {
+        const raw = self.presentation(node, "vector-effect") orelse return false;
+        return parseVectorEffect(raw);
+    }
+
     fn presentation(
         self: *const PathIterator,
         node: ztree.NodeId,
@@ -2465,6 +2490,42 @@ fn parseRenderingHint(raw: []const u8, crisp: []const []const u8, smooth: []cons
     for (crisp) |k| if (std.mem.eql(u8, t, k)) return true;
     for (smooth) |k| if (std.mem.eql(u8, t, k)) return false;
     return error.BadRenderingHint;
+}
+
+/// `vector-effect`: true for `non-scaling-stroke`, false for `none`.
+///
+/// SVG 2 §8.13's grammar is `none`, or one or more effects followed by an
+/// optional host: `viewport`, the initial one, or `screen`. What is drawn is
+/// the screen -- the surface's pixels -- whichever is named, because that is
+/// what Chrome and Inkscape both draw, inside a nested `<svg>` as well, where
+/// the two would differ. So `screen` is accepted, and `viewport` written out
+/// is refused along with the effects no renderer draws, rather than drawn as
+/// something it does not mean.
+fn parseVectorEffect(raw: []const u8) Error!bool {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "none")) return false;
+    var words = std.mem.tokenizeAny(u8, t, " \t\r\n");
+    var non_scaling_stroke = false;
+    var host = false;
+    while (words.next()) |w| {
+        // The host comes last, and once.
+        if (host) return error.BadVectorEffect;
+        if (std.mem.eql(u8, w, "non-scaling-stroke")) {
+            if (non_scaling_stroke) return error.BadVectorEffect;
+            non_scaling_stroke = true;
+        } else if (std.mem.eql(u8, w, "screen")) {
+            host = true;
+        } else if (std.mem.eql(u8, w, "non-scaling-size") or
+            std.mem.eql(u8, w, "non-rotation") or
+            std.mem.eql(u8, w, "fixed-position") or
+            std.mem.eql(u8, w, "viewport"))
+        {
+            return error.UnsupportedVectorEffect;
+        } else return error.BadVectorEffect;
+    }
+    // A host with no effect to host, or nothing at all.
+    if (!non_scaling_stroke) return error.BadVectorEffect;
+    return true;
 }
 
 /// `letter-spacing` or `word-spacing`: `normal`, which is none, or a length.
@@ -4263,4 +4324,36 @@ test "context paints are a use's own, and nothing where there is no context" {
     try testing.expect(shapes_seen[0].fill_origin != null);
     try testing.expectEqual(color.Paint.none, shapes_seen[1].fill.?);
     try testing.expectEqual(color.Paint.none, shapes_seen[1].stroke.?);
+}
+
+test "vector-effect is the element's own, and a run takes its text's" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g vector-effect=\"non-scaling-stroke\"><rect width=\"1\" height=\"1\"/></g>" ++
+        "<rect width=\"1\" height=\"1\" vector-effect=\"non-scaling-stroke\"/>" ++
+        "<rect width=\"1\" height=\"1\" style=\"vector-effect: non-scaling-stroke screen\" vector-effect=\"none\"/>" ++
+        "<text vector-effect=\"non-scaling-stroke\">a<tspan vector-effect=\"none\">b</tspan></text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var got: [5]bool = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| {
+            got[n] = sh.non_scaling_stroke;
+            n += 1;
+        },
+        else => {},
+    };
+    // Not inherited, so the group's reaches nothing; `style` beats the
+    // attribute; and a `<tspan>` is stroked as part of its `<text>`.
+    try testing.expectEqualSlices(bool, &.{ false, true, true, true, true }, got[0..n]);
+    for ([_][]const u8{ "non-scaling-size", "non-rotation", "fixed-position", "non-scaling-stroke fixed-position", "non-scaling-stroke viewport" }) |v| {
+        var buf: [160]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" vector-effect=\"{s}\"/></svg>", .{v});
+        try testing.expectError(error.UnsupportedVectorEffect, read(gpa, src));
+    }
+    for ([_][]const u8{ "thin", "", "screen", "non-scaling-stroke non-scaling-stroke", "none non-scaling-stroke", "non-scaling-stroke screen screen", "screen non-scaling-stroke" }) |v| {
+        var buf: [160]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" vector-effect=\"{s}\"/></svg>", .{v});
+        try testing.expectError(error.BadVectorEffect, read(gpa, src));
+    }
 }

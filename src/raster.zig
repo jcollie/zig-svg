@@ -4239,6 +4239,7 @@ fn buildText(
         // can always write more text. Without this the budget would be the
         // one thing text did not answer to.
         try withinBudget(p, all.nodes.items.len, build_opts);
+        try document.checkInRange(all.nodes.items);
         try p.nodes.appendSlice(gpa, all.nodes.items);
         return;
     }
@@ -4258,6 +4259,7 @@ fn buildText(
         };
         defer one.deinit(gpa);
         try withinBudget(p, one.nodes.items.len, build_opts);
+        try document.checkInRange(one.nodes.items);
         try p.nodes.appendSlice(gpa, one.nodes.items);
     }
 }
@@ -4328,7 +4330,7 @@ fn buildOnPath(
         // the kerning with its neighbour and the spacing after it -- and the
         // glyph is turned about it. That is resvg's placement, and it keeps a
         // kerned pair from pushing a glyph off its own midpoint.
-        const width = z2d.text.measure(gpa, font, glyph, text_opts) catch return error.BadFont;
+        const width = try measureText(gpa, font, glyph, text_opts);
         const advance = step + spacingAfter(run, glyph);
         if (arc.at(along + width / 2)) |spot| {
             const placement = ctm
@@ -4348,6 +4350,7 @@ fn buildOnPath(
             };
             defer one.deinit(gpa);
             try withinBudget(p, one.nodes.items.len, build_opts);
+            try document.checkInRange(one.nodes.items);
             try p.nodes.appendSlice(gpa, one.nodes.items);
         }
         along += advance;
@@ -4394,7 +4397,15 @@ fn splitCodepoints(
     var i: usize = 0;
     while (i < utf8.len) {
         try out.append(gpa, i);
-        i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
+        // Each character whole and well formed, or none: a sequence the
+        // text ends part way through, or one whose continuation bytes are
+        // not, is refused as z2d's shaper refuses it. Letting one through
+        // hands the decoders a slice whose length disagrees with its first
+        // byte, and they assert rather than answer.
+        const len = std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
+        if (len > utf8.len - i) return error.BadFont;
+        _ = std.unicode.utf8Decode(utf8[i..][0..len]) catch return error.BadFont;
+        i += len;
     }
     try out.append(gpa, utf8.len);
 }
@@ -4440,6 +4451,16 @@ fn spacingAfter(run: shapes.Text, glyph: []const u8) f64 {
     return gap;
 }
 
+/// How far `utf8` advances in `font`: z2d's measurement, with running out of
+/// memory reported as that. Everything else it can say is the font or the
+/// string being something it cannot read.
+fn measureText(gpa: Allocator, font: *z2d.Font, utf8: []const u8, opts: z2d.text.ShowTextOptions) Error!f64 {
+    return z2d.text.measure(gpa, font, utf8, opts) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.BadFont,
+    };
+}
+
 /// The step from one glyph's origin to the next, kerning included.
 ///
 /// A glyph's advance and its kerning pair with what follows, which z2d exposes
@@ -4459,12 +4480,12 @@ fn glyphStep(
     if (i + 1 < count) {
         const both = utf8[bounds[i]..bounds[i + 2]];
         const next = utf8[bounds[i + 1]..bounds[i + 2]];
-        const whole = z2d.text.measure(gpa, font, both, opts) catch return error.BadFont;
-        const tail = z2d.text.measure(gpa, font, next, opts) catch return error.BadFont;
+        const whole = try measureText(gpa, font, both, opts);
+        const tail = try measureText(gpa, font, next, opts);
         return whole - tail;
     }
     const here = utf8[bounds[i]..bounds[i + 1]];
-    return z2d.text.measure(gpa, font, here, opts) catch error.BadFont;
+    return measureText(gpa, font, here, opts);
 }
 
 /// A path flattened to a polyline, with how far along each vertex sits.
@@ -7547,4 +7568,31 @@ test "pictures inside pictures are bounded" {
     }
     const doc = try std.fmt.bufPrint(&buf, "{s}", .{inner});
     try testing.expectError(error.TooManyMaskHops, render(gpa, doc, .{ .width = 1, .height = 1 }));
+}
+
+test "a run is split into whole characters, or refused, whatever its bytes" {
+    // Found by the fuzzer once it had a font to lay text out with: a run
+    // that ended part way through a character was cut into a slice shorter
+    // than its first byte promised, and decoding that asserted rather than
+    // answered. Every slice is one well-formed character now, or the run is
+    // `BadFont`, as z2d's shaper would call it.
+    var prng: std.Random.DefaultPrng = .init(1234);
+    const r = prng.random();
+    const run: shapes.Text = .{ .utf8 = "", .x = null, .y = null, .dx = 0, .dy = 0, .owner = undefined, .element = undefined, .starts_element = false, .rotate = null, .text_length = null, .on_path = null, .letter_spacing = 1, .word_spacing = 10 };
+    var buf: [12]u8 = undefined;
+    for (0..200_000) |_| {
+        const n = r.intRangeAtMost(usize, 1, buf.len);
+        for (buf[0..n]) |*b| b.* = if (r.boolean()) r.intRangeAtMost(u8, 0x80, 0xFF) else r.int(u8);
+        var bounds: std.ArrayListUnmanaged(usize) = .empty;
+        defer bounds.deinit(testing.allocator);
+        splitCodepoints(testing.allocator, buf[0..n], &bounds) catch continue;
+        for (0..bounds.items.len - 1) |i| {
+            const glyph = buf[0..n][bounds.items[i]..bounds.items[i + 1]];
+            if (glyph.len == 0 or glyph.len > 4) {
+                std.debug.print("bad slice {any} from {any}\n", .{ bounds.items, buf[0..n] });
+                return error.BadSlice;
+            }
+            _ = spacingAfter(run, glyph);
+        }
+    }
 }

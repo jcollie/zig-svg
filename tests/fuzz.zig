@@ -54,6 +54,19 @@ const svg = @import("svg");
 /// so it sets this to a checked allocator of its own instead.
 pub var backing: Allocator = if (builtin.is_test) testing.allocator else undefined;
 
+/// A font for the render target to set text in, or null for none.
+///
+/// Without one every document with text in it stops at `NoFontSupplied`
+/// before a glyph is laid out, and the whole of text layout goes unfuzzed.
+/// A test cannot find a font -- `SVG_TEST_FONT` is in the environment, which
+/// a test build is not handed -- so this stays null under `zig build test`,
+/// and `tools/fuzz.zig` fills it in from that variable when it is set.
+pub var font: ?[]const u8 = null;
+
+fn anyFace(_: ?*anyopaque, _: svg.raster.FontRequest) ?[]const u8 {
+    return font;
+}
+
 /// Small enough that a document asking for an enormous picture is refused in
 /// microseconds rather than allocated for.
 const limits: svg.Limits = .{
@@ -394,6 +407,7 @@ fn renderTarget(input: []const u8) anyerror!void {
         .width = 32,
         .height = 32,
         .limits = limits,
+        .fonts = if (font != null) .{ .resolve = anyFace } else null,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // A document the reader accepted must not then fail to fill for a

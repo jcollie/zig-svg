@@ -3261,7 +3261,7 @@ pub fn buildShape(
 /// refuses a matrix that is not -- but a perfectly finite matrix applied to a
 /// perfectly finite point produces `scale(1e300)` times four, and z2d reduces
 /// a polygon's extent to an `i32`. See `max_coordinate`.
-fn checkInRange(nodes: []const PathNode) Error!void {
+pub fn checkInRange(nodes: []const PathNode) Error!void {
     for (nodes) |node| switch (node) {
         .move_to => |n| try checkPoint(n.point),
         .line_to => |n| try checkPoint(n.point),

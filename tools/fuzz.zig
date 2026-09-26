@@ -133,6 +133,18 @@ pub fn main(init: std.process.Init) !void {
     targets.backing = checked.allocator();
     const gpa = init.gpa;
 
+    // The devshell's test font, so that text is laid out rather than refused
+    // for want of one. Read with the process allocator: it lives for the whole
+    // run and is not a target's to leak.
+    const font_path = init.environ_map.get("SVG_TEST_FONT") orelse "";
+    const font_bytes: ?[]const u8 = if (font_path.len != 0)
+        try std.Io.Dir.cwd().readFileAlloc(io, font_path, gpa, .limited(1 << 24))
+    else
+        null;
+    defer if (font_bytes) |b| gpa.free(b);
+    targets.font = font_bytes;
+    if (font_bytes == null) std.debug.print("no SVG_TEST_FONT: text is refused for want of a font, and not laid out\n", .{});
+
     var seconds: u32 = 60;
     var iterations: ?u64 = null;
     var seed: u64 = @bitCast(@as(i64, @truncate(std.Io.Timestamp.now(io, .real).nanoseconds)));

@@ -3739,6 +3739,64 @@ fn rotationAt(list: ?[]const u8, index: usize) Error!?f64 {
 }
 
 /// The face a shape's text is drawn in.
+/// A face's measurements at one size, in user units, positive upward from the
+/// baseline: what decorations and shifted text are placed by.
+const TextMetrics = struct {
+    ascent: f64,
+    /// Negative: how far the face reaches below the baseline.
+    descent: f64,
+    /// The top of the underline stroke; negative, below the baseline.
+    underline_position: f64,
+    underline_thickness: f64,
+    /// The top of the strikeout stroke.
+    strikeout_position: f64,
+    strikeout_thickness: f64,
+    /// How far `baseline-shift: sub` drops text and `super` raises it.
+    subscript: f64,
+    superscript: f64,
+    x_height: f64,
+};
+
+/// `textMetrics` for a loaded face.
+fn metricsOf(font: *const z2d.Font, size: f64) TextMetrics {
+    return textMetrics(font.metrics(), font.meta.units_per_em, font.meta.ascender, font.meta.descender, size);
+}
+
+/// A face's metrics scaled to `size`, with a default for each one the face
+/// does not record -- `OS/2` and `post` are optional tables, and plenty of
+/// fonts leave one out.
+///
+/// The defaults are resvg's where resvg has a sensible one: an underline
+/// a ninth of an em below the baseline and a twelfth thick, an x-height of
+/// 0.45 of the face's full height, a strikeout at half the x-height. Not for
+/// the sub- and superscript offsets, where resvg's fallback comes to five and
+/// two and a half ems; these are a fifth and two fifths of one, which is what
+/// faces that do record them tend to say.
+fn textMetrics(m: z2d.Font.Metrics, units_per_em: u16, ascender: i16, descender: i16, size: f64) TextMetrics {
+    const upem: f64 = @floatFromInt(@max(units_per_em, 1));
+    const scale = size / upem;
+    const units = struct {
+        fn of(v: ?i16, default: f64) f64 {
+            return if (v) |n| @floatFromInt(n) else default;
+        }
+    }.of;
+    const ascent: f64 = @floatFromInt(ascender);
+    const descent: f64 = @floatFromInt(descender);
+    const x_height = units(m.x_height, 0.45 * (ascent - descent));
+    const thickness = units(m.underline_thickness, upem / 12);
+    return .{
+        .ascent = ascent * scale,
+        .descent = descent * scale,
+        .underline_position = units(m.underline_position, -upem / 9) * scale,
+        .underline_thickness = thickness * scale,
+        .strikeout_position = units(m.strikeout_position, x_height / 2) * scale,
+        .strikeout_thickness = units(m.strikeout_size, thickness) * scale,
+        .subscript = units(m.subscript_y_offset, upem / 5) * scale,
+        .superscript = units(m.superscript_y_offset, upem * 2 / 5) * scale,
+        .x_height = x_height * scale,
+    };
+}
+
 fn faceFor(shape: document.Shape, opts: Options) Error!z2d.Font {
     const resolver = opts.fonts orelse return error.NoFontSupplied;
     const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
@@ -6317,4 +6375,34 @@ test "an feImage of an element that filters itself with it is bounded" {
     const gpa = testing.allocator;
     try testing.expectError(error.TooManyMaskHops, render(gpa, "<svg viewBox=\"0 0 8 8\">" ++
         "<filter id=\"f\"><feImage href=\"#r\"/></filter><rect id=\"r\" width=\"4\" height=\"4\" filter=\"url(#f)\"/></svg>", .{ .width = 8, .height = 8 }));
+}
+
+test "font metrics scale to the size, and default where the face is silent" {
+    // A face recording everything, at 2048 units to the em, drawn at 16.
+    const full = textMetrics(.{
+        .underline_position = -150,
+        .underline_thickness = 100,
+        .strikeout_position = 600,
+        .strikeout_size = 90,
+        .subscript_y_offset = 300,
+        .superscript_y_offset = 700,
+        .x_height = 1100,
+    }, 2048, 1900, -500, 16);
+    const k = 16.0 / 2048.0;
+    try testing.expectApproxEqAbs(1900 * k, full.ascent, 1e-9);
+    try testing.expectApproxEqAbs(-500 * k, full.descent, 1e-9);
+    try testing.expectApproxEqAbs(-150 * k, full.underline_position, 1e-9);
+    try testing.expectApproxEqAbs(90 * k, full.strikeout_thickness, 1e-9);
+    try testing.expectApproxEqAbs(700 * k, full.superscript, 1e-9);
+
+    // And one recording nothing.
+    const bare = textMetrics(.{}, 1000, 800, -200, 10);
+    try testing.expectApproxEqAbs(-10.0 / 9.0, bare.underline_position, 1e-9);
+    try testing.expectApproxEqAbs(10.0 / 12.0, bare.underline_thickness, 1e-9);
+    try testing.expectApproxEqAbs(0.45 * 10, bare.x_height, 1e-9);
+    try testing.expectApproxEqAbs(0.45 * 10.0 / 2.0, bare.strikeout_position, 1e-9);
+    // The strikeout is as thick as the underline when nothing says.
+    try testing.expectApproxEqAbs(bare.underline_thickness, bare.strikeout_thickness, 1e-9);
+    try testing.expectApproxEqAbs(2, bare.subscript, 1e-9);
+    try testing.expectApproxEqAbs(4, bare.superscript, 1e-9);
 }

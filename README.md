@@ -532,7 +532,9 @@ short of the specification.
 | `gradientUnits`, `gradientTransform` | yes — both unit systems |
 | `spreadMethod` | all three — `pad`, `reflect`, `repeat` |
 | A foreign namespace | passed over, not refused — an Inkscape file reads |
-| `transform` | all six functions, on `<svg>`, `<g>`, any shape, and a `<clipPath>` |
+| `transform` | all six functions, on `<svg>`, `<g>`, any shape, and a `<clipPath>`; and as the CSS property in `style` or a stylesheet, which beats the attribute — CSS Transforms 1's syntax, strictly (units on lengths and angles, commas between arguments, `translateX`, `scaleY`, `skew` and the rest, percentage translations of the reference box, `none`); a 3D function is refused (`UnsupportedTransform`) |
+| `transform-origin` | yes, attribute or CSS — keywords, lengths, percentages of the reference box, and SVG's initial `0 0` |
+| `transform-box` | `view-box`, the initial value, and `fill-box` (or `content-box`) on anything — a group, a `<use>` and text are measured by the rasterizer, which lays text out, as their ink; `stroke-box` and `border-box` are refused (`UnsupportedTransformBox`) |
 | `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor` |
 | CSS Color 4 and 5 | everywhere a colour is written — `fill`, `stroke`, `color`, `stop-color`, `flood-color`, `lighting-color`, `drop-shadow()` — `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in every predefined space, and `color-mix()`, read by [zig-css](https://git.jcollie.dev/jeff/zig-css); a colour sRGB cannot show is gamut-mapped into it as Color 4 §14.2 says, not clipped. A `color-mix()` with `currentcolor` in it is refused (`UnsupportedColorMix`) |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
@@ -950,6 +952,17 @@ and a percentage alpha `rgba(255, 0, 0, 50%)`. None of the three appears in the
 corpus, since a fixture using one would be testing resvg's gap rather than this
 code.
 
+Transforms are checked the same two ways. resvg reads the `transform`
+attribute and `transform-origin` against the view box, and
+`transform-origin.svg` holds it to those. It does not read CSS's own syntax
+in `style` — only SVG's, `translate(5)`, which CSS is not — or
+`transform-box`; Inkscape reads none of it. So the placements Chrome paints
+for twenty documents, from `translate(50%)` to a `fill-box` on a `<use>`, are
+pinned in `src/raster.zig`, and every one agrees to within a pixel. Text is the
+one place a box differs from Chrome's: Chrome measures it by its glyph cells
+and this by the glyphs' ink, as it does for a gradient or a clip in
+`objectBoundingBox` units.
+
 Of the rest of CSS Color 4, resvg reads only the legacy comma `hsl()`, which
 `fill-hsl.svg` holds it to, exactly. The others — `hwb()`, the Lab family,
 `color()`, `color-mix()` — resvg and Inkscape both paint black, so they are
@@ -1184,6 +1197,13 @@ Kept in the Zotero collection **zig-svg**.
 - Muse, I. *ColorAide*. <https://github.com/facelessuser/coloraide> — the
   independent implementation of those two the modern colours are checked
   against, since neither oracle reads them.
+- World Wide Web Consortium (W3C). (2019, February). *CSS Transforms Module
+  Level 1* (W3C Candidate Recommendation).
+  <https://www.w3.org/TR/css-transforms-1/> — §4's `transform` property, §5's
+  `transform-origin`, §6's `transform-box`, and §9's functions.
+- World Wide Web Consortium (W3C). (2021, November). *CSS Transforms Module
+  Level 2* (W3C Working Draft). <https://www.w3.org/TR/css-transforms-2/> — a
+  scale written as a percentage.
 - Inkscape Project. *Inkscape*. <https://inkscape.org/> — the second oracle,
   for the `vector-effect` fixtures resvg cannot judge.
 - Reizner, Y. *resvg*. Linebender. <https://github.com/linebender/resvg> — the

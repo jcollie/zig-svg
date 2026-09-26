@@ -37,6 +37,18 @@
 //! taller is the cheapest check that it is the right way round, and
 //! `tests/oracle/transform-functions.svg` is resvg agreeing.
 //!
+//! ## The CSS property is a different syntax
+//!
+//! SVG 2 makes `transform` a CSS property too, and in `style` or a
+//! stylesheet it is written as CSS Transforms 1 has it: lengths with units,
+//! angles with units, commas between arguments, and functions the attribute
+//! does not have -- `translateX`, `scaleY`, `skew`. `parseCss` reads that,
+//! and is as strict as Chrome about the difference: `translate(5)` is not
+//! CSS, since a length other than zero needs a unit, and `rotate(90)` is not
+//! either. Chrome drops such a declaration; this refuses it, as it refuses
+//! every value it cannot read. A percentage in a translation is of the
+//! reference box that `transform-box` names, which the caller supplies.
+//!
 //! ## A list this cannot read is refused
 //!
 //! resvg ignores a malformed `transform` entirely and draws the shape
@@ -49,8 +61,10 @@
 const std = @import("std");
 const testing = std.testing;
 
+const css = @import("css");
 const z2d = @import("z2d");
 
+const length = @import("length.zig");
 const path = @import("path.zig");
 
 pub const Error = error{
@@ -58,6 +72,10 @@ pub const Error = error{
     /// missing bracket, or the wrong number of arguments for the function
     /// named.
     BadTransform,
+    /// A CSS transform function in three dimensions -- `rotate3d`,
+    /// `perspective` and the rest -- which a flat picture has no way to
+    /// draw.
+    UnsupportedTransform,
 };
 
 /// The whole of a `transform` attribute, composed into one matrix.
@@ -196,6 +214,153 @@ fn one(name: []const u8, args: []const f64) Error!z2d.Transformation {
     return error.BadTransform;
 }
 
+/// A `transform` written as CSS: a list of CSS Transforms 1's functions,
+/// or `none`.
+///
+/// `box` is the reference box, as a viewport: its `width` and `height` are
+/// what a percentage in `translate` is of, and its `font_size` what an `em`
+/// is of.
+pub fn parseCss(text: []const u8, box: length.Viewport) Error!z2d.Transformation {
+    if (css.values.split.isKeyword(text, "none")) return .identity;
+
+    var t: css.tokenizer.Tokenizer = .init(text);
+    var result: z2d.Transformation = .identity;
+    var any = false;
+    while (true) {
+        var tok = t.next();
+        while (tok.tag == .whitespace) tok = t.next();
+        if (tok.tag == .eof) break;
+        if (tok.tag != .function) return error.BadTransform;
+        const name = tok.value;
+        const open = tok.loc.end;
+        // Everything to the matching parenthesis is the arguments; a list the
+        // text ran out inside of is not a list.
+        var depth: usize = 1;
+        var close: usize = open;
+        while (depth > 0) {
+            const inner = t.next();
+            switch (inner.tag) {
+                .eof => return error.BadTransform,
+                .open_paren, .open_square, .open_curly, .function => depth += 1,
+                .close_paren, .close_square, .close_curly => depth -= 1,
+                else => {},
+            }
+            close = inner.loc.start;
+        }
+        result = result.mul(try cssOne(text, name, text[open..close], box));
+        any = true;
+    }
+    // An empty value is not `none`; it is not a value at all.
+    if (!any) return error.BadTransform;
+    return result;
+}
+
+/// One CSS transform function.
+fn cssOne(src: []const u8, name: css.tokenizer.Span, arguments: []const u8, box: length.Viewport) Error!z2d.Transformation {
+    const is = struct {
+        fn f(s: []const u8, span: css.tokenizer.Span, want: []const u8) bool {
+            return css.tokenizer.eqlDecoded(s, span, want, .ascii);
+        }
+    }.f;
+
+    var items = css.values.split.Items.init(arguments);
+    var args: [6][]const u8 = undefined;
+    var n: usize = 0;
+    while (items.next()) |item| : (n += 1) {
+        if (n == args.len) return error.BadTransform;
+        const trimmed = std.mem.trim(u8, item, " \t\r\n\x0c");
+        if (trimmed.len == 0) return error.BadTransform;
+        args[n] = trimmed;
+    }
+
+    if (is(src, name, "matrix")) {
+        if (n != 6) return error.BadTransform;
+        var v: [6]f64 = undefined;
+        for (args[0..6], &v) |a, *out| out.* = css.values.parseNumber(a) orelse return error.BadTransform;
+        return one("matrix", &v);
+    }
+    if (is(src, name, "translate")) {
+        if (n != 1 and n != 2) return error.BadTransform;
+        const x = try cssLength(args[0], .x, box);
+        const y = if (n == 2) try cssLength(args[1], .y, box) else 0;
+        return one("translate", &.{ x, y });
+    }
+    if (is(src, name, "translatex")) {
+        if (n != 1) return error.BadTransform;
+        return one("translate", &.{ try cssLength(args[0], .x, box), 0 });
+    }
+    if (is(src, name, "translatey")) {
+        if (n != 1) return error.BadTransform;
+        return one("translate", &.{ 0, try cssLength(args[0], .y, box) });
+    }
+    if (is(src, name, "scale")) {
+        if (n != 1 and n != 2) return error.BadTransform;
+        const x = try cssScale(args[0]);
+        return one("scale", &.{ x, if (n == 2) try cssScale(args[1]) else x });
+    }
+    if (is(src, name, "scalex")) {
+        if (n != 1) return error.BadTransform;
+        return one("scale", &.{ try cssScale(args[0]), 1 });
+    }
+    if (is(src, name, "scaley")) {
+        if (n != 1) return error.BadTransform;
+        return one("scale", &.{ 1, try cssScale(args[0]) });
+    }
+    if (is(src, name, "rotate")) {
+        // No centre, unlike the attribute's: that is what `transform-origin`
+        // is for.
+        if (n != 1) return error.BadTransform;
+        return one("rotate", &.{try cssAngle(args[0])});
+    }
+    if (is(src, name, "skew")) {
+        if (n != 1 and n != 2) return error.BadTransform;
+        const ax = @tan(std.math.degreesToRadians(try cssAngle(args[0])));
+        const ay = if (n == 2) @tan(std.math.degreesToRadians(try cssAngle(args[1]))) else 0;
+        return .{ .ax = 1, .by = ax, .cx = ay, .dy = 1, .tx = 0, .ty = 0 };
+    }
+    if (is(src, name, "skewx")) {
+        if (n != 1) return error.BadTransform;
+        return one("skewX", &.{try cssAngle(args[0])});
+    }
+    if (is(src, name, "skewy")) {
+        if (n != 1) return error.BadTransform;
+        return one("skewY", &.{try cssAngle(args[0])});
+    }
+    for ([_][]const u8{
+        "matrix3d", "translate3d", "translatez", "scale3d", "scalez",
+        "rotate3d", "rotatex",     "rotatey",    "rotatez", "perspective",
+    }) |three_d| if (is(src, name, three_d)) return error.UnsupportedTransform;
+    return error.BadTransform;
+}
+
+/// A `<length-percentage>`: a length with a unit, a percentage of the
+/// reference box, or zero.
+fn cssLength(text: []const u8, axis: length.Axis, box: length.Viewport) Error!f64 {
+    if (css.values.parsePercentage(text)) |p| return p.of(box.reference(axis));
+    const l = css.values.parseLength(text) orelse return error.BadTransform;
+    if (l.toPx()) |px| return px;
+    const size = box.font_size orelse return error.BadTransform;
+    return switch (l.unit) {
+        .em => l.value * size,
+        // Half an em, as everywhere else here: see `length.parse`.
+        .ex => l.value * size / 2,
+        else => error.BadTransform,
+    };
+}
+
+/// A scale factor: a number, or CSS Transforms 2's percentage of one.
+fn cssScale(text: []const u8) Error!f64 {
+    if (css.values.parseNumber(text)) |v| return v;
+    if (css.values.parsePercentage(text)) |p| return p.value / 100;
+    return error.BadTransform;
+}
+
+/// An `<angle>` or a zero, in degrees.
+fn cssAngle(text: []const u8) Error!f64 {
+    const a = css.values.parseAngle(text, .allow) orelse return error.BadTransform;
+    return a.degrees;
+}
+
 /// Whether every number in the matrix is finite.
 ///
 /// A `rotate(90)` inside a `skewX(90)` produces an infinity through `@tan`,
@@ -322,4 +487,40 @@ test "a composition that overflows is caught" {
     try testing.expect(isFinite(.identity));
     try testing.expect(!isFinite(try parse("scale(1e300) scale(1e300)")));
     try testing.expect(!isFinite(try parse("scale(1e300) scale(1e300) scale(2)")));
+}
+
+test "the CSS syntax, with units, commas and CSS's own functions" {
+    const box: length.Viewport = .{ .width = 40, .height = 20, .font_size = 10 };
+    try expectPoint(.{ 15, 10 }, try parseCss("translate(5px)", box), 10, 10);
+    try expectPoint(.{ 15, 20 }, try parseCss("translate(5px, 10px)", box), 10, 10);
+    // Percentages of the reference box, each on its own axis.
+    try expectPoint(.{ 30, 15 }, try parseCss("translate(50%, 25%)", box), 10, 10);
+    try expectPoint(.{ 20, 10 }, try parseCss("translateX(1em)", box), 10, 10);
+    try expectPoint(.{ 10, 106 }, try parseCss("TRANSLATEY(1in)", box), 10, 10);
+    try expectPoint(.{ 20, 5 }, try parseCss("scale(2, 50%)", box), 10, 10);
+    try expectPoint(.{ 20, 10 }, try parseCss("scaleX(2)", box), 10, 10);
+    try expectPoint(.{ -10, 10 }, try parseCss("rotate(0.25turn)", box), 10, 10);
+    try expectPoint(.{ -10, 10 }, try parseCss("rotate(100grad)", box), 10, 10);
+    try expectPoint(.{ 20, 10 }, try parseCss("skewX(45deg)", box), 10, 10);
+    try expectPoint(.{ 20, 20 }, try parseCss("skew(45deg, 45deg)", box), 10, 10);
+    try expectPoint(.{ 15, 15 }, try parseCss("matrix(1, 0, 0, 1, 5, 5)", box), 10, 10);
+    // Left to right, and adjacent functions need no space between them.
+    try expectPoint(.{ 10, 10 }, try parseCss("scale(0.5)translate(10px, 10px)", box), 10, 10);
+    try expectPoint(.{ 10, 10 }, try parseCss("  none ", box), 10, 10);
+    try expectPoint(.{ 10, 10 }, try parseCss("rotate(0)", box), 10, 10);
+}
+
+test "what is not CSS is refused, and so is what is not flat" {
+    const box: length.Viewport = .{ .width = 40, .height = 20 };
+    for ([_][]const u8{
+        "",                       "translate(5)",        "rotate(90)",     "translate(5px 10px)", "translate(1em)",
+        "scale(2,)",              "matrix(1 0 0 1 5 5)", "translate(5px",  "bogus(1px)",          "none none",
+        "translate(5px) garbage", "skewX(45deg, 10deg)", "translate(1vw)",
+    }) |t| testing.expectError(error.BadTransform, parseCss(t, box)) catch |err| {
+        std.debug.print("{s}\n", .{t});
+        return err;
+    };
+    for ([_][]const u8{ "rotateZ(45deg)", "translate3d(1px, 2px, 3px)", "perspective(100px)" }) |t| {
+        try testing.expectError(error.UnsupportedTransform, parseCss(t, box));
+    }
 }

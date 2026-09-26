@@ -153,7 +153,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "mix-blend-mode:isolation:isolateauto" ++
     "context-fillcontext-stroke" ++
     "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position" ++
-    "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/";
+    "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/" ++
+    "transform:transform-origintransform-boxfill-boxview-boxstroke-boxtranslateXscaleYskewrotate3dcenterleftrighttopbottom%pxemgradrad";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -1003,6 +1004,9 @@ const document_corpus = [_][]const u8{
     // Every CSS Color 4 function, in each place a colour is written, and a
     // colour-mix nested in another.
     "<svg viewBox=\"0 0 8 8\" style=\"color: oklch(60% 0.2 30 / 0.8)\"><linearGradient id=\"g\"><stop stop-color=\"lab(50% 40 -20)\"/><stop offset=\"1\" stop-color=\"color(display-p3 1 0 0 / 50%)\"/></linearGradient><filter id=\"f\"><feFlood flood-color=\"hwb(200 10% 20%)\"/><feDiffuseLighting lighting-color=\"lch(60% 50 30)\"><feDistantLight/></feDiffuseLighting></filter><rect width=\"4\" height=\"4\" fill=\"hsl(0.5turn 50% none)\" stroke=\"currentColor\"/><rect x=\"4\" width=\"4\" height=\"4\" fill=\"url(#g)\" filter=\"url(#f)\"/><circle cx=\"4\" cy=\"6\" r=\"2\" fill=\"color-mix(in oklch longer hue, color-mix(in srgb, red, oklab(0.6 0.1 -0.1)) 30%, color(xyz-d50 0.2 0.3 0.4))\" style=\"filter: drop-shadow(1px 1px hsl(120deg 100% 25%))\"/></svg>",
+    // CSS transforms from style and a sheet, origins in every form, fill-box
+    // on a group, a use, text and inside a measured group, and none.
+    "<svg viewBox=\"0 0 16 16\"><style>.a{transform: translate(10%, 1em) rotate(0.1turn); transform-origin: right 2px}</style><defs><g id=\"d\" style=\"transform-box: fill-box; transform: scale(50%)\"><rect width=\"4\" height=\"4\"/></g></defs><g class=\"a\" font-size=\"2\" style=\"transform-box: fill-box\"><rect x=\"1\" y=\"1\" width=\"3\" height=\"2\" transform=\"skewX(10)\" transform-origin=\"bottom left 0\"/><g style=\"transform-box: content-box; transform: skew(10deg, 5deg); transform-origin: 50%\"><circle cx=\"8\" cy=\"8\" r=\"2\"/><text x=\"2\" y=\"14\" font-size=\"3\" style=\"transform-box: fill-box; transform-origin: center; transform: scaleX(-1)\">t</text></g><use href=\"#d\" x=\"8\" style=\"transform-box: fill-box; transform: matrix(1, 0, 0, 1, 1, 1) none\"/></g><rect width=\"2\" height=\"2\" transform=\"translate(3)\" style=\"transform: none\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

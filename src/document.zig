@@ -194,6 +194,18 @@ pub const Error = error{
     /// host written out, which this draws as the screen; refused rather than
     /// drawn as something else.
     UnsupportedVectorEffect,
+    /// A `transform-origin` that is not one to three positions.
+    BadTransformOrigin,
+    /// A `transform-box` that is none of CSS Transforms 1's keywords.
+    BadTransformBox,
+    /// `transform-box: stroke-box`, or `border-box`, which is the same box
+    /// for an SVG element: the bounds of the stroke's exact outline, caps and
+    /// joins and all, which nothing here computes.
+    UnsupportedTransformBox,
+    /// Measuring an element for `transform-box: fill-box` failed. Never
+    /// escapes a render: the rasterizer, which did the measuring, replaces it
+    /// with what went wrong.
+    MeasureFailed,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -815,6 +827,9 @@ pub const Document = struct {
     /// The reader's languages, most preferred first, which `systemLanguage`
     /// is tested against. Borrowed from `ReadOptions`; see there.
     languages: []const []const u8 = ReadOptions.default_languages,
+    /// What measures an element for `transform-box: fill-box`, installed by
+    /// the rasterizer for as long as it is drawing. See `Measurer`.
+    measurer: ?Measurer = null,
 
     pub fn deinit(self: *Document) void {
         self.stylesheet.deinit();
@@ -1017,9 +1032,75 @@ pub const Document = struct {
     /// the caller that has to fold it in. A `transform` on a `<mask>` does
     /// *not* apply -- confirmed against resvg, which moves a clip and leaves a
     /// mask where it was.
-    pub fn transformOf(self: Document, node: ztree.NodeId) Error!z2d.Transformation {
-        const raw = self.tree.attributeValue(node, "", "transform") orelse return .identity;
-        return transform.parse(raw);
+    pub fn transformOf(self: *const Document, node: ztree.NodeId) Error!z2d.Transformation {
+        return self.resolveTransform(node, self.viewport());
+    }
+
+    /// An element's own transform, whichever way it was written, about its
+    /// `transform-origin`.
+    ///
+    /// SVG 2 makes `transform` a CSS property, whose attribute is written in
+    /// SVG's syntax and whose declarations in `style` or a stylesheet are
+    /// written in CSS's -- and a declaration beats the attribute, as it does
+    /// for every property. zig-css deliberately does not offer the attribute
+    /// as the property's presentation attribute, because it is not the same
+    /// syntax, so the two are asked for separately here.
+    ///
+    /// `vp` is the nearest viewport, whose size is the reference box
+    /// for `transform-box: view-box`, and the font size in force on the
+    /// element, which an `em` in either property is of.
+    pub fn resolveTransform(self: *const Document, node: ztree.NodeId, vp: length.Viewport) Error!z2d.Transformation {
+        const declared = css.property(&self.stylesheet, self.tree, node, "transform");
+        const attribute = self.tree.attributeValue(node, "", "transform");
+        if (declared == null and attribute == null) return .identity;
+        if (declared) |d| if (css.values.split.isKeyword(d, "none")) return .identity;
+
+        // CSS Transforms 1 §6. `view-box`, the initial value, is the nearest
+        // viewport, placed at the origin whatever its `viewBox` says.
+        const box: Bounds = switch (try self.transformBoxOf(node)) {
+            .view_box => .{ .width = vp.width, .height = vp.height },
+            .fill_box => if (self.measurer) |m| (try m.measure(m.context, node)) orelse .{} else .{},
+        };
+        const matrix = if (declared) |d|
+            try transform.parseCss(d, .{ .width = box.width, .height = box.height, .font_size = vp.font_size })
+        else
+            try transform.parse(attribute.?);
+
+        // The initial `transform-origin` is `50% 50%`, and SVG's user-agent
+        // sheet makes it `0 0` for every SVG element: the reference box's
+        // corner, which for `view-box` is the origin.
+        const origin: [2]f64 = if (css.property(&self.stylesheet, self.tree, node, "transform-origin")) |raw|
+            try parseTransformOrigin(raw, box, vp.font_size)
+        else
+            .{ box.x, box.y };
+        if (origin[0] == 0 and origin[1] == 0) return matrix;
+        const to: z2d.Transformation = .{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = origin[0], .ty = origin[1] };
+        const back: z2d.Transformation = .{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = -origin[0], .ty = -origin[1] };
+        return to.mul(matrix).mul(back);
+    }
+
+    const TransformBox = enum { view_box, fill_box };
+
+    /// `transform-box`, which SVG gives no attribute.
+    fn transformBoxOf(self: *const Document, node: ztree.NodeId) Error!TransformBox {
+        const raw = css.property(&self.stylesheet, self.tree, node, "transform-box") orelse return .view_box;
+        const Keyword = enum { view_box, fill_box, content_box, stroke_box, border_box };
+        return switch (css.values.split.keyword(Keyword, raw) orelse return error.BadTransformBox) {
+            .view_box => .view_box,
+            // An SVG element has no CSS box, so §6 reads `content-box` as
+            // `fill-box` and `border-box` as `stroke-box`.
+            .fill_box, .content_box => .fill_box,
+            .stroke_box, .border_box => error.UnsupportedTransformBox,
+        };
+    }
+
+    /// A walk of `node` alone, in its own user space, for measuring it: as
+    /// `elementOf` walks it, but without the element's own transform or a
+    /// `<use>`'s `x` and `y`, which are what its box is to place.
+    pub fn boxWalk(self: *const Document, node: ztree.NodeId) Error!PathIterator {
+        var it = try self.elementOf(node, .identity);
+        it.measuring = node;
+        return it;
     }
 
     /// The viewBox-to-pixels transformation for drawing into `box`.
@@ -1044,6 +1125,34 @@ pub const Document = struct {
         };
         return viewBoxTransform(vb, self.preserve_aspect_ratio, x, y, width, height);
     }
+};
+
+/// A rectangle in some element's user space.
+pub const Bounds = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+    width: f64 = 0,
+    height: f64 = 0,
+};
+
+/// What measures an element's bounding box for `transform-box: fill-box`.
+///
+/// The walk needs the box while it is still working out the element's
+/// matrix, and for a group, a `<use>` or text it cannot find it alone: text
+/// is laid out with the caller's fonts, which only the rasterizer has. So the
+/// rasterizer lends it this for as long as it draws.
+///
+/// `measure` answers with the element's object bounding box in its own user
+/// space -- before its own `transform`, and before a `<use>`'s `x` and `y`,
+/// as Chrome measures one -- or null when it has no geometry. It may walk the
+/// element with `boxWalk`, which is how a box inside a box is found.
+///
+/// A walk with no measurer -- `read`'s, which only counts -- places a
+/// `fill-box` transform as though the box were empty at the origin. What it
+/// refuses does not depend on where things are, so it refuses the same.
+pub const Measurer = struct {
+    context: *anyopaque,
+    measure: *const fn (context: *anyopaque, node: ztree.NodeId) Error!?Bounds,
 };
 
 /// §7.8's algorithm on its own, for anything with a `viewBox` to fit into a
@@ -1107,6 +1216,9 @@ pub const PathIterator = struct {
     stack: [max_container_depth + 1]Frame = undefined,
     depth: usize = 0,
     started: bool = false,
+    /// The element `boxWalk` is measuring, whose own transform -- and, for
+    /// a `<use>`, `x` and `y` -- the walk leaves out.
+    measuring: ?ztree.NodeId = null,
 
     /// Whitespace across the runs of one `<text>`: which element the runs
     /// belong to, whether any has had anything in it yet, whether the last
@@ -1156,12 +1268,12 @@ pub const PathIterator = struct {
             const root = self.doc.root_node;
             const opacity = try self.opacityOf(root);
             const refs = try self.refsOf(root);
-            const ctm = try self.readTransform(root);
             // Nothing above the root, so an `em` in its own `font-size` has
             // nothing to be relative to and is refused.
             self.viewport.font_size = null;
             const root_inherited = try self.readInherited(root);
             self.viewport.font_size = root_inherited.font_size;
+            const ctm = try self.readTransform(root);
             // A root with `display="none"` hides the whole document: its
             // frame starts exhausted, so the walk yields nothing.
             const hidden = self.displayNone(root);
@@ -1748,7 +1860,7 @@ pub const PathIterator = struct {
             ctm = ctm.mul(try self.readTransform(node));
             const dx = try self.lengthOf(node, "x", .x, 0);
             const dy = try self.lengthOf(node, "y", .y, 0);
-            if (dx != 0 or dy != 0) {
+            if ((dx != 0 or dy != 0) and self.measuring != node) {
                 ctm = ctm.mul(.{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = dx, .ty = dy });
             }
             inherited.context.?.origin = .{ .subject = .{ .node = node }, .transform = ctm };
@@ -1789,8 +1901,6 @@ pub const PathIterator = struct {
         // where a `<use>` names it.
         const is_symbol = std.mem.eql(u8, name, "symbol") and via_use != null;
         if (isIgnorable(name) and !is_symbol) return null;
-        const own_ctm = ctm.mul(try self.readTransform(node));
-        if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
         // The element's own attributes, on top of everything above it -- and
         // `font-size` first, because `em` in every *other* length on this
@@ -1800,6 +1910,10 @@ pub const PathIterator = struct {
         self.viewport.font_size = inherited.font_size;
         const effective = inherited.with(try self.readInherited(node));
         self.viewport.font_size = effective.font_size;
+
+        // After the font size, which an `em` in a CSS transform is of.
+        const own_ctm = ctm.mul(try self.readTransform(node));
+        if (!transform.isFinite(own_ctm)) return error.NonFiniteTransform;
 
         // Read after that, so a `filter` on an element whose `font-size` is
         // unreadable still reports the length rather than the filter.
@@ -2151,8 +2265,8 @@ pub const PathIterator = struct {
     }
 
     fn readTransform(self: *const PathIterator, node: ztree.NodeId) Error!z2d.Transformation {
-        const raw = self.attr(node, "transform") orelse return .identity;
-        return transform.parse(raw);
+        if (self.measuring == node) return .identity;
+        return self.doc.resolveTransform(node, self.viewport);
     }
 
     /// What an element draws, or null when it is not a drawable one.
@@ -2490,6 +2604,96 @@ fn parseRenderingHint(raw: []const u8, crisp: []const []const u8, smooth: []cons
     for (crisp) |k| if (std.mem.eql(u8, t, k)) return true;
     for (smooth) |k| if (std.mem.eql(u8, t, k)) return false;
     return error.BadRenderingHint;
+}
+
+/// `transform-origin`: where in `box` a transform is centred, in the same
+/// user space as `box`.
+///
+/// CSS Transforms 1 §5's grammar: one position, which leaves the other at
+/// `center`; two, horizontal then vertical unless both are keywords that
+/// say otherwise (`top left`); and a third, a length along an axis this
+/// picture does not have, which is read and ignored. A length is an offset
+/// from the box's corner and a percentage a fraction of its size. As the
+/// attribute's syntax, a bare number is a length in user units.
+fn parseTransformOrigin(raw: []const u8, box: Bounds, font_size: ?f64) Error![2]f64 {
+    var parts: [4][]const u8 = undefined;
+    const got = css.values.split.collect(raw, &parts) orelse return error.BadTransformOrigin;
+    if (got.len == 0 or got.len > 3) return error.BadTransformOrigin;
+
+    const Keyword = enum { left, center, right, top, bottom };
+    const Part = union(enum) { keyword: Keyword, offset: Offset };
+    const readPart = struct {
+        fn part(text: []const u8, size: ?f64) Error!Part {
+            if (css.values.split.keyword(Keyword, text)) |k| return .{ .keyword = k };
+            return .{ .offset = try offsetOf(text, size) };
+        }
+    }.part;
+
+    var x: Part = .{ .keyword = .center };
+    var y: Part = .{ .keyword = .center };
+    const first = try readPart(got[0], font_size);
+    if (got.len == 1) {
+        if (first == .keyword and (first.keyword == .top or first.keyword == .bottom)) y = first else x = first;
+    } else {
+        const second = try readPart(got[1], font_size);
+        const vertical_first = first == .keyword and (first.keyword == .top or first.keyword == .bottom);
+        const horizontal_second = second == .keyword and (second.keyword == .left or second.keyword == .right);
+        if (vertical_first or horizontal_second) {
+            // Swapped, which only two keywords may be.
+            if (first != .keyword or second != .keyword) return error.BadTransformOrigin;
+            x = second;
+            y = first;
+        } else {
+            x = first;
+            y = second;
+        }
+        if (got.len == 3) {
+            const z = css.values.parseLength(got[2]) orelse return error.BadTransformOrigin;
+            _ = z;
+        }
+    }
+    const along = struct {
+        fn f(p: Part, start: f64, size: f64, horizontal: bool) Error!f64 {
+            return switch (p) {
+                .keyword => |k| switch (k) {
+                    .center => start + size / 2,
+                    .left => if (horizontal) start else error.BadTransformOrigin,
+                    .right => if (horizontal) start + size else error.BadTransformOrigin,
+                    .top => if (!horizontal) start else error.BadTransformOrigin,
+                    .bottom => if (!horizontal) start + size else error.BadTransformOrigin,
+                },
+                .offset => |o| start + o.resolve(size),
+            };
+        }
+    }.f;
+    return .{ try along(x, box.x, box.width, true), try along(y, box.y, box.height, false) };
+}
+
+/// A length or a percentage in `transform-origin`, not yet resolved against
+/// the box.
+const Offset = union(enum) {
+    pixels: f64,
+    fraction: f64,
+
+    fn resolve(self: Offset, size: f64) f64 {
+        return switch (self) {
+            .pixels => |p| p,
+            .fraction => |f| f * size,
+        };
+    }
+};
+
+fn offsetOf(text: []const u8, font_size: ?f64) Error!Offset {
+    if (css.values.parsePercentage(text)) |p| return .{ .fraction = p.value / 100 };
+    if (css.values.parseNumber(text)) |n| return .{ .pixels = n };
+    const l = css.values.parseLength(text) orelse return error.BadTransformOrigin;
+    if (l.toPx()) |px| return .{ .pixels = px };
+    const size = font_size orelse return error.BadTransformOrigin;
+    return switch (l.unit) {
+        .em => .{ .pixels = l.value * size },
+        .ex => .{ .pixels = l.value * size / 2 },
+        else => error.BadTransformOrigin,
+    };
 }
 
 /// `vector-effect`: true for `non-scaling-stroke`, false for `none`.

@@ -442,12 +442,91 @@ pub fn draw(
 fn drawDocument(
     gpa: Allocator,
     destination: *z2d.Surface,
-    doc: *const document.Document,
+    doc: *document.Document,
     box: Box,
     opts: Options,
 ) Error!void {
     if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
 
+    // Lent to the walk for `transform-box: fill-box`, and taken back after.
+    var measuring: Measuring = .{ .gpa = gpa, .doc = doc, .opts = opts };
+    defer measuring.deinit();
+    doc.measurer = measuring.measurer();
+    defer doc.measurer = null;
+    drawWalk(gpa, destination, doc, box, opts) catch |err| {
+        // The measurer can only answer with the walk's own errors, so it
+        // kept what really went wrong and said this instead.
+        if (err == error.MeasureFailed) if (measuring.failure) |f| return f;
+        return err;
+    };
+}
+
+/// Measures elements for `transform-box: fill-box`, on behalf of the walk:
+/// see `document.Measurer`.
+///
+/// Each element is measured once however often it is asked about, so that a
+/// box inside a box inside a box costs one walk apiece rather than one per
+/// level above it. That makes the answer the element's own rather than the
+/// answer for each place a `<use>` draws it, which differs only where what
+/// it inherits changes its extent -- a font size, on text.
+const Measuring = struct {
+    gpa: Allocator,
+    doc: *const document.Document,
+    opts: Options,
+    boxes: std.AutoHashMapUnmanaged(ztree.NodeId, ?document.Bounds) = .empty,
+    /// The elements being measured, outermost first. One asked for again
+    /// while it is being measured is a `<use>` that reaches back to where it
+    /// is, which drawing it would never finish either.
+    open: [max_depth]ztree.NodeId = undefined,
+    depth: usize = 0,
+    /// What went wrong, when measuring failed with an error the walk has no
+    /// name for.
+    failure: ?Error = null,
+
+    /// How many measurements may be open inside one another. Each holds a
+    /// walk on the stack, so this is what bounds the stack.
+    const max_depth = 16;
+
+    fn deinit(self: *Measuring) void {
+        self.boxes.deinit(self.gpa);
+    }
+
+    fn measurer(self: *Measuring) document.Measurer {
+        return .{ .context = self, .measure = measure };
+    }
+
+    fn measure(context: *anyopaque, node: ztree.NodeId) document.Error!?document.Bounds {
+        const self: *Measuring = @ptrCast(@alignCast(context));
+        if (self.boxes.get(node)) |known| return known;
+        for (self.open[0..self.depth]) |n| if (n == node) return error.RecursiveUse;
+        if (self.depth == max_depth) return error.TooDeeplyNested;
+        self.open[self.depth] = node;
+        self.depth += 1;
+        defer self.depth -= 1;
+
+        var it = try self.doc.boxWalk(node);
+        const extent = extentOf(self.gpa, self.doc, &it, false, self.opts) catch |err| {
+            // A failure further in has already been kept; keep the first.
+            if (err != error.MeasureFailed or self.failure == null) self.failure = err;
+            return error.MeasureFailed;
+        };
+        const bounds: ?document.Bounds = if (extent) |b|
+            .{ .x = b.x, .y = b.y, .width = b.width, .height = b.height }
+        else
+            null;
+        try self.boxes.put(self.gpa, node, bounds);
+        return bounds;
+    }
+};
+
+/// `drawDocument` once the measurer is in place.
+fn drawWalk(
+    gpa: Allocator,
+    destination: *z2d.Surface,
+    doc: *const document.Document,
+    box: Box,
+    opts: Options,
+) Error!void {
     // Spent down across the whole document rather than reset per shape. See
     // `Limits.max_path_nodes`.
     var nodes_left = opts.limits.max_path_nodes;
@@ -4349,13 +4428,26 @@ fn contentExtent(
     with_stroke: bool,
     opts: Options,
 ) Error!Box {
+    var it = doc.subtree(node, .identity);
+    return (try extentOf(gpa, doc, &it, with_stroke, opts)) orelse
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+}
+
+/// The union of the boxes of everything a walk yields, each under the matrix
+/// it carries, or null when it yields nothing with any extent.
+fn extentOf(
+    gpa: Allocator,
+    doc: *const document.Document,
+    it: *document.PathIterator,
+    with_stroke: bool,
+    opts: Options,
+) Error!?Box {
     var min_x: f64 = std.math.inf(f64);
     var min_y: f64 = std.math.inf(f64);
     var max_x: f64 = -std.math.inf(f64);
     var max_y: f64 = -std.math.inf(f64);
 
     var measure_pen: Pen = .{};
-    var it = doc.subtree(node, .identity);
     while (try it.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
@@ -4400,9 +4492,7 @@ fn contentExtent(
         max_x = @max(max_x, box.x + box.width);
         max_y = @max(max_y, box.y + box.height);
     }
-    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y)) {
-        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    }
+    if (!std.math.isFinite(min_x) or !std.math.isFinite(min_y)) return null;
     return .{ .x = min_x, .y = min_y, .width = max_x - min_x, .height = max_y - min_y };
 }
 
@@ -6787,4 +6877,94 @@ test "CSS Color 4 reaches every property a colour is written in" {
     }
     try testing.expectError(error.UnsupportedColorMix, render(gpa, "<svg viewBox=\"0 0 1 1\"><rect width=\"1\" height=\"1\" " ++
         "filter=\"drop-shadow(1px 1px color-mix(in srgb, currentColor, red))\"/></svg>", .{ .width = 1, .height = 1 }));
+}
+
+test "CSS transforms, origins and boxes land where Chrome puts them" {
+    // Each box is what Chrome 140 painted for the same document, as an
+    // `<img>` at 40 by 40: the extent of the pixels more than half covered.
+    // Allowed a pixel either way, for where two rasterizers put an edge.
+    const gpa = testing.allocator;
+    const Case = struct { name: []const u8, sheet: []const u8, body: []const u8, box: [4]i32 };
+    for ([_]Case{
+        .{ .name = "attr translate", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"translate(5)\"/>", .box = .{ 15, 10, 25, 20 } },
+        .{ .name = "style px", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: translate(5px)\"/>", .box = .{ 15, 10, 25, 20 } },
+        .{ .name = "sheet two", .sheet = ".s{transform: translate(5px, 10px)}", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" class=\"s\"/>", .box = .{ 15, 20, 25, 30 } },
+        .{ .name = "view-box %", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: translate(50%)\"/>", .box = .{ 30, 10, 40, 20 } },
+        .{ .name = "fill-box %", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform-box: fill-box; transform: translate(50%)\"/>", .box = .{ 15, 10, 25, 20 } },
+        .{ .name = "attr origin", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"scale(2)\" transform-origin=\"15 15\"/>", .box = .{ 5, 5, 25, 25 } },
+        .{ .name = "center view-box", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"scale(2)\" style=\"transform-origin: center\"/>", .box = .{ 0, 0, 20, 20 } },
+        .{ .name = "center fill-box", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"scale(2)\" style=\"transform-box: fill-box; transform-origin: center\"/>", .box = .{ 5, 5, 25, 25 } },
+        .{ .name = "fill-box default origin", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"scale(2)\" style=\"transform-box: fill-box\"/>", .box = .{ 10, 10, 30, 30 } },
+        .{ .name = "origin on attr rotate", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"rotate(90 15 15)\" style=\"transform-origin: 5px 5px\"/>", .box = .{ 20, 10, 30, 20 } },
+        .{ .name = "list order", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: scale(0.5) translate(10px, 10px)\"/>", .box = .{ 10, 10, 15, 15 } },
+        .{ .name = "skewX", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: skewX(45deg)\"/>", .box = .{ 21, 10, 39, 20 } },
+        .{ .name = "matrix", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: matrix(1, 0, 0, 1, 5, 5)\"/>", .box = .{ 15, 15, 25, 25 } },
+        .{ .name = "group fill-box", .sheet = "", .body = "<g style=\"transform-box: fill-box; transform-origin: center; transform: scale(2)\"><rect x=\"10\" y=\"10\" width=\"10\" height=\"10\"/><rect x=\"25\" y=\"25\" width=\"5\" height=\"5\"/></g>", .box = .{ 0, 0, 40, 40 } },
+        .{ .name = "nested view-box", .sheet = "", .body = "<svg x=\"0\" y=\"0\" width=\"40\" height=\"40\" viewBox=\"0 0 20 20\"><rect x=\"5\" y=\"5\" width=\"5\" height=\"5\" style=\"transform-origin: center; transform: scale(2)\"/></svg>", .box = .{ 0, 0, 20, 20 } },
+        .{ .name = "none wins", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"translate(5)\" style=\"transform: none\"/>", .box = .{ 10, 10, 20, 20 } },
+        .{ .name = "use fill-box", .sheet = "", .body = "<defs><rect id=\"r\" x=\"10\" y=\"10\" width=\"10\" height=\"10\"/></defs><use href=\"#r\" x=\"5\" style=\"transform-box: fill-box; transform-origin: center; transform: scale(2)\"/>", .box = .{ 15, 5, 35, 25 } },
+        .{ .name = "bottom right fill-box", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" transform=\"scale(2)\" style=\"transform-box: fill-box; transform-origin: bottom right\"/>", .box = .{ 0, 0, 20, 20 } },
+        .{ .name = "em", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"font-size: 10px; transform: translate(1em)\"/>", .box = .{ 20, 10, 30, 20 } },
+        .{ .name = "rotate turn origin", .sheet = "", .body = "<rect x=\"10\" y=\"10\" width=\"10\" height=\"10\" style=\"transform: rotate(0.25turn) scale(0.5, 1); transform-origin: 15px 15px\"/>", .box = .{ 10, 13, 20, 17 } },
+    }) |c| {
+        var buf: [1024]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\" viewBox=\"0 0 40 40\"><style>{s}</style>{s}</svg>", .{ c.sheet, c.body });
+        var sfc = try render(gpa, src, .{ .width = 40, .height = 40 });
+        defer sfc.deinit(gpa);
+        var got = [4]i32{ 40, 40, 0, 0 };
+        var y: i32 = 0;
+        while (y < 40) : (y += 1) {
+            var x: i32 = 0;
+            while (x < 40) : (x += 1) {
+                if (sfc.getPixel(x, y).?.rgba.a <= 128) continue;
+                got = .{ @min(got[0], x), @min(got[1], y), @max(got[2], x + 1), @max(got[3], y + 1) };
+            }
+        }
+        for (c.box, got) |want, have| {
+            if (@abs(want - have) > 1) {
+                std.debug.print("{s}: {any}, Chrome {any}\n", .{ c.name, got, c.box });
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+}
+
+test "fill-box measures text through the rasterizer, and its failure is the real one" {
+    const gpa = testing.allocator;
+    // The walk cannot lay text out, so it asks the rasterizer; with a
+    // resolver that answers nothing the measuring fails for want of a font,
+    // and that is what comes out -- not the walk's stand-in for it.
+    Asked.reset();
+    try testing.expectError(error.NoFontSupplied, render(gpa, "<svg viewBox=\"0 0 8 8\">" ++
+        "<g style=\"transform-box: fill-box; transform-origin: center; transform: scale(2)\"><rect width=\"1\" height=\"1\"/>" ++
+        "<text font-family=\"Measured\">a</text></g></svg>", .{ .fonts = Asked.resolver() }));
+    try testing.expectEqualStrings("Measured", Asked.family(0));
+    // The box reached through a `<use>` excludes its `x` and `y`, and a box
+    // measured once is the box however many times it is asked for.
+    var sfc = try render(gpa, "<svg viewBox=\"0 0 40 10\"><defs><g id=\"g\" style=\"transform-box: fill-box; transform-origin: center; transform: scale(0.5)\">" ++
+        "<rect width=\"10\" height=\"10\"/></g></defs><use href=\"#g\"/><use href=\"#g\" x=\"20\"/></svg>", .{ .width = 40, .height = 10 });
+    defer sfc.deinit(gpa);
+    for ([_]i32{ 5, 25 }) |x| try testing.expectEqual(@as(u8, 255), sfc.getPixel(x, 5).?.rgba.a);
+    for ([_]i32{ 1, 21, 9, 29 }) |x| try testing.expectEqual(@as(u8, 0), sfc.getPixel(x, 5).?.rgba.a);
+}
+
+test "what transform, transform-origin and transform-box cannot read is refused" {
+    const gpa = testing.allocator;
+    const Case = struct { style: []const u8, want: anyerror };
+    for ([_]Case{
+        .{ .style = "transform: translate(5)", .want = error.BadTransform },
+        .{ .style = "transform: rotateY(10deg)", .want = error.UnsupportedTransform },
+        .{ .style = "transform: scale(2); transform-origin: left left", .want = error.BadTransformOrigin },
+        .{ .style = "transform: scale(2); transform-origin: top 1px", .want = error.BadTransformOrigin },
+        .{ .style = "transform: scale(2); transform-origin: 1px 2px 3px 4px", .want = error.BadTransformOrigin },
+        .{ .style = "transform: scale(2); transform-box: padding-box", .want = error.BadTransformBox },
+        .{ .style = "transform: scale(2); transform-box: stroke-box", .want = error.UnsupportedTransformBox },
+    }) |c| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" style=\"{s}\"/></svg>", .{c.style});
+        testing.expectError(c.want, render(gpa, src, .{})) catch |err| {
+            std.debug.print("{s}\n", .{c.style});
+            return err;
+        };
+    }
 }

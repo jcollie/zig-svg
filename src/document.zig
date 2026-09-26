@@ -187,6 +187,9 @@ pub const Error = error{
     BadIsolation,
     /// A `mix-blend-mode` that is not one of Compositing and Blending's.
     BadBlendMode,
+    /// An `xml:space` that is neither `default` nor `preserve`, the only two
+    /// the XML specification gives it.
+    BadXmlSpace,
     /// A `vector-effect` that is none of SVG 2's keywords.
     BadVectorEffect,
     /// A `vector-effect` of `non-scaling-size`, `non-rotation` or
@@ -1401,16 +1404,20 @@ pub const PathIterator = struct {
             self.ws_ended = false;
             self.ws_pending = false;
         }
+        // §10.15's `xml:space="preserve"` draws every space as written, so
+        // there is nothing to decide: the run is kept whole, and what it ends
+        // with is what the next run follows.
+        const preserve = try self.preservesSpace(parent.node);
         const only_space = allWhitespace(raw);
-        if (only_space and (!self.ws_seen or self.ws_ended or !self.hasLaterText(owner, child))) {
+        if (!preserve and only_space and (!self.ws_seen or self.ws_ended or !self.hasLaterText(owner, child))) {
             return null;
         }
-        const lead_space = self.ws_seen and !self.ws_ended and
+        const lead_space = !preserve and self.ws_seen and !self.ws_ended and
             (isXmlSpace(raw[0]) or self.ws_pending);
-        const trail_space = !only_space and isXmlSpace(raw[raw.len - 1]) and self.hasLaterText(owner, child);
+        const trail_space = !preserve and !only_space and isXmlSpace(raw[raw.len - 1]) and self.hasLaterText(owner, child);
         self.ws_seen = true;
         self.ws_pending = false;
-        self.ws_ended = trail_space or only_space;
+        self.ws_ended = if (preserve) isXmlSpace(raw[raw.len - 1]) else trail_space or only_space;
 
         const first = parent.first_run;
         // A frame is shared, so the flag has to be written back to the real
@@ -1431,6 +1438,7 @@ pub const PathIterator = struct {
                         .starts_element = owner == parent.node and first,
                         .lead_space = lead_space,
                         .trail_space = trail_space,
+                        .preserve_space = preserve,
                         .rotate = rotate,
                         // `alignment-baseline` is the element's own and wins,
                         // unless it defers with `auto` or `baseline`.
@@ -1623,6 +1631,10 @@ pub const PathIterator = struct {
     fn hasLaterText(self: *const PathIterator, owner: ztree.NodeId, after: ztree.NodeId) bool {
         var passed = false;
         return self.textAfter(owner, after, &passed);
+    }
+
+    fn preservesSpace(self: *const PathIterator, node: ztree.NodeId) Error!bool {
+        return preservesSpaceIn(self.doc.tree, node);
     }
 
     fn textAfter(self: *const PathIterator, node: ztree.NodeId, after: ztree.NodeId, passed: *bool) bool {
@@ -2445,6 +2457,27 @@ fn isXmlSpace(c: u8) bool {
 fn hasElementChild(tree: *const ztree.Document, node: ztree.NodeId) bool {
     for (tree.node(node).children.items) |child| {
         if (tree.node(child).kind == .element) return true;
+    }
+    return false;
+}
+
+/// XML's own namespace, which the `xml:` prefix is bound to without being
+/// declared.
+const xml_ns = "http://www.w3.org/XML/1998/namespace";
+
+/// Whether the nearest `xml:space` on `node` or above it says `preserve`.
+///
+/// XML 1.0 §2.10 makes the attribute apply to the element's content and
+/// everything inside it until another says otherwise, so it is asked of the
+/// ancestors in turn rather than inherited through the walk.
+fn preservesSpaceIn(tree: *const ztree.Document, node: ztree.NodeId) Error!bool {
+    var at: ?ztree.NodeId = node;
+    while (at) |n| : (at = tree.node(n).parent) {
+        if (tree.node(n).kind != .element) continue;
+        const raw = tree.attributeValue(n, xml_ns, "space") orelse continue;
+        if (std.mem.eql(u8, raw, "preserve")) return true;
+        if (std.mem.eql(u8, raw, "default")) return false;
+        return error.BadXmlSpace;
     }
     return false;
 }
@@ -4584,4 +4617,31 @@ test "vector-effect is the element's own, and a run takes its text's" {
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" vector-effect=\"{s}\"/></svg>", .{v});
         try testing.expectError(error.BadVectorEffect, read(gpa, src));
     }
+}
+
+test "xml:space preserve keeps every run whole, from wherever it is set" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\" xml:space=\"preserve\"><text>  a  <tspan xml:space=\"default\">  b  </tspan><tspan>   </tspan>c\t</text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const Got = struct { utf8: []const u8, preserve: bool };
+    var got: [4]Got = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| {
+            got[n] = .{ .utf8 = sh.geometry.text.utf8, .preserve = sh.geometry.text.preserve_space };
+            n += 1;
+        },
+        else => {},
+    };
+    // The root's `preserve` reaches the text; the `<tspan>` saying `default`
+    // collapses its own; and a run of nothing but spaces is kept.
+    try testing.expectEqual(@as(usize, 4), n);
+    try testing.expectEqualStrings("  a  ", got[0].utf8);
+    try testing.expect(got[0].preserve);
+    try testing.expect(!got[1].preserve);
+    try testing.expectEqualStrings("   ", got[2].utf8);
+    try testing.expect(got[2].preserve);
+    try testing.expectEqualStrings("c\t", got[3].utf8);
+    try testing.expectError(error.BadXmlSpace, read(gpa, "<svg viewBox=\"0 0 8 8\"><text xml:space=\"Preserve\">a</text></svg>"));
 }

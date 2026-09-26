@@ -171,6 +171,10 @@ pub const Text = struct {
     /// whatever these say.
     lead_space: bool = false,
     trail_space: bool = false,
+    /// `xml:space="preserve"` on the run's element or above it: every space
+    /// is drawn as written, leading, trailing and repeated, and a newline or
+    /// a tab is one more. `lead_space` and `trail_space` say nothing then.
+    preserve_space: bool = false,
 
     /// §10.4's `rotate`, as the document wrote it: a list of angles in
     /// degrees, one per character, the last repeating for whatever is left.

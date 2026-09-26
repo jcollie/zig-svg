@@ -3514,7 +3514,7 @@ fn buildText(
     var font = try faceFor(shape, opts);
     const size = shape.font_size orelse 16;
 
-    const collapsed = try collapseWhitespace(gpa, run.utf8, run.lead_space, run.trail_space);
+    const collapsed = try runText(gpa, run);
     defer gpa.free(collapsed);
 
     // §10.4: `x` and `y` are absolute and start a new *chunk*; `dx` and `dy`
@@ -4142,7 +4142,7 @@ fn chunkWidth(
         const size = shape.font_size orelse 16;
         if (!(size > 0)) continue;
         var font = try faceFor(shape, opts);
-        const collapsed = try collapseWhitespace(gpa, run.utf8, run.lead_space, run.trail_space);
+        const collapsed = try runText(gpa, run);
         defer gpa.free(collapsed);
         total += run.dx;
         if (collapsed.len == 0) continue;
@@ -4174,13 +4174,24 @@ fn chunkWidth(
 /// text being in the wrong place rather than as anything that looks like a
 /// whitespace bug.
 ///
-/// `xml:space="preserve"` asks for the other treatment and is not implemented;
-/// the reader refuses nothing for it yet because the attribute is rare and its
-/// absence is the case that matters.
+/// `xml:space="preserve"` asks for the other treatment: see `runText`.
 ///
 /// The edges are the whole `<text>`'s business rather than the run's, so
 /// `lead` and `trail` say whether this run begins and ends with a space --
 /// `shapes.Text.lead_space` says how the walk decides.
+/// A run's characters as they are drawn: collapsed, or under
+/// `xml:space="preserve"` every space kept and each newline and tab turned
+/// into one more, which is §10.15's treatment.
+fn runText(gpa: Allocator, run: shapes.Text) Error![]u8 {
+    if (!run.preserve_space) return collapseWhitespace(gpa, run.utf8, run.lead_space, run.trail_space);
+    const out = try gpa.dupe(u8, run.utf8);
+    for (out) |*c| switch (c.*) {
+        '\t', '\r', '\n' => c.* = ' ',
+        else => {},
+    };
+    return out;
+}
+
 fn collapseWhitespace(gpa: Allocator, raw: []const u8, lead: bool, trail: bool) Error![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(gpa);

@@ -679,6 +679,7 @@ const WireError = enum(u16) {
     bad_transform_box = 105,
     unsupported_transform_box = 106,
     measure_failed = 107,
+    bad_xml_space = 108,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -790,6 +791,7 @@ fn wireFromError(err: anyerror) WireError {
         error.BadTransformBox => .bad_transform_box,
         error.UnsupportedTransformBox => .unsupported_transform_box,
         error.MeasureFailed => .measure_failed,
+        error.BadXmlSpace => .bad_xml_space,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -916,6 +918,7 @@ fn wireToError(status: u16) Error {
         .bad_transform_box => error.BadTransformBox,
         .unsupported_transform_box => error.UnsupportedTransformBox,
         .measure_failed => error.MeasureFailed,
+        .bad_xml_space => error.BadXmlSpace,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1234,6 +1237,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadTransformBox, .bad_transform_box },
         .{ error.UnsupportedTransformBox, .unsupported_transform_box },
         .{ error.MeasureFailed, .measure_failed },
+        .{ error.BadXmlSpace, .bad_xml_space },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

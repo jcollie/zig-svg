@@ -170,7 +170,9 @@ rather than about the baseline. Getting that wrong puts every line one
 font-size down the page, which looks like a plausible picture. And whitespace
 is collapsed the way XML's default `xml:space` asks: text indented across
 several lines in the source draws as one line, which is how documents are
-actually written.
+actually written. `xml:space="preserve"`, on the text or anywhere above it,
+draws every space as written instead, a newline or a tab as one more, until a
+nearer `xml:space="default"` says otherwise.
 
 `em` and `ex` resolve against the `font-size` in force, which arrived with the
 fonts: `1em` is that size and `1ex` is half of it, measured against resvg,

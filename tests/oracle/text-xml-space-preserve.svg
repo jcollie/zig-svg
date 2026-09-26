@@ -1,0 +1,2 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="64" viewBox="0 0 128 64" font-size="10"><text x="4" y="14" xml:space="preserve">a   b    c</text><text x="4" y="30" xml:space="preserve">  lead and trail  <tspan fill="crimson">x</tspan></text><text x="4" y="46" xml:space="preserve">tab	here
+line</text><g xml:space="preserve"><text x="4" y="60">keep  <tspan xml:space="default">  fold   it  </tspan>  end</text></g></svg>

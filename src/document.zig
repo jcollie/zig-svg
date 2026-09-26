@@ -402,6 +402,11 @@ pub const Inherited = struct {
     crisp_shapes: ?bool = null,
     crisp_text: ?bool = null,
 
+    /// What `context-fill` and `context-stroke` mean here: the paints of the
+    /// nearest `<use>` this is drawn through, or of the shape a marker is
+    /// drawn on. Null where there is neither, and they paint nothing.
+    context: ?Context = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -437,6 +442,7 @@ pub const Inherited = struct {
             .dominant_baseline = child.dominant_baseline orelse self.dominant_baseline,
             .crisp_shapes = child.crisp_shapes orelse self.crisp_shapes,
             .crisp_text = child.crisp_text orelse self.crisp_text,
+            .context = child.context orelse self.context,
         };
     }
 };
@@ -615,6 +621,67 @@ pub const Decorations = struct {
     }
 };
 
+/// The paints `context-fill` and `context-stroke` stand for. A null fill is
+/// the caller's colour, as an unset `fill` is; a null stroke is none.
+pub const Context = struct {
+    fill: ?color.Paint = null,
+    stroke: ?color.Paint = null,
+    /// Whose coordinate system a paint server taken from here is laid out
+    /// in: SVG 2 keeps the context element's, so a gradient along a path
+    /// stays one gradient across the markers on it.
+    origin: ?PaintOrigin = null,
+
+    /// The context a shape or `<use>` with `inherited` makes for what is
+    /// drawn in its name: its own paints, with a `currentColor` taken as its
+    /// own colour, and a `context-*` of its own as the context it is in.
+    pub fn of(inherited: Inherited) Context {
+        return .{
+            .fill = pin(inherited.fill, inherited),
+            .stroke = pin(inherited.stroke, inherited),
+        };
+    }
+
+    fn pin(p: ?color.Paint, inherited: Inherited) ?color.Paint {
+        const paint = p orelse return null;
+        return switch (paint) {
+            .current => if (inherited.current_color) |c| .{ .color = c } else null,
+            .context_fill, .context_stroke => substitute(paint, inherited.context),
+            else => paint,
+        };
+    }
+};
+
+/// The element a context paint belongs to, for laying out a paint server
+/// taken from it: its bounding box and its user space.
+pub const PaintOrigin = struct {
+    subject: union(enum) {
+        /// A `<use>`, measured as the group §5.6 draws it as.
+        node: ztree.NodeId,
+        /// The shape a marker is drawn on.
+        shape: *const Shape,
+    },
+    /// The context element's user space, before the viewBox mapping.
+    transform: z2d.Transformation,
+};
+
+/// Where a context paint came from, when `p` is one and it has somewhere.
+fn originOf(p: ?color.Paint, context: ?Context) ?PaintOrigin {
+    const paint = p orelse return null;
+    if (paint != .context_fill and paint != .context_stroke) return null;
+    return (context orelse return null).origin;
+}
+
+/// A paint with `context-fill` and `context-stroke` replaced by what they
+/// stand for, which is nothing where there is no context -- as resvg has it.
+fn substitute(p: ?color.Paint, context: ?Context) ?color.Paint {
+    const paint = p orelse return null;
+    return switch (paint) {
+        .context_fill => if (context) |c| c.fill else .none,
+        .context_stroke => if (context) |c| (c.stroke orelse .none) else .none,
+        else => paint,
+    };
+}
+
 pub const Shape = struct {
     /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
     /// Anything it borrows comes from the tree's arena.
@@ -662,6 +729,11 @@ pub const Shape = struct {
     /// Drawn without anti-aliasing: `shape-rendering: crispEdges` or
     /// `optimizeSpeed`, or for text `text-rendering: optimizeSpeed`.
     crisp: bool = false,
+    /// Where a fill or stroke that came from `context-fill` or
+    /// `context-stroke` belongs, when it is a paint server: laid out in that
+    /// element's space rather than this shape's.
+    fill_origin: ?PaintOrigin = null,
+    stroke_origin: ?PaintOrigin = null,
     decorations: Decorations = .{},
     /// The ids of the `<marker>` elements for the start, the middle vertices
     /// and the end, or null for none. Only a `<path>`, `<line>`,
@@ -836,7 +908,7 @@ pub const Document = struct {
     /// ancestors, not from the shape it is drawn on, so an arrowhead is the
     /// same arrowhead on a red line and a blue one. `subtree` starts from
     /// nothing, which is right for a clip path and wrong for this.
-    pub fn contentOf(self: *const Document, node: ztree.NodeId, ctm: z2d.Transformation) Error!PathIterator {
+    pub fn contentOf(self: *const Document, node: ztree.NodeId, ctm: z2d.Transformation, context: ?Context) Error!PathIterator {
         var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
         it.started = true;
         var chain: [max_container_depth + 1]ztree.NodeId = undefined;
@@ -855,6 +927,8 @@ pub const Document = struct {
             inherited = inherited.with(try it.readInherited(chain[count]));
             it.viewport.font_size = inherited.font_size;
         }
+        // A marker's content draws in the name of the shape it is on.
+        if (context) |c| inherited.context = c;
         it.stack[0] = .{
             .node = node,
             .next_child = 0,
@@ -870,7 +944,7 @@ pub const Document = struct {
     pub fn elementOf(self: *const Document, node: ztree.NodeId, ctm: z2d.Transformation) Error!PathIterator {
         const parent = self.tree.node(node).parent orelse return self.subtree(node, ctm);
         if (self.tree.node(parent).kind != .element) return self.subtree(node, ctm);
-        var it = try self.contentOf(parent, ctm);
+        var it = try self.contentOf(parent, ctm, null);
         it.stack[0].only_child = node;
         return it;
     }
@@ -1232,12 +1306,14 @@ pub const PathIterator = struct {
                         .on_path = on_path,
                     },
                 },
-                .fill = parent.inherited.fill,
+                .fill = substitute(parent.inherited.fill, parent.inherited.context),
+                .fill_origin = originOf(parent.inherited.fill, parent.inherited.context),
+                .stroke_origin = originOf(parent.inherited.stroke, parent.inherited.context),
                 .fill_opacity = parent.inherited.fill_opacity,
                 .fill_rule = parent.inherited.fill_rule,
                 .clip_rule = parent.inherited.clip_rule,
                 .current_color = parent.inherited.current_color,
-                .stroke = parent.inherited.stroke,
+                .stroke = substitute(parent.inherited.stroke, parent.inherited.context),
                 .stroke_width = parent.inherited.stroke_width,
                 .stroke_opacity = parent.inherited.stroke_opacity,
                 .stroke_linecap = parent.inherited.stroke_linecap,
@@ -1648,6 +1724,9 @@ pub const PathIterator = struct {
             // chain is an element with a font size of its own.
             self.viewport.font_size = inherited.font_size;
             inherited = inherited.with(try self.readInherited(node));
+            // What the `<use>` names is drawn in its name, so its paints are
+            // what `context-fill` and `context-stroke` mean inside.
+            inherited.context = Context.of(inherited);
             self.viewport.font_size = inherited.font_size;
             ctm = ctm.mul(try self.readTransform(node));
             const dx = try self.lengthOf(node, "x", .x, 0);
@@ -1655,6 +1734,7 @@ pub const PathIterator = struct {
             if (dx != 0 or dy != 0) {
                 ctm = ctm.mul(.{ .ax = 1, .by = 0, .cx = 0, .dy = 1, .tx = dx, .ty = dy });
             }
+            inherited.context.?.origin = .{ .subject = .{ .node = node }, .transform = ctm };
             const target = try self.resolve(node);
 
             // §5.6 draws a `<use>` as a `<g>` holding what it names, so its
@@ -1711,12 +1791,14 @@ pub const PathIterator = struct {
         if (try self.readGeometry(node)) |geometry| {
             return .{ .shape = .{
                 .geometry = geometry,
-                .fill = effective.fill,
+                .fill = substitute(effective.fill, effective.context),
+                .fill_origin = originOf(effective.fill, effective.context),
+                .stroke_origin = originOf(effective.stroke, effective.context),
                 .fill_opacity = effective.fill_opacity,
                 .fill_rule = effective.fill_rule,
                 .clip_rule = effective.clip_rule,
                 .current_color = effective.current_color,
-                .stroke = effective.stroke,
+                .stroke = substitute(effective.stroke, effective.context),
                 .stroke_width = effective.stroke_width,
                 .stroke_opacity = effective.stroke_opacity,
                 .stroke_linecap = effective.stroke_linecap,
@@ -4134,4 +4216,29 @@ test "mix-blend-mode and isolation come from style, and give a group its own lay
     try testing.expectEqualSlices(BlendMode, &.{ .normal, .multiply, .normal }, shape_blend[0..ns]);
     try testing.expectError(error.BadBlendMode, read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" style=\"mix-blend-mode: plus-lighter\"/></svg>"));
     try testing.expectError(error.BadIsolation, read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"isolation: alone\"><rect width=\"1\" height=\"1\"/></g></svg>"));
+}
+
+test "context paints are a use's own, and nothing where there is no context" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><defs><rect id=\"r\" width=\"1\" height=\"1\" fill=\"context-stroke\" stroke=\"context-fill\"/></defs>" ++
+        "<use href=\"#r\" fill=\"red\" stroke=\"currentColor\" color=\"blue\"/>" ++
+        "<rect width=\"1\" height=\"1\" fill=\"context-fill\" stroke=\"context-stroke\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var shapes_seen: [2]Shape = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| {
+            shapes_seen[n] = sh;
+            n += 1;
+        },
+        else => {},
+    };
+    // Crossed over: the fill is the use's stroke, its currentColor pinned to
+    // the use's blue; the stroke is the use's red fill.
+    try testing.expectEqual(@as(u8, 255), shapes_seen[0].fill.?.color.b);
+    try testing.expectEqual(@as(u8, 255), shapes_seen[0].stroke.?.color.r);
+    try testing.expect(shapes_seen[0].fill_origin != null);
+    try testing.expectEqual(color.Paint.none, shapes_seen[1].fill.?);
+    try testing.expectEqual(color.Paint.none, shapes_seen[1].stroke.?);
 }

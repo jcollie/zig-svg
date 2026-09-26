@@ -150,7 +150,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "text-decorationunderlineoverlineline-through" ++
     "dominant-baselinealignment-baselinecentralmiddlehangingmathematicaltext-before-edgetext-after-edgeideographic" ++
     "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility" ++
-    "mix-blend-mode:isolation:isolateauto";
+    "mix-blend-mode:isolation:isolateauto" ++
+    "context-fillcontext-stroke";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -992,6 +993,8 @@ const document_corpus = [_][]const u8{
     // Blending groups, shapes and an image, isolated and not, under opacity
     // and a filter.
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"gold\"/><g style=\"isolation: isolate; mix-blend-mode: hue\" opacity=\"0.5\"><circle cx=\"3\" cy=\"3\" r=\"2\" style=\"mix-blend-mode: soft-light\" filter=\"blur(1px)\"/><text x=\"1\" y=\"7\" font-size=\"3\" style=\"mix-blend-mode: difference\">x</text></g></svg>",
+    // Context paints through markers, nested uses and a pattern context.
+    "<svg viewBox=\"0 0 8 8\"><pattern id=\"p\" width=\"1\" height=\"1\"><rect width=\"0.5\" height=\"0.5\" fill=\"context-fill\"/></pattern><marker id=\"m\"><circle r=\"1\" fill=\"context-stroke\" stroke=\"context-fill\"/></marker><g id=\"a\"><path d=\"M1 1 L6 2 L3 6\" fill=\"url(#p)\" stroke=\"context-fill\" style=\"marker: url(#m)\"/></g><use href=\"#a\" fill=\"url(#p)\" stroke=\"context-stroke\"/><use href=\"#u\" id=\"u2\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

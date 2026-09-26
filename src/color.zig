@@ -88,6 +88,12 @@ pub const Paint = union(enum) {
     /// the id this holds -- without the `#`, and borrowed from wherever the
     /// attribute value lives.
     reference: []const u8,
+    /// SVG 2's `context-fill` and `context-stroke`: the fill or the stroke
+    /// of the context element -- the shape a marker is drawn on, or the
+    /// `<use>` a shape is drawn through. Resolved by the walk, so a renderer
+    /// never sees one; where there is no context it paints nothing.
+    context_fill,
+    context_stroke,
 };
 
 /// Read a `fill`.
@@ -95,6 +101,8 @@ pub fn parsePaint(text: []const u8) Error!Paint {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (ascii.eqlIgnoreCase(t, "none")) return .none;
     if (ascii.eqlIgnoreCase(t, "currentcolor")) return .current;
+    if (ascii.eqlIgnoreCase(t, "context-fill")) return .context_fill;
+    if (ascii.eqlIgnoreCase(t, "context-stroke")) return .context_stroke;
     if (parseReference(t)) |id| return .{ .reference = id };
     return .{ .color = try parseColor(t) };
 }

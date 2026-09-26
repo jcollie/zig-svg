@@ -792,7 +792,8 @@ fn paintFill(
     // A shape with no geometry draws nothing, which is not an error;
     // `painter.fill` would take it too, but this says so on purpose.
     if (p.nodes.items.len != 0) {
-        var built: Source = try makeSource(gpa, doc, shape, paint, ctm, opts);
+        const space = paintSpace(shape, shape.fill_origin, ctm, pass);
+        var built: Source = try makeSource(gpa, doc, shape, paint, space.ctm, space.subject, opts);
         defer built.deinit(gpa);
         const fill_rule = shape.fill_rule orelse opts.fill_rule;
         switch (built) {
@@ -813,8 +814,8 @@ fn paintFill(
                     t,
                     &region,
                     pathBox(p.nodes.items),
-                    .{ .shape = shape },
-                    ctm,
+                    space.subject,
+                    space.ctm,
                     pass,
                     opts,
                 );
@@ -879,7 +880,8 @@ fn paintStroke(
             pen_ctm = .identity;
         }
 
-        var built: Source = try makeSource(gpa, doc, shape, nib.paint, ctm, opts);
+        const space = paintSpace(shape, shape.stroke_origin, ctm, pass);
+        var built: Source = try makeSource(gpa, doc, shape, nib.paint, space.ctm, space.subject, opts);
         defer built.deinit(gpa);
         const stroke_opts: z2d.painter.StrokeOptions = .{
             .line_width = nib.width,
@@ -906,8 +908,8 @@ fn paintStroke(
                 built.tiled,
                 &region,
                 strokeBox(pathBox(p.nodes.items), nib.width, ctm),
-                .{ .shape = shape },
-                ctm,
+                space.subject,
+                space.ctm,
                 pass,
                 opts,
             );
@@ -989,10 +991,27 @@ fn paintMarkers(
     // `strokeWidth` units are the stroke's width whether or not the shape is
     // stroked: §11.6.2 scales by the computed `stroke-width`.
     const stroke_width = shape.stroke_width orelse opts.stroke_width;
+    // SVG 2: a marker's `context-fill` and `context-stroke` are the paints
+    // of the shape it is drawn on, a `currentColor` there being the shape's
+    // own colour.
+    const pin = struct {
+        fn f(given: ?color.Paint, current: ?color.Color) ?color.Paint {
+            const paint = given orelse return null;
+            if (paint == .current) return if (current) |c| .{ .color = c } else null;
+            return paint;
+        }
+    }.f;
+    const context: document.Context = .{
+        .fill = pin(shape.fill, shape.current_color),
+        .stroke = pin(shape.stroke, shape.current_color),
+        // The shape's whole matrix, the viewBox mapping included: the
+        // marker's content is drawn in a pass with no base of its own.
+        .origin = .{ .subject = .{ .shape = &shape }, .transform = ctm },
+    };
     for (vertices.items) |v| {
-        if (v.start) if (shape.marker_start) |id| try drawMarker(gpa, surface, doc, id, v, true, ctm, stroke_width, pass, opts);
-        if (!v.start and !v.end) if (shape.marker_mid) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, pass, opts);
-        if (v.end) if (shape.marker_end) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, pass, opts);
+        if (v.start) if (shape.marker_start) |id| try drawMarker(gpa, surface, doc, id, v, true, ctm, stroke_width, context, pass, opts);
+        if (!v.start and !v.end) if (shape.marker_mid) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, context, pass, opts);
+        if (v.end) if (shape.marker_end) |id| try drawMarker(gpa, surface, doc, id, v, false, ctm, stroke_width, context, pass, opts);
     }
 }
 
@@ -1014,6 +1033,7 @@ fn drawMarker(
     is_start: bool,
     ctm: z2d.Transformation,
     stroke_width: f64,
+    context: document.Context,
     pass: Pass,
     opts: Options,
 ) Error!void {
@@ -1059,7 +1079,7 @@ fn drawMarker(
     if (!spec.clips) {
         var layers: Layers = .{ .bottom = target };
         defer layers.deinit(gpa);
-        var it = try doc.contentOf(node, content);
+        var it = try doc.contentOf(node, content, context);
         return drawItems(gpa, &layers, doc, &it, deeper, opts);
     }
 
@@ -1082,7 +1102,11 @@ fn drawMarker(
     {
         var layers: Layers = .{ .bottom = &ink };
         defer layers.deinit(gpa);
-        var it = try doc.contentOf(node, to_cell.mul(content));
+        // Drawn into a surface of its own, offset by `to_cell`, so a paint
+        // laid out in the marked shape's space is offset with it.
+        var shifted = context;
+        if (shifted.origin) |*origin| origin.transform = to_cell.mul(origin.transform);
+        var it = try doc.contentOf(node, to_cell.mul(content), shifted);
         try drawItems(gpa, &layers, doc, &it, deeper, opts);
     }
     var cut = (try clipToViewport(gpa, null, .{
@@ -2226,6 +2250,8 @@ fn resolveFill(shape: document.Shape, opts: Options) ?Paint {
         .color => |c| c,
         .current => shape.current_color,
         .reference => |id| return .{ .reference = .{ .id = id, .alpha = alpha } },
+        // Resolved by the walk; one that reaches here had no context.
+        .context_fill, .context_stroke => return null,
     };
 
     const pixel = (if (named) |c| fadeColor(c, alpha) else fadePixel(opts.fill, alpha)) orelse
@@ -4090,12 +4116,27 @@ fn alphaByte(opacity: f64) u8 {
 /// A colour is a pattern on its own. A reference has to be found, read, and
 /// placed: a gradient's numbers are in a space of their own, and the matrix
 /// that says where that space is depends on the shape being painted.
+/// Where a shape's paint server is laid out: its own box and space, or, for
+/// a paint that came from `context-fill` or `context-stroke`, those of the
+/// element it came from, as SVG 2 has it and resvg draws it.
+fn paintSpace(shape: document.Shape, origin: ?document.PaintOrigin, ctm: z2d.Transformation, pass: Pass) struct { subject: Subject, ctm: z2d.Transformation } {
+    const o = origin orelse return .{ .subject = .{ .shape = shape }, .ctm = ctm };
+    return .{
+        .subject = switch (o.subject) {
+            .node => |n| .{ .container = n },
+            .shape => |s| .{ .shape = s.* },
+        },
+        .ctm = pass.base.mul(o.transform),
+    };
+}
+
 fn makeSource(
     gpa: Allocator,
     doc: *const document.Document,
     shape: document.Shape,
     paint: Paint,
     ctm: z2d.Transformation,
+    subject: Subject,
     opts: Options,
 ) Error!Source {
     const ref = switch (paint) {
@@ -4132,7 +4173,8 @@ fn makeSource(
     // units mapping, then `gradientTransform` inside that.
     var placement = ctm;
     if (spec.units == .object_bounding_box) {
-        const box = try boundingBox(gpa, doc, shape, opts);
+        var measure: Measure = .{ .subject = subject };
+        const box = try measure.get(gpa, doc, opts);
         // A shape with no extent in one direction has no box to be fractions
         // of, and §7.11 says such a gradient is not rendered.
         if (!(box.width > 0) or !(box.height > 0)) return .nothing;
@@ -4470,7 +4512,7 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
 
     const alpha = (shape.stroke_opacity orelse 1.0) * shape.opacity;
     const named: ?color.Color = switch (paint) {
-        .none => return null,
+        .none, .context_fill, .context_stroke => return null,
         .color => |c| c,
         .current => shape.current_color,
         .reference => |id| {

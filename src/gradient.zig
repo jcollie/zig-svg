@@ -271,7 +271,7 @@ fn applyOne(
                 // either -- §13.2.4 has no use for a stop that is a paint
                 // server -- so both fall back to the initial black.
                 .current => current_color,
-                .none, .reference => color.Color.black,
+                .none, .reference, .context_fill, .context_stroke => color.Color.black,
             }
         else
             color.Color.black;

@@ -224,6 +224,15 @@ DIVERGENCES = {
     # laid glyph by glyph on a straight baseline agrees to a level. Measured at
     # 1.304 and 1.074%.
     "text-spacing-on-path": (1.5, 0.012, "resvg places glyphs on a path only to a quarter of a unit"),
+    # A text decoration under `paint-order: stroke`. This paints a decoration
+    # in its text's order, stroke and then fill; resvg paints every
+    # decoration fill then stroke whatever the order says, so under a stroke
+    # wider than the band its underline is solid stroke colour where this one
+    # shows the fill down its middle. SVG 2 leaves the question open. Part of
+    # the measurement is the glyphs' own 1.5-unit stroke, where the two
+    # strokers already differ at the joins by about 0.7 on their own.
+    # Measured at 1.920 and 1.543%.
+    "text-decoration-paint-order": (2.1, 0.017, "resvg paints a decoration fill then stroke, whatever paint-order says"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

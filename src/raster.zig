@@ -657,6 +657,17 @@ fn drawItems(
         // all of them draw the same run; afterwards the pen is where that run
         // ends, which every pass agrees on.
         const pen_before = pen;
+        // §10.12: an underline and an overline go beneath the glyphs, a
+        // line-through over them, as resvg draws them. Where the run goes is
+        // only known once it is laid out, so it is laid out first.
+        var span: ?Pen = null;
+        if (shape.geometry == .text and shape.decorations.any()) {
+            var probe = pen_before;
+            try advancePen(gpa, shape, ctm, pass, doc, &probe, opts);
+            span = probe;
+            try paintDecoration(gpa, surface, doc, shape, shape.decorations.underline, .underline, probe, ctm, pass, opts);
+            try paintDecoration(gpa, surface, doc, shape, shape.decorations.overline, .overline, probe, ctm, pass, opts);
+        }
         var pen_after: ?Pen = null;
         for (shape.paint_order) |layer| switch (layer) {
             .fill => if (fill_paint) |paint| {
@@ -671,6 +682,9 @@ fn drawItems(
             },
             .markers => try paintMarkers(gpa, surface, doc, shape, ctm, pass, opts),
         };
+        if (span) |probe| {
+            try paintDecoration(gpa, surface, doc, shape, shape.decorations.line_through, .line_through, probe, ctm, pass, opts);
+        }
         // Text that is neither filled nor stroked still takes up its room.
         if (pen_after) |after| {
             pen = after;
@@ -683,6 +697,64 @@ fn drawItems(
         // `drawDocument` unwinds the whole stack when a draw gives up.
         if (shape_layer) try layers.close(gpa);
     }
+}
+
+/// One text decoration across the run `span` laid out: a band as thick as
+/// the face's underline, centred where the face puts it -- its underline
+/// position, its ascent for an overline, its strikeout position for a line
+/// through -- as resvg draws each. Filled and stroked in the paint of the
+/// element that declared it, in the run's own `paint-order`.
+fn paintDecoration(
+    gpa: Allocator,
+    surface: *z2d.Surface,
+    doc: *const document.Document,
+    shape: document.Shape,
+    declared: ?document.DecorationPaint,
+    comptime kind: enum { underline, overline, line_through },
+    span: Pen,
+    ctm: z2d.Transformation,
+    pass: Pass,
+    opts: Options,
+) Error!void {
+    const paint = declared orelse return;
+    if (!(span.run_x1 > span.run_x0)) return;
+    const size = shape.font_size orelse 16;
+    if (!(size > 0)) return;
+    const font = try faceFor(shape, opts);
+    const m = metricsOf(&font, size);
+    const centre = switch (kind) {
+        .underline => m.underline_position,
+        .overline => m.ascent,
+        .line_through => m.strikeout_position,
+    };
+    const t = m.underline_thickness;
+    var band = shape;
+    band.geometry = .{ .rect = .{
+        .x = span.run_x0,
+        .y = span.run_baseline - centre - t / 2,
+        .width = span.run_x1 - span.run_x0,
+        .height = t,
+        .rx = null,
+        .ry = null,
+    } };
+    band.fill = paint.fill;
+    band.fill_opacity = paint.fill_opacity;
+    band.stroke = paint.stroke;
+    band.stroke_width = paint.stroke_width;
+    band.stroke_opacity = paint.stroke_opacity;
+    band.current_color = paint.current_color;
+    band.decorations = .{};
+    band.marker_start = null;
+    band.marker_mid = null;
+    band.marker_end = null;
+    const fill = resolveFill(band, opts);
+    const stroke = try resolveStroke(band, opts);
+    var unused: Pen = .{};
+    for (band.paint_order) |layer| switch (layer) {
+        .fill => if (fill) |f| try paintFill(gpa, surface, doc, band, f, ctm, pass, &unused, opts),
+        .stroke => if (stroke) |*s| try paintStroke(gpa, surface, doc, band, s, ctm, pass, &unused, opts),
+        .markers => {},
+    };
 }
 
 /// Fills one shape onto `surface`: SVG 1.1 §11.3's first painting pass.
@@ -3252,6 +3324,11 @@ const Pen = struct {
     /// Whether anything has been drawn yet in this `<text>`. Until something
     /// has, a run with no position of its own has nothing to carry on from.
     placed: bool = false,
+    /// Where the last run laid out began and ended along its line, and its
+    /// baseline with any shift: what a decoration is drawn across.
+    run_x0: f64 = 0,
+    run_x1: f64 = 0,
+    run_baseline: f64 = 0,
 };
 
 /// Build a `<text>` run's glyph outlines into `p`, under `ctm`.
@@ -3330,6 +3407,8 @@ fn buildText(
     }
 
     const shift = baselineShift(run, &font, size);
+    pen.run_x0 = pen.x;
+    pen.run_baseline = pen.y - shift;
     var glyphs = z2d.text.outline(
         gpa,
         &font,
@@ -3352,6 +3431,7 @@ fn buildText(
 
     pen.x += z2d.text.measure(gpa, &font, collapsed, text_opts) catch
         return error.BadFont;
+    pen.run_x1 = pen.x;
 
     // A run of text is as many nodes as its glyphs need, and a document can
     // always write more text. Without this the budget would be the one thing
@@ -3428,6 +3508,8 @@ fn buildGlyphs(
     const baseline = font.baselineOffset(size);
     const shift = baselineShift(run, font, size);
     var x = pen.x;
+    pen.run_x0 = x;
+    pen.run_baseline = pen.y - shift;
     for (0..count) |i| {
         const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
         // Each glyph is turned about its own origin, which is where it sits on
@@ -3455,6 +3537,7 @@ fn buildGlyphs(
         if (i + 1 < count) x += extra;
     }
     pen.x = x;
+    pen.run_x1 = x;
 }
 
 /// Lay a run along a `<textPath>`'s shape.

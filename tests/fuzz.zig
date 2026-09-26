@@ -146,7 +146,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "blur(drop-shadow(grayscale(sepia(saturate(hue-rotate(invert(opacity(brightness(contrast(url(#)%pxdegturnradgrad" ++
     "writing-modehorizontal-tbvertical-rltblr-tbdirectionrtlltrunicode-bidinormalbidi-override" ++
     "letter-spacingword-spacingnormalem" ++
-    "baseline-shiftsubsuperbaseline";
+    "baseline-shiftsubsuperbaseline" ++
+    "text-decorationunderlineoverlineline-through";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -979,6 +980,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 4 Q4 0 8 4\"/><text x=\"4\" y=\"4\" font-size=\"2\" letter-spacing=\"0.3em\" word-spacing=\"-9\" text-anchor=\"middle\">a b<tspan letter-spacing=\"normal\">c d</tspan></text><text font-size=\"1\" letter-spacing=\"1e9\"><textPath href=\"#p\">e f</textPath></text></svg>",
     // Shifts nested every way, and along a path.
     "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 6 L8 2\"/><text x=\"1\" y=\"6\" font-size=\"3\">a<tspan baseline-shift=\"super\">b<tspan baseline-shift=\"-50%\">c<tspan baseline-shift=\"sub\">d</tspan></tspan></tspan></text><text font-size=\"2\"><textPath href=\"#p\">e<tspan baseline-shift=\"1e9\">f</tspan></textPath></text></svg>",
+    // Decorations declared at several levels, stroked, shifted and anchored.
+    "<svg viewBox=\"0 0 8 8\"><g text-decoration=\"overline\" fill=\"red\"><text x=\"4\" y=\"5\" font-size=\"3\" text-anchor=\"end\" stroke=\"blue\" text-decoration=\"underline\">a <tspan text-decoration=\"line-through none\" baseline-shift=\"sub\" fill=\"url(#x)\">b</tspan> <tspan visibility=\"hidden\" text-decoration=\"underline\">c</tspan></text></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

@@ -172,6 +172,9 @@ pub const Error = error{
     /// A `baseline-shift` that is not `baseline`, `sub`, `super`, a length or
     /// a percentage.
     BadBaselineShift,
+    /// A `text-decoration` that is not `none` or some of `underline`,
+    /// `overline` and `line-through`.
+    BadTextDecoration,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -552,6 +555,29 @@ const Refs = struct {
 };
 
 /// One drawable element, with the paint and the transform that apply to it.
+/// The paint of the element that declared a text decoration, which is what
+/// the decoration is painted with -- SVG 1.1 §10.12: an underline declared on
+/// a `<text>` stays the `<text>`'s colour under a `<tspan>` of another.
+pub const DecorationPaint = struct {
+    fill: ?color.Paint,
+    fill_opacity: ?f64,
+    stroke: ?color.Paint,
+    stroke_width: ?f64,
+    stroke_opacity: ?f64,
+    current_color: ?color.Color,
+};
+
+/// The decorations a run of text carries, each with its declarer's paint.
+pub const Decorations = struct {
+    underline: ?DecorationPaint = null,
+    overline: ?DecorationPaint = null,
+    line_through: ?DecorationPaint = null,
+
+    pub fn any(self: Decorations) bool {
+        return self.underline != null or self.overline != null or self.line_through != null;
+    }
+};
+
 pub const Shape = struct {
     /// What to draw: a `<path>`'s `d`, or one of the basic shapes' numbers.
     /// Anything it borrows comes from the tree's arena.
@@ -593,6 +619,8 @@ pub const Shape = struct {
     mask: ?[]const u8,
     /// The order the fill, the stroke and the markers are painted in.
     paint_order: [3]PaintLayer,
+    /// The decorations a run of text carries; nothing for any other shape.
+    decorations: Decorations = .{},
     /// The ids of the `<marker>` elements for the start, the middle vertices
     /// and the end, or null for none. Only a `<path>`, `<line>`,
     /// `<polyline>` or `<polygon>` has markers; §11.6 gives none to anything
@@ -1096,27 +1124,37 @@ pub const PathIterator = struct {
         const raw = tree.node(child).value;
         const owner = self.textOwnerOf(parent.node);
         const shift = try self.baselineShiftOf(owner);
+        const decorations = try self.decorationsOf();
+        // Along a path, or turned glyph by glyph, a decoration is broken
+        // into a piece per glyph, which is a layout of its own that this
+        // does not draw.
+        if (decorations.any() and (self.attr(parent.node, "rotate") != null or try self.onPathOf(parent.node) != null)) {
+            return error.UnsupportedTextLayout;
+        }
 
         // The whitespace between runs belongs to the whole `<text>`, so it is
         // decided here, in order, rather than run by run. A run that is only
-        // whitespace yields nothing and leaves a space owed to the next one --
-        // `a<tspan> </tspan>b` is two words.
+        // whitespace, between words, is one space -- `a<tspan> </tspan>b` is
+        // two words -- and stays in the element it was written in, in that
+        // element's font, shift and decorations, which is where CSS keeps a
+        // collapsed space and where resvg draws it. At either end of the
+        // `<text>`, or after a space already kept, it is nothing.
         if (self.ws_owner != owner) {
             self.ws_owner = owner;
             self.ws_seen = false;
             self.ws_ended = false;
             self.ws_pending = false;
         }
-        if (allWhitespace(raw)) {
-            if (self.ws_seen) self.ws_pending = true;
+        const only_space = allWhitespace(raw);
+        if (only_space and (!self.ws_seen or self.ws_ended or !self.hasLaterText(owner, child))) {
             return null;
         }
         const lead_space = self.ws_seen and !self.ws_ended and
             (isXmlSpace(raw[0]) or self.ws_pending);
-        const trail_space = isXmlSpace(raw[raw.len - 1]) and self.hasLaterText(owner, child);
+        const trail_space = !only_space and isXmlSpace(raw[raw.len - 1]) and self.hasLaterText(owner, child);
         self.ws_seen = true;
         self.ws_pending = false;
-        self.ws_ended = trail_space;
+        self.ws_ended = trail_space or only_space;
 
         const first = parent.first_run;
         // A frame is shared, so the flag has to be written back to the real
@@ -1165,6 +1203,7 @@ pub const PathIterator = struct {
                 .text_anchor = parent.inherited.text_anchor,
                 .visible = parent.inherited.visible orelse true,
                 .paint_order = parent.inherited.paint_order orelse PaintLayer.normal,
+                .decorations = decorations,
                 // A run has no `opacity` of its own: the element it sits in does,
                 // and that element opened a layer for it if it needed one.
                 .opacity = 1.0,
@@ -1260,6 +1299,42 @@ pub const PathIterator = struct {
             total += v;
         }
         return .{ .length = total, .supers = supers, .subs = subs };
+    }
+
+    /// §10.12's `text-decoration`, for a run: not inherited, but an element's
+    /// decorations are drawn across all the text inside it, each in the paint
+    /// of the nearest element that declares it -- which is what resvg does,
+    /// looking through every ancestor.
+    fn decorationsOf(self: *const PathIterator) Error!Decorations {
+        var out: Decorations = .{};
+        var i = self.depth + 1;
+        while (i > 0) {
+            i -= 1;
+            const frame = self.stack[i];
+            const raw = self.presentation(frame.node, "text-decoration") orelse continue;
+            const paint: DecorationPaint = .{
+                .fill = frame.inherited.fill,
+                .fill_opacity = frame.inherited.fill_opacity,
+                .stroke = frame.inherited.stroke,
+                .stroke_width = frame.inherited.stroke_width,
+                .stroke_opacity = frame.inherited.stroke_opacity,
+                .current_color = frame.inherited.current_color,
+            };
+            var it = std.mem.tokenizeAny(u8, raw, " \t\r\n");
+            while (it.next()) |word| {
+                if (std.mem.eql(u8, word, "none") or std.mem.eql(u8, word, "inherit")) continue;
+                const slot = if (std.mem.eql(u8, word, "underline"))
+                    &out.underline
+                else if (std.mem.eql(u8, word, "overline"))
+                    &out.overline
+                else if (std.mem.eql(u8, word, "line-through"))
+                    &out.line_through
+                else
+                    return error.BadTextDecoration;
+                if (slot.* == null) slot.* = paint;
+            }
+        }
+        return out;
     }
 
     fn textOwnerOf(self: *const PathIterator, node: ztree.NodeId) ztree.NodeId {
@@ -3283,17 +3358,27 @@ test "a tspan that places itself starts a chunk" {
     try testing.expectEqual(@as(?f64, 26), second.y);
 }
 
-test "whitespace between markup is not a run" {
+test "whitespace around markup is no run, and between it is a space of its own" {
     const gpa = testing.allocator;
-    // The newlines and indentation around the tspans are not text the document
-    // meant to draw, and a run made of nothing else is not a run.
+    // The newlines and indentation before the first tspan and after the last
+    // are not text the document meant to draw. Between the two they collapse
+    // to one space -- `a b` -- which belongs to the `<text>` they were
+    // written in, not to either tspan: in the text's font, not "b"'s, as CSS
+    // and resvg both keep it.
     var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" font-size=\"10\">\n" ++
-        "  <tspan>a</tspan>\n  <tspan>b</tspan>\n</text></svg>");
+        "  <tspan>a</tspan>\n  <tspan font-size=\"5\">b</tspan>\n</text></svg>");
     defer doc.deinit();
 
     var it = doc.paths();
     try testing.expectEqualStrings("a", (try it.next()).?.shape.geometry.text.utf8);
-    try testing.expectEqualStrings("b", (try it.next()).?.shape.geometry.text.utf8);
+    const gap = (try it.next()).?.shape;
+    try testing.expectEqualStrings("\n  ", gap.geometry.text.utf8);
+    try testing.expect(gap.geometry.text.lead_space);
+    try testing.expectEqual(@as(?f64, 10), gap.font_size);
+    const b = (try it.next()).?.shape.geometry.text;
+    try testing.expectEqualStrings("b", b.utf8);
+    // Its space is already drawn, so "b" does not draw another.
+    try testing.expect(!b.lead_space);
     try testing.expectEqual(@as(?Item, null), try it.next());
 }
 
@@ -3835,4 +3920,31 @@ test "baseline shifts add up from the run to its text, and the text's own is lef
     try testing.expectEqual(@as(i16, 1), runs[4].subs);
     try testing.expectEqual(@as(i16, 1), runs[4].supers);
     try testing.expectError(error.BadBaselineShift, read(gpa, "<svg viewBox=\"0 0 8 8\"><text>a<tspan baseline-shift=\"high\">b</tspan></text></svg>"));
+}
+
+test "a decoration takes the paint of the element that declared it" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><text fill=\"red\" text-decoration=\"underline\">a" ++
+        "<tspan fill=\"blue\" text-decoration=\"line-through underline\">b</tspan></text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var runs: [2]Shape = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.geometry == .text) {
+            runs[n] = sh;
+            n += 1;
+        },
+        else => {},
+    };
+    const red = runs[0].decorations.underline.?.fill.?.color;
+    try testing.expectEqual(@as(u8, 255), red.r);
+    try testing.expectEqual(@as(?DecorationPaint, null), runs[0].decorations.line_through);
+    // The nearest declarer wins for each decoration on its own.
+    try testing.expectEqual(@as(u8, 255), runs[1].decorations.underline.?.fill.?.color.b);
+    try testing.expectEqual(@as(u8, 255), runs[1].decorations.line_through.?.fill.?.color.b);
+    try testing.expectError(error.BadTextDecoration, read(gpa, "<svg viewBox=\"0 0 8 8\"><text text-decoration=\"blink\">a</text></svg>"));
+    // Broken glyph by glyph along a path, which is not drawn.
+    try testing.expectError(error.UnsupportedTextLayout, read(gpa, "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 0 L8 8\"/>" ++
+        "<text text-decoration=\"underline\"><textPath href=\"#p\">a</textPath></text></svg>"));
 }

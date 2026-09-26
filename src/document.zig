@@ -362,11 +362,8 @@ pub const Inherited = struct {
     stroke_linecap: ?z2d.options.CapMode = null,
     stroke_linejoin: ?z2d.options.JoinMode = null,
     stroke_miterlimit: ?f64 = null,
-    /// `stroke-dasharray` as the document wrote it. Kept as text because a
-    /// dash list is a list: parsing it here would mean either allocating for
-    /// it or giving every level of the walk's stack room for one. It borrows
-    /// from the tree's arena, so it lives as long as the `Document`.
-    stroke_dasharray: ?[]const u8 = null,
+    /// `stroke-dasharray`; see `DashArray`.
+    stroke_dasharray: ?DashArray = null,
     stroke_dashoffset: ?f64 = null,
 
     /// The `font-family` list as the document wrote it, borrowed from the
@@ -718,7 +715,7 @@ pub const Shape = struct {
     stroke_linecap: ?z2d.options.CapMode,
     stroke_linejoin: ?z2d.options.JoinMode,
     stroke_miterlimit: ?f64,
-    stroke_dasharray: ?[]const u8,
+    stroke_dasharray: ?DashArray,
     stroke_dashoffset: ?f64,
     /// What `.text` geometry is drawn with. Meaningless for every other
     /// geometry, and inherited like the paint properties are, because a
@@ -1125,6 +1122,22 @@ pub const Document = struct {
         };
         return viewBoxTransform(vb, self.preserve_aspect_ratio, x, y, width, height);
     }
+};
+
+/// A `stroke-dasharray`, with what its lengths are measured against.
+///
+/// Kept as text because a dash list is a list: parsing it here would mean
+/// either allocating for it or giving every level of the walk's stack room for
+/// one. The text borrows from the tree's arena, so it lives as long as the
+/// `Document`.
+///
+/// Each entry is a length, and a percentage or an `em` in one is resolved
+/// where the property was declared, as `stroke-width` and
+/// `stroke-dashoffset` are -- so the viewport and the font size in force
+/// there travel with it, to wherever the list is inherited to.
+pub const DashArray = struct {
+    raw: []const u8,
+    viewport: length.Viewport,
 };
 
 /// A rectangle in some element's user space.
@@ -2240,7 +2253,10 @@ pub const PathIterator = struct {
             .stroke_linecap = if (self.presentation(node, "stroke-linecap")) |v| try parseLineCap(v) else null,
             .stroke_linejoin = if (self.presentation(node, "stroke-linejoin")) |v| try parseLineJoin(v) else null,
             .stroke_miterlimit = if (self.presentation(node, "stroke-miterlimit")) |v| try parseMiterLimit(v) else null,
-            .stroke_dasharray = self.presentation(node, "stroke-dasharray"),
+            .stroke_dasharray = if (self.presentation(node, "stroke-dasharray")) |v|
+                .{ .raw = v, .viewport = own }
+            else
+                null,
             .stroke_dashoffset = try self.optionalPresentationLength(node, "stroke-dashoffset", .other),
             .font_family = self.presentation(node, "font-family"),
             .font_size = font_size,

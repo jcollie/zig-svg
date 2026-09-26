@@ -333,7 +333,8 @@ fn documentTarget(input: []const u8) anyerror!void {
             try testing.expect(m >= 1.0);
         }
         if (shape.stroke_dashoffset) |o| try expectUsable(o);
-        if (shape.stroke_dasharray) |raw| if (raw.len != 0) {
+        if (shape.stroke_dasharray) |dashes| if (dashes.raw.len != 0) {
+            const raw = dashes.raw;
             const inside = @intFromPtr(raw.ptr) >= @intFromPtr(src.ptr) and
                 @intFromPtr(raw.ptr) < @intFromPtr(src.ptr) + src.len;
             try testing.expect(!inside);

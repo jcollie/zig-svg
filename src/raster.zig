@@ -4643,8 +4643,8 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
             var ref: Stroke = try strokeStyle(shape, width, .{
                 .reference = .{ .id = id, .alpha = alpha },
             });
-            if (shape.stroke_dasharray) |raw| {
-                ref.dash_count = try readDashes(raw, &ref.dash_storage);
+            if (shape.stroke_dasharray) |dashes| {
+                ref.dash_count = try readDashes(dashes.raw, dashes.viewport, &ref.dash_storage);
             }
             return ref;
         },
@@ -4653,8 +4653,8 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
         return null;
 
     var result: Stroke = try strokeStyle(shape, width, .{ .pixel = pixel });
-    if (shape.stroke_dasharray) |raw| {
-        result.dash_count = try readDashes(raw, &result.dash_storage);
+    if (shape.stroke_dasharray) |dashes| {
+        result.dash_count = try readDashes(dashes.raw, dashes.viewport, &result.dash_storage);
     }
     return result;
 }
@@ -4670,17 +4670,20 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
 ///
 /// An odd count is repeated, so `4` dashes four on and four off. That is the
 /// specification rather than a convenience, and z2d does not do it for us.
-fn readDashes(raw: []const u8, out: *[max_dashes]f64) Error!usize {
+///
+/// Each entry is a length: a unit is read, and a percentage is of `viewport`'s
+/// normalized diagonal, as for any length along no one axis. They used to be
+/// read as bare numbers, which took `10%` for ten user units and `5mm` for
+/// five, and said nothing.
+fn readDashes(raw: []const u8, viewport: length.Viewport, out: *[max_dashes]f64) Error!usize {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "none")) return 0;
 
-    var s: path.Scanner = .{ .src = trimmed };
+    var entries = std.mem.tokenizeAny(u8, trimmed, " \t\r\n,");
     var n: usize = 0;
     var total: f64 = 0;
-    while (true) {
-        s.skipWsAndCommas();
-        if (s.done()) break;
-        const v = s.number() catch break;
+    while (entries.next()) |entry| {
+        const v = length.parse(entry, .other, viewport) catch break;
         if (v < 0) return 0; // §11.4: an error, so the initial value stands
         // Doubling below needs room for two of everything.
         if (n >= max_dashes / 2) return error.TooManyDashes;
@@ -5722,7 +5725,9 @@ fn dashesOf(raw: []const u8) ![]const f64 {
     const S = struct {
         var storage: [max_dashes]f64 = undefined;
     };
-    const n = try readDashes(raw, &S.storage);
+    // A square viewport of 40, whose normalized diagonal is 40 too; and a
+    // font size of 10.
+    const n = try readDashes(raw, .{ .width = 40, .height = 40, .font_size = 10 }, &S.storage);
     return S.storage[0..n];
 }
 
@@ -5732,6 +5737,12 @@ test "a dash array is read, and an odd one is repeated" {
     // §11.4: an odd count is repeated, so `4` is four on and four off.
     try testing.expectEqualSlices(f64, &.{ 4, 4 }, try dashesOf("4"));
     try testing.expectEqualSlices(f64, &.{ 4, 2, 1, 4, 2, 1 }, try dashesOf("4,2,1"));
+}
+
+test "a dash is a length, with a unit or as a percentage" {
+    // Ten percent of the diagonal, an em, and an inch in user units.
+    try testing.expectEqualSlices(f64, &.{ 4, 10, 96, 4, 10, 96 }, try dashesOf("10% 1em 1in"));
+    try testing.expectEqualSlices(f64, &.{ 2, 3 }, try dashesOf(" 2px , 3 "));
 }
 
 test "a dash array that is not one leaves the stroke solid" {
@@ -5751,7 +5762,7 @@ test "a dash array longer than the ceiling is refused" {
     defer long.deinit(testing.allocator);
     for (0..max_dashes) |_| try long.appendSlice(testing.allocator, "1 ");
     var storage: [max_dashes]f64 = undefined;
-    try testing.expectError(error.TooManyDashes, readDashes(long.items, &storage));
+    try testing.expectError(error.TooManyDashes, readDashes(long.items, .{ .width = 1, .height = 1 }, &storage));
 }
 
 test "a shape with no stroke named is not stroked" {

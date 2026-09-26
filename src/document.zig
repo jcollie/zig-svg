@@ -175,6 +175,9 @@ pub const Error = error{
     /// A `text-decoration` that is not `none` or some of `underline`,
     /// `overline` and `line-through`.
     BadTextDecoration,
+    /// A `dominant-baseline` or `alignment-baseline` that is none of its
+    /// keywords.
+    BadBaseline,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -381,6 +384,9 @@ pub const Inherited = struct {
     letter_spacing: ?f64 = null,
     word_spacing: ?f64 = null,
 
+    /// `dominant-baseline`, which SVG 2 and CSS Inline 3 make inherited.
+    dominant_baseline: ?shapes.Text.Baseline = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -413,6 +419,7 @@ pub const Inherited = struct {
             .bidi = child.bidi orelse self.bidi,
             .letter_spacing = child.letter_spacing orelse self.letter_spacing,
             .word_spacing = child.word_spacing orelse self.word_spacing,
+            .dominant_baseline = child.dominant_baseline orelse self.dominant_baseline,
         };
     }
 };
@@ -1164,25 +1171,31 @@ pub const PathIterator = struct {
         self.viewport.font_size = parent.inherited.font_size;
         return .{
             .shape = .{
-                .geometry = .{ .text = .{
-                    .utf8 = raw,
-                    .x = if (first) try self.optionalLengthOf(parent.node, "x", .x) else null,
-                    .y = if (first) try self.optionalLengthOf(parent.node, "y", .y) else null,
-                    .dx = if (first) try self.lengthOf(parent.node, "dx", .x, 0) else 0,
-                    .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
-                    .owner = owner,
-                    .starts_element = owner == parent.node and first,
-                    .lead_space = lead_space,
-                    .trail_space = trail_space,
-                    .rotate = rotate,
-                    .baseline_shift = shift.length,
-                    .supers = shift.supers,
-                    .subs = shift.subs,
-                    .letter_spacing = parent.inherited.letter_spacing orelse 0,
-                    .word_spacing = parent.inherited.word_spacing orelse 0,
-                    .text_length = text_length,
-                    .on_path = on_path,
-                } },
+                .geometry = .{
+                    .text = .{
+                        .utf8 = raw,
+                        .x = if (first) try self.optionalLengthOf(parent.node, "x", .x) else null,
+                        .y = if (first) try self.optionalLengthOf(parent.node, "y", .y) else null,
+                        .dx = if (first) try self.lengthOf(parent.node, "dx", .x, 0) else 0,
+                        .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
+                        .owner = owner,
+                        .starts_element = owner == parent.node and first,
+                        .lead_space = lead_space,
+                        .trail_space = trail_space,
+                        .rotate = rotate,
+                        // `alignment-baseline` is the element's own and wins,
+                        // unless it defers with `auto` or `baseline`.
+                        .baseline = (if (self.presentation(parent.node, "alignment-baseline")) |v| try parseBaseline(v, false) else null) orelse
+                            parent.inherited.dominant_baseline orelse .alphabetic,
+                        .baseline_shift = shift.length,
+                        .supers = shift.supers,
+                        .subs = shift.subs,
+                        .letter_spacing = parent.inherited.letter_spacing orelse 0,
+                        .word_spacing = parent.inherited.word_spacing orelse 0,
+                        .text_length = text_length,
+                        .on_path = on_path,
+                    },
+                },
                 .fill = parent.inherited.fill,
                 .fill_opacity = parent.inherited.fill_opacity,
                 .fill_rule = parent.inherited.fill_rule,
@@ -1967,6 +1980,7 @@ pub const PathIterator = struct {
             .bidi = if (self.presentation(node, "unicode-bidi")) |v| try parseUnicodeBidi(v) else null,
             .letter_spacing = if (self.presentation(node, "letter-spacing")) |v| try parseSpacing(v, own) else null,
             .word_spacing = if (self.presentation(node, "word-spacing")) |v| try parseSpacing(v, own) else null,
+            .dominant_baseline = if (self.presentation(node, "dominant-baseline")) |v| try parseBaseline(v, true) else null,
         };
     }
 
@@ -2273,6 +2287,33 @@ pub fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
     for (smooth) |k| if (std.mem.eql(u8, t, k)) return .smooth;
     for (nearest) |k| if (std.mem.eql(u8, t, k)) return .nearest;
     return error.BadImageRendering;
+}
+
+/// `dominant-baseline` or `alignment-baseline`: the baseline named, or null
+/// for the keywords that defer -- `auto` and `baseline`, and the dominant
+/// baseline's `no-change`, `use-script` and `reset-size`, which with one
+/// script in one font come to the same. CSS Inline 3's `text-top` and
+/// `text-bottom` are SVG 1.1's text edges.
+fn parseBaseline(raw: []const u8, dominant: bool) Error!?shapes.Text.Baseline {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    const B = shapes.Text.Baseline;
+    const table = [_]struct { []const u8, ?B }{
+        .{ "auto", null },                     .{ "inherit", null },
+        .{ "alphabetic", .alphabetic },        .{ "ideographic", .after_edge },
+        .{ "middle", .middle },                .{ "central", .central },
+        .{ "hanging", .hanging },              .{ "mathematical", .mathematical },
+        .{ "text-before-edge", .before_edge }, .{ "text-after-edge", .after_edge },
+        .{ "text-top", .before_edge },         .{ "text-bottom", .after_edge },
+    };
+    for (table) |e| if (std.mem.eql(u8, t, e[0])) return e[1];
+    if (dominant) {
+        for ([_][]const u8{ "no-change", "use-script", "reset-size" }) |k| if (std.mem.eql(u8, t, k)) return null;
+    } else {
+        if (std.mem.eql(u8, t, "baseline")) return null;
+        if (std.mem.eql(u8, t, "before-edge")) return .before_edge;
+        if (std.mem.eql(u8, t, "after-edge")) return .after_edge;
+    }
+    return error.BadBaseline;
 }
 
 /// `letter-spacing` or `word-spacing`: `normal`, which is none, or a length.
@@ -3947,4 +3988,27 @@ test "a decoration takes the paint of the element that declared it" {
     // Broken glyph by glyph along a path, which is not drawn.
     try testing.expectError(error.UnsupportedTextLayout, read(gpa, "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 0 L8 8\"/>" ++
         "<text text-decoration=\"underline\"><textPath href=\"#p\">a</textPath></text></svg>"));
+}
+
+test "an alignment baseline wins over the dominant one, which is inherited" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><text dominant-baseline=\"middle\">a" ++
+        "<tspan>b</tspan><tspan alignment-baseline=\"hanging\">c</tspan><tspan alignment-baseline=\"baseline\">d</tspan></text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var got: [4]shapes.Text.Baseline = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.geometry == .text) {
+            got[n] = sh.geometry.text.baseline;
+            n += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqualSlices(shapes.Text.Baseline, &.{ .middle, .middle, .hanging, .middle }, got[0..n]);
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><text dominant-baseline=\"baseline\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text alignment-baseline=\"no-change\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text dominant-baseline=\"top\">a</text></svg>",
+    }) |src| try testing.expectError(error.BadBaseline, read(gpa, src));
 }

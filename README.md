@@ -548,6 +548,7 @@ short of the specification.
 | `letter-spacing`, `word-spacing` | yes, inherited, as lengths (an `em` is the declaring element's font size); letter spacing after every character but the last of a chunk, word spacing after each word separator, as resvg; on a `<textPath>` too |
 | `baseline-shift` | yes — lengths, percentages of the element's font size, and `sub`/`super` at the font's own OS/2 offsets; nested shifts add up, the `<text>`'s own is ignored (as resvg); along a `<textPath>` too |
 | `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; not along a `<textPath>` or with `rotate`, where it is refused |
+| `dominant-baseline`, `alignment-baseline` | every SVG 1.1 keyword and CSS Inline 3's `text-top`/`text-bottom`, placed by resvg's distances from the font's ascent, descent and x-height; `dominant-baseline` inherits, as SVG 2 has it, where resvg reads it from the element alone |
 | `writing-mode`, `direction`, `unicode-bidi` | horizontal left-to-right only; vertical, right-to-left or bidirectional text is refused (`UnsupportedTextDirection`) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |

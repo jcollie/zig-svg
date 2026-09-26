@@ -128,6 +128,9 @@ pub const OnPath = struct {
 /// are runs too. They share a pen that advances along the line, which is why a
 /// run does not always know where it starts.
 pub const Text = struct {
+    /// A baseline of the font's that text can be aligned by; see `baseline`.
+    pub const Baseline = enum { alphabetic, before_edge, after_edge, middle, central, hanging, mathematical };
+
     /// The characters, still as they appear in the document. Whitespace is
     /// collapsed at drawing time rather than here, because collapsing makes a
     /// new string and this one is borrowed from the tree's arena.
@@ -187,6 +190,12 @@ pub const Text = struct {
     baseline_shift: f64 = 0,
     supers: i16 = 0,
     subs: i16 = 0,
+
+    /// Which of the font's baselines sits on the pen's y, from
+    /// `alignment-baseline`, or `dominant-baseline` where that says nothing.
+    /// Its distance from the alphabetic baseline is the font's, so only the
+    /// renderer knows it.
+    baseline: Baseline = .alphabetic,
 
     /// The path this run is laid along, when it sits inside a `<textPath>`.
     ///

@@ -3669,10 +3669,24 @@ fn splitCodepoints(
 /// How far a run's `baseline-shift` raises it, in user units: its lengths,
 /// and its `super`s and `sub`s at the offsets the run's own font gives, as
 /// resvg reads them.
+///
+/// A baseline other than the alphabetic one is part of the same shift: the
+/// glyphs move so that the baseline named sits where the alphabetic one
+/// would, by resvg's table of distances from the font's ascent, descent and
+/// x-height.
 fn baselineShift(run: shapes.Text, font: *const z2d.Font, size: f64) f64 {
-    if (run.supers == 0 and run.subs == 0) return run.baseline_shift;
+    if (run.supers == 0 and run.subs == 0 and run.baseline == .alphabetic) return run.baseline_shift;
     const m = metricsOf(font, size);
-    return run.baseline_shift +
+    const aligned: f64 = switch (run.baseline) {
+        .alphabetic => 0,
+        .before_edge => m.ascent,
+        .after_edge => m.descent,
+        .middle => m.x_height / 2,
+        .central => m.ascent - (m.ascent - m.descent) / 2,
+        .hanging => 0.8 * m.ascent,
+        .mathematical => 0.5 * m.ascent,
+    };
+    return run.baseline_shift - aligned +
         @as(f64, @floatFromInt(run.supers)) * m.superscript -
         @as(f64, @floatFromInt(run.subs)) * m.subscript;
 }

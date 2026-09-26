@@ -216,6 +216,19 @@ pub const Kind = union(enum) {
     turbulence: Turbulence,
     /// §15.14 and §15.22: the input's alpha taken as a surface and lit.
     lighting: Lighting,
+    /// Filter Effects 1's `feDropShadow`: the input over a blurred, offset,
+    /// flooded copy of its own alpha. Its defaults are its own -- two for
+    /// each of `dx`, `dy` and `stdDeviation`.
+    drop_shadow: struct {
+        in: Input,
+        dx: f64 = 2,
+        dy: f64 = 2,
+        std_dev_x: f64 = 2,
+        std_dev_y: f64 = 2,
+        /// Null for `currentColor`.
+        color: ?color.Color,
+        opacity: f64,
+    },
 };
 
 pub const Lighting = struct {
@@ -648,6 +661,27 @@ fn readPrimitives(
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
         } else if (std.mem.eql(u8, name, "feDiffuseLighting") or std.mem.eql(u8, name, "feSpecularLighting")) blk: {
             break :blk .{ .lighting = try lightingOf(tree, sheet, child, std.mem.eql(u8, name, "feSpecularLighting")) };
+        } else if (std.mem.eql(u8, name, "feDropShadow")) blk: {
+            var sx: f64 = 2;
+            var sy: f64 = 2;
+            if (attr(tree, child, "stdDeviation")) |raw| {
+                const pair = try twoNumbers(raw);
+                sx = pair[0];
+                sy = pair[1];
+            }
+            if (sx < 0 or sy < 0) return error.BadStdDeviation;
+            break :blk .{ .drop_shadow = .{
+                .in = inputOf(tree, child, "in"),
+                .dx = if (trimmedAttr(tree, child, "dx") != null) try number(tree, child, "dx") else 2,
+                .dy = if (trimmedAttr(tree, child, "dy") != null) try number(tree, child, "dy") else 2,
+                .std_dev_x = sx,
+                .std_dev_y = sy,
+                .color = try floodColor(tree, sheet, child),
+                .opacity = if (css.property(sheet, tree, child, "flood-opacity")) |raw|
+                    try color.parseOpacity(raw)
+                else
+                    1.0,
+            } };
         } else if (std.mem.eql(u8, name, "feTurbulence")) blk: {
             break :blk .{ .turbulence = try turbulenceOf(tree, child) };
         } else if (std.mem.eql(u8, name, "feDisplacementMap")) blk: {
@@ -1349,4 +1383,22 @@ test "a lighting primitive reads its first light source and defaults the rest" {
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadLighting, readTest(src));
     }
+}
+
+test "a drop shadow has its own defaults" {
+    var f = try primitivesOf("<feDropShadow/>" ++
+        "<feDropShadow dx=\"-1\" dy=\"0\" stdDeviation=\"3 0\" flood-color=\"currentColor\" flood-opacity=\"0.5\"/>");
+    defer f.deinit(testing.allocator);
+    const a = f.primitives[0].kind.drop_shadow;
+    try testing.expectEqual(@as(f64, 2), a.dx);
+    try testing.expectEqual(@as(f64, 2), a.std_dev_y);
+    try testing.expectEqual(@as(u8, 0), a.color.?.r);
+    try testing.expectEqual(@as(f64, 1), a.opacity);
+    const b = f.primitives[1].kind.drop_shadow;
+    try testing.expectEqual(@as(f64, -1), b.dx);
+    try testing.expectEqual(@as(f64, 0), b.dy);
+    try testing.expectEqual(@as(f64, 0), b.std_dev_y);
+    try testing.expectEqual(@as(?color.Color, null), b.color);
+    try testing.expectEqual(@as(f64, 0.5), b.opacity);
+    try testing.expectError(error.BadStdDeviation, primitivesOf("<feDropShadow stdDeviation=\"-2\"/>"));
 }

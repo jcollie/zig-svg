@@ -140,7 +140,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feDisplacementMapscalexChannelSelectoryChannelSelectorRGBA" ++
     "feTurbulencebaseFrequencynumOctavesseedstitchTilesstitchnoStitchfractalNoiseturbulence" ++
     "feDiffuseLightingfeSpecularLightingsurfaceScalediffuseConstantspecularConstantspecularExponentlighting-color" ++
-    "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle";
+    "feDistantLightazimuthelevationfePointLightxyzfeSpotLightpointsAtXpointsAtYpointsAtZlimitingConeAngle" ++
+    "feDropShadowdxdystdDeviationflood-colorflood-opacity";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -961,6 +962,8 @@ const document_corpus = [_][]const u8{
     // Every light, on the alpha of a shape, one of them in bounding-box
     // units, and a highlight composited back over it.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feDiffuseLighting in=\"SourceAlpha\" surfaceScale=\"3\" lighting-color=\"currentColor\"><fePointLight x=\"0.2\" y=\"0.1\" z=\"0.5\"/></feDiffuseLighting></filter><filter id=\"g\"><feSpecularLighting in=\"SourceAlpha\" specularExponent=\"128\" result=\"s\"><feSpotLight x=\"1\" y=\"1\" z=\"9\" pointsAtX=\"4\" pointsAtY=\"4\" limitingConeAngle=\"-20\" specularExponent=\"-1\"/></feSpecularLighting><feComposite in=\"SourceGraphic\" in2=\"s\" operator=\"arithmetic\" k2=\"1\" k3=\"1\"/><feDiffuseLighting><feDistantLight azimuth=\"1e30\" elevation=\"-90\"/></feDiffuseLighting></filter><circle cx=\"3\" cy=\"3\" r=\"2\" color=\"red\" filter=\"url(#f)\"/><rect x=\"4\" y=\"4\" width=\"3\" height=\"3\" filter=\"url(#g)\"/></svg>",
+    // A drop shadow on its own defaults, and one of the current colour.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feDropShadow/><feDropShadow in=\"SourceAlpha\" dx=\"-1e9\" stdDeviation=\"0 1\" flood-color=\"currentColor\" flood-opacity=\"0.3\"/></filter><rect width=\"4\" height=\"4\" color=\"blue\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

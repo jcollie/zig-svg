@@ -897,14 +897,14 @@ pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, 
                 .point => |pt| unitOr(.{ pt[0] - fxp, pt[1] - fyp, pt[2] - z }),
                 .spot => |sp| unitOr(.{ sp.at[0] - fxp, sp.at[1] - fyp, sp.at[2] - z }),
             };
-            var tint: [3]f64 = .{ l.color[0], l.color[1], l.color[2] };
+            var light_color: [3]f64 = .{ l.color[0], l.color[1], l.color[2] };
             if (l.light == .spot) {
                 const sp = l.light.spot;
                 const along = if (spot_axis) |s| -dot(dir, s) else 0;
                 const inside = along > 0 and (sp.cone == null or along >= @cos(std.math.degreesToRadians(sp.cone.?)));
                 const k = if (inside) std.math.pow(f64, along, sp.exponent) else 0;
                 // Rounded to a byte, as resvg rounds the spot light's colour.
-                for (&tint) |*t| t.* = @round(std.math.clamp(t.* * k, 0, 1) * 255) / 255;
+                for (&light_color) |*t| t.* = @round(std.math.clamp(t.* * k, 0, 1) * 255) / 255;
             }
 
             const factor = if (l.specular) blk: {
@@ -914,7 +914,7 @@ pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, 
             } else l.constant * dot(normal, dir);
 
             var px: [3]u8 = undefined;
-            for (&px, tint) |*v, t| {
+            for (&px, light_color) |*v, t| {
                 const scaled = t * factor;
                 v.* = if (std.math.isFinite(scaled)) @intFromFloat(@round(std.math.clamp(scaled, 0, 1) * 255)) else 0;
             }
@@ -941,6 +941,23 @@ fn normalize(v: [3]f64) ?[3]f64 {
 /// A direction of no length stays as it is, as resvg leaves it.
 fn unitOr(v: [3]f64) [3]f64 {
     return normalize(v) orelse v;
+}
+
+/// Every pixel of `box` in `sfc` replaced by `px`, a premultiplied colour,
+/// scaled by that pixel's alpha: an `feFlood` composited `in` an alpha mask,
+/// in one pass.
+pub fn tint(sfc: *z2d.Surface, box: image.PixelBox, px: RGBA) void {
+    eachPixel(sfc, box, px, tintPixel);
+}
+
+fn tintPixel(px: RGBA, mask: RGBA) RGBA {
+    const a: u32 = mask.a;
+    const scale = struct {
+        fn f(v: u8, by: u32) u8 {
+            return @intCast((@as(u32, v) * by + 127) / 255);
+        }
+    }.f;
+    return .{ .r = scale(px.r, a), .g = scale(px.g, a), .b = scale(px.b, a), .a = scale(px.a, a) };
 }
 
 // -- tests -------------------------------------------------------------------
@@ -1352,4 +1369,11 @@ test "a spot light is dark outside its cone" {
     // well outside thirty degrees.
     try testing.expect(got[10].r > 200);
     try testing.expectEqual(@as(u8, 0), got[14].r);
+}
+
+test "a tint is the colour at the mask's strength" {
+    var sfc = try surfaceOf(.{ .r = 0, .g = 0, .b = 0, .a = 128 });
+    defer sfc.deinit(testing.allocator);
+    tint(&sfc, image.extent(&sfc), .{ .r = 255, .g = 0, .b = 128, .a = 255 });
+    try testing.expectEqual(RGBA{ .r = 128, .g = 0, .b = 64, .a = 128 }, sfc.image_surface_rgba.buf[0]);
 }

@@ -182,6 +182,21 @@ DIVERGENCES = {
     # `filter-lighting` that is not white runs in sRGB and agrees. Measured
     # at 28.500 and 50.000%.
     "filter-lighting-color-linear": (30.0, 0.51, "resvg does not convert lighting-color into linearRGB, as it does flood-color"),
+    # `feDropShadow`, twice. The primitive is the blur, offset, flood and
+    # merge it abbreviates, and `filter-drop-shadow`, that chain written
+    # out, agrees; so does the first shadow here, which is the same one.
+    #
+    # The other two blur at a small `stdDeviation`, one of them `1` on an
+    # axis, where resvg's recursive blur is most peaked -- the blur kernel
+    # entry above. All of the difference is in the shadows' faint tails.
+    # Measured at 0.689 and 0.040%.
+    "filter-drop-shadow-primitive": (0.9, 0.001, "blur kernel, in a shadow"),
+    # And in sRGB, resvg takes a drop shadow's colour through
+    # `into_srgb` -- a conversion from linearRGB -- when the colour was
+    # sRGB all along, so crimson's shadow is drawn (239,79,133), which is
+    # crimson converted from linear, rather than (220,20,60). In linearRGB,
+    # its default, it converts the right way. Measured at 2.570 and 5.263%.
+    "filter-drop-shadow-srgb": (2.8, 0.055, "resvg converts an sRGB shadow colour as if it were linear"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

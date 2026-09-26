@@ -278,10 +278,11 @@ what the filter produced rather than to what it read.
 
 `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`,
 `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`,
-`feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting` and
-`feSpecularLighting` are implemented, with `in`, `result`, `SourceGraphic` and
-`SourceAlpha` wiring them together. Any other `fe` element is **refused**,
-because a chain with a link missing is not the picture the document asked for.
+`feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`,
+`feSpecularLighting` and `feDropShadow` are implemented, with `in`, `result`,
+`SourceGraphic` and `SourceAlpha` wiring them together. Any other `fe` element
+is **refused**, because a chain with a link missing is not the picture the
+document asked for.
 
 The two colour primitives work on colour with the alpha divided out, as §15.10
 and §15.11 define them, so a matrix with a constant in its alpha row can light
@@ -342,6 +343,12 @@ resvg converts a flood's colour but not a light's, which is a recorded
 divergence for a coloured light in linearRGB. A lighting primitive with no
 light source, a negative constant or a `specularExponent` outside 1 to 128 is
 refused.
+
+`feDropShadow` is run as the chain Filter Effects 1 defines it by — the
+input's alpha blurred, offset and flooded with the shadow's colour, and the
+input merged over it — and agrees with that chain written out. resvg takes an
+sRGB shadow's colour through a conversion from linearRGB, which it never was,
+and so draws it pale; that is a recorded divergence.
 
 **A filter runs on the canvas, not in user space.** A `stdDeviation` in user
 units becomes a standard deviation in device pixels by the scale of the matrix
@@ -516,7 +523,7 @@ short of the specification.
 | `clip-path`, `clip-rule` | yes, on a shape or a group, and on a `<clipPath>` itself |
 | `mask`, `mask-type` | yes — luminance or alpha; on a shape or a group, and on a `<mask>` itself |
 | `clipPathUnits`, `maskUnits`, `maskContentUnits` | yes — both unit systems, including the bounding box of a group |
-| `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`, `feSpecularLighting` and the three light sources; any other `fe` element is refused |
+| `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`, `feSpecularLighting` and the three light sources, `feDropShadow`; any other `fe` element is refused |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |
 | `filterRes` | ignored, as resvg ignores it |
@@ -995,12 +1002,12 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 
 ## Features to come
 
-Next are the filter primitives this does not yet have: `feImage` and
-`feDropShadow`, and the CSS filter functions. Outside those, what SVG 1.1 has
-that this does not is `@media`, the CSS pseudo-classes, the `spacingAndGlyphs`
-form of `lengthAdjust`, and an `<image>` of another SVG document, which wants a
-render nested in a render with its own viewport and a share of the budget. Each
-is refused rather than ignored, so a document needing one says so.
+Next are the filter primitives this does not yet have: `feImage`, and the CSS
+filter functions. Outside those, what SVG 1.1 has that this does not is
+`@media`, the CSS pseudo-classes, the `spacingAndGlyphs` form of `lengthAdjust`,
+and an `<image>` of another SVG document, which wants a render nested in a
+render with its own viewport and a share of the budget. Each is refused rather
+than ignored, so a document needing one says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

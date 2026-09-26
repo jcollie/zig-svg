@@ -1517,6 +1517,7 @@ const Chain = struct {
                 },
                 .turbulence => {},
                 .lighting => |l| self.noteUse(i, l.in),
+                .drop_shadow => |d| self.noteUse(i, d.in),
             }
         }
     }
@@ -1816,6 +1817,28 @@ const Chain = struct {
                     .color = colorIn(l.color orelse self.f.current, space),
                     .light = self.lightOnCanvas(l.light),
                 });
+                self.finish(i, out, box, space);
+            },
+            .drop_shadow => |d| {
+                // Filter Effects 1 defines it as the chain it abbreviates:
+                // blur the input's alpha, offset it, flood it with the
+                // shadow's colour through that alpha, and merge the input
+                // over the top. So it is run as that chain.
+                const in = try self.resolve(i, d.in, space);
+                var shadow = try in.sfc.clone(self.gpa);
+                defer shadow.deinit(self.gpa);
+                image.alphaOnly(&shadow);
+                const sx = self.lengthX(d.std_dev_x);
+                const sy = self.lengthY(d.std_dev_y);
+                if (sx > 0 or sy > 0) try image.gaussianBlur(self.gpa, &shadow, self.f.region, sx, sy);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                image.offset(&out, &shadow, roundToPixel(self.lengthX(d.dx)), roundToPixel(self.lengthY(d.dy)));
+                // The offset shadow stays inside what the input covered, as
+                // feOffset's does.
+                const box = self.subregion(i, p, in.box);
+                fe.tint(&out, box, floodPixel(d.color orelse self.f.current, d.opacity, space));
+                out.composite(in.sfc, .src_over, 0, 0, .{ .precision = .float });
                 self.finish(i, out, box, space);
             },
         }

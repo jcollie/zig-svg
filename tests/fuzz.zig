@@ -1007,6 +1007,9 @@ const document_corpus = [_][]const u8{
     // CSS transforms from style and a sheet, origins in every form, fill-box
     // on a group, a use, text and inside a measured group, and none.
     "<svg viewBox=\"0 0 16 16\"><style>.a{transform: translate(10%, 1em) rotate(0.1turn); transform-origin: right 2px}</style><defs><g id=\"d\" style=\"transform-box: fill-box; transform: scale(50%)\"><rect width=\"4\" height=\"4\"/></g></defs><g class=\"a\" font-size=\"2\" style=\"transform-box: fill-box\"><rect x=\"1\" y=\"1\" width=\"3\" height=\"2\" transform=\"skewX(10)\" transform-origin=\"bottom left 0\"/><g style=\"transform-box: content-box; transform: skew(10deg, 5deg); transform-origin: 50%\"><circle cx=\"8\" cy=\"8\" r=\"2\"/><text x=\"2\" y=\"14\" font-size=\"3\" style=\"transform-box: fill-box; transform-origin: center; transform: scaleX(-1)\">t</text></g><use href=\"#d\" x=\"8\" style=\"transform-box: fill-box; transform: matrix(1, 0, 0, 1, 1, 1) none\"/></g><rect width=\"2\" height=\"2\" transform=\"translate(3)\" style=\"transform: none\"/></svg>",
+    // Markers on every shape: square and rounded rectangles, circles and
+    // ellipses, oriented, transformed, and on shapes too small to have sides.
+    "<svg viewBox=\"0 0 16 16\"><marker id=\"m\" orient=\"auto-start-reverse\" markerWidth=\"2\" markerHeight=\"2\" refX=\"1\" refY=\"1\"><path d=\"M0 0 L2 1 L0 2 Z\"/></marker><g fill=\"none\" stroke=\"black\" style=\"marker: url(#m)\"><rect x=\"1\" y=\"1\" width=\"5\" height=\"4\"/><rect x=\"8\" y=\"1\" width=\"6\" height=\"4\" rx=\"9\"/><circle cx=\"4\" cy=\"11\" r=\"2.3\" transform=\"rotate(20 4 11)\"/><ellipse cx=\"11\" cy=\"11\" rx=\"3.1\" ry=\"1.7\"/><rect width=\"0\" height=\"3\"/><circle r=\"0\"/></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

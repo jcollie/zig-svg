@@ -1056,6 +1056,13 @@ fn paintMarkers(
             .close_subpaths = false,
             .command_ends = &ends,
         }),
+        // A rectangle's and an ellipse's equivalent paths say where their
+        // commands end, as a `d` does.
+        .rect, .ellipse => try document.buildShape(&p, gpa, shape.geometry, .identity, .{
+            .max_nodes = pass.nodes_left.*,
+            .close_subpaths = false,
+            .command_ends = &ends,
+        }),
         .line, .poly => {
             try document.buildShape(&p, gpa, shape.geometry, .identity, .{
                 .max_nodes = pass.nodes_left.*,

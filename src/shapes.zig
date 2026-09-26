@@ -234,15 +234,25 @@ pub fn build(
         // that quietly vanishes is the kind of missing piece that looks like a
         // finished picture.
         .text => return error.TextNeedsAFont,
-        .rect => |r| return buildRect(p, alloc, r),
-        .ellipse => |e| return buildEllipse(p, alloc, e),
+        .rect => |r| return buildRect(p, alloc, r, opts),
+        .ellipse => |e| return buildEllipse(p, alloc, e, opts),
         .line => |l| return buildLine(p, alloc, l, opts),
         .poly => |poly| return buildPoly(p, alloc, poly.points, poly.closed, opts),
     }
 }
 
+/// Notes where a command of an equivalent path ended, for the markers that
+/// go at its vertices: see `path.Options.command_ends`.
+fn ended(p: *z2d.Path, alloc: std.mem.Allocator, opts: path.Options) BuildError!void {
+    if (opts.command_ends) |ends| try ends.append(alloc, p.nodes.items.len);
+}
+
 /// §9.2's equivalent path for `<rect>`.
-fn buildRect(p: *z2d.Path, alloc: std.mem.Allocator, r: Rect) BuildError!void {
+///
+/// Its commands are SVG 2 §10.2's, in its order and from its starting point,
+/// because a marker goes at the end of each: a square rectangle's four
+/// corners, and a rounded one's eight ends of arcs and sides.
+fn buildRect(p: *z2d.Path, alloc: std.mem.Allocator, r: Rect, opts: path.Options) BuildError!void {
     if (!(r.width > 0) or !(r.height > 0)) return;
 
     // §9.2: a radius given for one axis supplies the other; a negative one is
@@ -258,10 +268,15 @@ fn buildRect(p: *z2d.Path, alloc: std.mem.Allocator, r: Rect) BuildError!void {
 
     if (rx <= 0 or ry <= 0) {
         try p.moveTo(alloc, r.x, r.y);
+        try ended(p, alloc, opts);
         try p.lineTo(alloc, r.x + r.width, r.y);
+        try ended(p, alloc, opts);
         try p.lineTo(alloc, r.x + r.width, r.y + r.height);
+        try ended(p, alloc, opts);
         try p.lineTo(alloc, r.x, r.y + r.height);
+        try ended(p, alloc, opts);
         try p.close(alloc);
+        try ended(p, alloc, opts);
         return;
     }
 
@@ -269,15 +284,25 @@ fn buildRect(p: *z2d.Path, alloc: std.mem.Allocator, r: Rect) BuildError!void {
     const bottom = r.y + r.height;
 
     try p.moveTo(alloc, r.x + rx, r.y);
+    try ended(p, alloc, opts);
     try p.lineTo(alloc, right - rx, r.y);
+    try ended(p, alloc, opts);
     try corner(p, alloc, right - rx, r.y, right, r.y + ry, rx, ry);
+    try ended(p, alloc, opts);
     try p.lineTo(alloc, right, bottom - ry);
+    try ended(p, alloc, opts);
     try corner(p, alloc, right, bottom - ry, right - rx, bottom, rx, ry);
+    try ended(p, alloc, opts);
     try p.lineTo(alloc, r.x + rx, bottom);
+    try ended(p, alloc, opts);
     try corner(p, alloc, r.x + rx, bottom, r.x, bottom - ry, rx, ry);
+    try ended(p, alloc, opts);
     try p.lineTo(alloc, r.x, r.y + ry);
+    try ended(p, alloc, opts);
     try corner(p, alloc, r.x, r.y + ry, r.x + rx, r.y, rx, ry);
+    try ended(p, alloc, opts);
     try p.close(alloc);
+    try ended(p, alloc, opts);
 }
 
 /// One quarter-ellipse corner, swept the short way round.
@@ -305,19 +330,26 @@ fn corner(
 }
 
 /// §9.4's equivalent path for `<ellipse>`, which `<circle>` also uses with
-/// both radii set to `r`.
-fn buildEllipse(p: *z2d.Path, alloc: std.mem.Allocator, e: Ellipse) BuildError!void {
+/// both radii set to `r`: SVG 2 §10.3's, from the rightmost point and round
+/// through the bottom, so that its markers go at the four ends of its axes.
+fn buildEllipse(p: *z2d.Path, alloc: std.mem.Allocator, e: Ellipse, opts: path.Options) BuildError!void {
     if (!(e.rx > 0) or !(e.ry > 0)) return;
 
     // Four quarter sweeps rather than two halves: a half sweep has coincident
     // endpoints only in the degenerate case, but four keeps every arc well
     // inside the 90° the cubic approximation is accurate to.
     try p.moveTo(alloc, e.cx + e.rx, e.cy);
+    try ended(p, alloc, opts);
     try corner(p, alloc, e.cx + e.rx, e.cy, e.cx, e.cy + e.ry, e.rx, e.ry);
+    try ended(p, alloc, opts);
     try corner(p, alloc, e.cx, e.cy + e.ry, e.cx - e.rx, e.cy, e.rx, e.ry);
+    try ended(p, alloc, opts);
     try corner(p, alloc, e.cx - e.rx, e.cy, e.cx, e.cy - e.ry, e.rx, e.ry);
+    try ended(p, alloc, opts);
     try corner(p, alloc, e.cx, e.cy - e.ry, e.cx + e.rx, e.cy, e.rx, e.ry);
+    try ended(p, alloc, opts);
     try p.close(alloc);
+    try ended(p, alloc, opts);
 }
 
 /// §9.5's equivalent path for `<line>`, which covers no pixels when filled

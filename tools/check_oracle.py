@@ -239,7 +239,7 @@ DIVERGENCES = {
     # strokers already differ at the joins by about 0.7 on their own.
     # Measured at 1.920 and 1.543%.
     "text-decoration-paint-order": (2.1, 0.017, "resvg paints a decoration fill then stroke, whatever paint-order says"),
-    # Three marker fixtures, each where resvg departs from §11.6 and from
+    # Four marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.
     #
@@ -260,6 +260,14 @@ DIVERGENCES = {
     # cut to it here. resvg clips to the `viewBox` instead, and draws the
     # whole overhang. Measured at 14.509 and 7.807%.
     "marker-viewbox-clip": (15.5, 0.085, "resvg clips a marker to its viewBox, not its viewport"),
+    # SVG 2 puts markers on every shape. Where a rounded rectangle, a circle
+    # or an ellipse closes, its last arc ends exactly on its start and the
+    # `Z` has no length, so the marker at that vertex faces along the arc --
+    # which is what Chrome draws for the same circle written as a path. resvg
+    # tilts it off the tangent there, by what looks like the sliver a rounded
+    # cubic end leaves before the close. Every other vertex agrees. Measured
+    # at 0.956 and 0.772%.
+    "marker-shapes": (1.1, 0.009, "resvg tilts the marker where a rounded shape closes on itself"),
 }
 
 

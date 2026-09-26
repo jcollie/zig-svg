@@ -2333,9 +2333,12 @@ pub const PathIterator = struct {
 
 /// Whether a shape is one §11.6 puts markers on.
 fn takesMarkers(geometry: shapes.Geometry) bool {
+    // SVG 2 §11.6 puts markers on every shape, where SVG 1.1 had them on
+    // paths, lines and polys only. resvg draws them on all; Chrome still
+    // draws them on the three alone. Text is not a shape.
     return switch (geometry) {
-        .path, .line, .poly => true,
-        else => false,
+        .path, .line, .poly, .rect, .ellipse => true,
+        .text => false,
     };
 }
 
@@ -4260,11 +4263,11 @@ test "orient is auto, auto-start-reverse, or an angle in any of its units" {
     try testing.expectError(error.BadMarker, parseOrient("nan"));
 }
 
-test "markers reach paths, lines and polys, from a longhand or the shorthand" {
+test "markers reach every shape but text, from a longhand or the shorthand" {
     const gpa = testing.allocator;
     var doc = try read(gpa, "<svg viewBox=\"0 0 10 10\"><marker id=\"m\"/>" ++
         "<g style=\"marker: url(#m)\"><path d=\"M0 0 L1 1\" marker-mid=\"none\"/>" ++
-        "<rect width=\"1\" height=\"1\"/></g>" ++
+        "<rect width=\"1\" height=\"1\"/><circle r=\"1\"/><text>t</text></g>" ++
         // `marker` is a property and not an attribute, as in resvg.
         "<line x2=\"1\" marker=\"url(#m)\"/></svg>");
     defer doc.deinit();
@@ -4273,8 +4276,13 @@ test "markers reach paths, lines and polys, from a longhand or the shorthand" {
     try testing.expectEqualStrings("m", p.marker_start.?);
     try testing.expectEqual(@as(?[]const u8, null), p.marker_mid);
     try testing.expectEqualStrings("m", p.marker_end.?);
+    // SVG 2's rule, where SVG 1.1 had them on paths, lines and polys only.
     const r = (try it.next()).?.shape;
-    try testing.expectEqual(@as(?[]const u8, null), r.marker_start);
+    try testing.expectEqualStrings("m", r.marker_start.?);
+    const c = (try it.next()).?.shape;
+    try testing.expectEqualStrings("m", c.marker_mid.?);
+    const t = (try it.next()).?.shape;
+    try testing.expectEqual(@as(?[]const u8, null), t.marker_start);
     const l = (try it.next()).?.shape;
     try testing.expectEqual(@as(?[]const u8, null), l.marker_end);
 }

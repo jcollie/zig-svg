@@ -149,7 +149,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "baseline-shiftsubsuperbaseline" ++
     "text-decorationunderlineoverlineline-through" ++
     "dominant-baselinealignment-baselinecentralmiddlehangingmathematicaltext-before-edgetext-after-edgeideographic" ++
-    "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility";
+    "shape-renderingcrispEdgesoptimizeSpeedgeometricPrecisiontext-renderingoptimizeLegibility" ++
+    "mix-blend-mode:isolation:isolateauto";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -988,6 +989,9 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"4\" font-size=\"3\" dominant-baseline=\"central\" text-decoration=\"underline\">a<tspan alignment-baseline=\"hanging\" baseline-shift=\"super\">b</tspan><tspan dominant-baseline=\"no-change\" alignment-baseline=\"after-edge\">c</tspan></text></svg>",
     // Crisp edges on shapes, text, markers and a pattern's content.
     "<svg viewBox=\"0 0 8 8\" shape-rendering=\"crispEdges\"><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><circle cx=\"1\" cy=\"1\" r=\"0.7\"/></pattern><marker id=\"m\"><rect width=\"2\" height=\"2\" shape-rendering=\"auto\"/></marker><path d=\"M1 1 L7 3 L2 7\" fill=\"url(#p)\" stroke=\"red\" marker-mid=\"url(#m)\"/><text x=\"1\" y=\"7\" font-size=\"3\" text-rendering=\"optimizeSpeed\" text-decoration=\"underline\">t</text></svg>",
+    // Blending groups, shapes and an image, isolated and not, under opacity
+    // and a filter.
+    "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" fill=\"gold\"/><g style=\"isolation: isolate; mix-blend-mode: hue\" opacity=\"0.5\"><circle cx=\"3\" cy=\"3\" r=\"2\" style=\"mix-blend-mode: soft-light\" filter=\"blur(1px)\"/><text x=\"1\" y=\"7\" font-size=\"3\" style=\"mix-blend-mode: difference\">x</text></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

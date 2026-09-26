@@ -579,7 +579,7 @@ fn drawItems(
                     }
                     return err;
                 };
-                try layers.open(gpa, g.opacity, cut, filtered, opts.limits.max_layers);
+                try layers.open(gpa, g.opacity, cut, filtered, g.blend, opts.limits.max_layers);
                 continue;
             },
             .close_group => {
@@ -641,8 +641,8 @@ fn drawItems(
                 }
                 return err;
             };
-            if (cut != null or filtered != null) {
-                try layers.open(gpa, 1.0, cut, filtered, opts.limits.max_layers);
+            if (cut != null or filtered != null or shape.blend != .normal) {
+                try layers.open(gpa, 1.0, cut, filtered, shape.blend, opts.limits.max_layers);
                 shape_layer = true;
             }
         }
@@ -1187,8 +1187,8 @@ fn drawImage(
             }
             return err;
         };
-        if (cut != null or filtered != null) {
-            try layers.open(gpa, im.opacity, cut, filtered, opts.limits.max_layers);
+        if (cut != null or filtered != null or im.blend != .normal) {
+            try layers.open(gpa, im.opacity, cut, filtered, im.blend, opts.limits.max_layers);
             own_layer = true;
         }
     }
@@ -2316,6 +2316,15 @@ const Tiled = struct {
 /// rather than to each shape in it -- two overlapping shapes at half opacity
 /// show only the upper one through the group, where halving each separately
 /// would show both.
+/// The z2d compositor operator for a blend mode: source-over for `normal`,
+/// and for every other mode z2d's operator of the same name.
+fn blendOperator(mode: filter.BlendMode) z2d.compositor.Operator {
+    return switch (mode) {
+        .normal => .src_over,
+        inline else => |m| @field(z2d.compositor.Operator, @tagName(m)),
+    };
+}
+
 const Layers = struct {
     bottom: *z2d.Surface,
     stack: [max_stack]Entry = undefined,
@@ -2333,6 +2342,9 @@ const Layers = struct {
         /// The filter this layer's finished picture is put through before any
         /// of that, or null. Owned by the entry.
         filter: ?Filtered = null,
+        /// `mix-blend-mode`: the operator the finished layer is composited
+        /// down with, in place of plain source-over.
+        blend: filter.BlendMode = .normal,
     };
 
     fn target(self: *Layers) *z2d.Surface {
@@ -2346,6 +2358,7 @@ const Layers = struct {
         opacity: f64,
         clip: ?z2d.Surface,
         filtered: ?Filtered,
+        blend: filter.BlendMode,
         limit: usize,
     ) Error!void {
         errdefer if (clip) |c| {
@@ -2372,6 +2385,7 @@ const Layers = struct {
             .opacity = opacity,
             .clip = clip,
             .filter = filtered,
+            .blend = blend,
         };
         self.depth += 1;
     }
@@ -2411,7 +2425,11 @@ const Layers = struct {
         z2d.compositor.SurfaceCompositor.run(&entry.surface, 0, 0, 1, .{
             .{ .operator = .dst_in, .src = .{ .pixel = faded } },
         }, precision);
-        below.composite(&entry.surface, .src_over, 0, 0, precision);
+        // Blended onto everything already painted beneath it in the layer
+        // below -- which, for a layer the size of the canvas, is exactly the
+        // backdrop Compositing and Blending means, and what resvg blends
+        // onto.
+        below.composite(&entry.surface, blendOperator(entry.blend), 0, 0, precision);
     }
 
     fn deinit(self: *Layers, gpa: Allocator) void {

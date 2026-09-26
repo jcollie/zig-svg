@@ -550,6 +550,7 @@ short of the specification.
 | `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; not along a `<textPath>` or with `rotate`, where it is refused |
 | `dominant-baseline`, `alignment-baseline` | every SVG 1.1 keyword and CSS Inline 3's `text-top`/`text-bottom`, placed by resvg's distances from the font's ascent, descent and x-height; `dominant-baseline` inherits, as SVG 2 has it, where resvg reads it from the element alone |
 | `shape-rendering`, `text-rendering` | yes, inherited — `crispEdges` and `optimizeSpeed` draw a shape without anti-aliasing, `text-rendering: optimizeSpeed` its text and decorations (text ignores `shape-rendering`, as in resvg); clips and masks keep theirs |
+| `mix-blend-mode`, `isolation` | yes, from `style` or a stylesheet (SVG 2 gives them no attribute) — all sixteen modes, on groups, shapes, text and images, each blended onto what is beneath it in its parent layer; `isolate` gives a group its own |
 | `writing-mode`, `direction`, `unicode-bidi` | horizontal left-to-right only; vertical, right-to-left or bidirectional text is refused (`UnsupportedTextDirection`) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |

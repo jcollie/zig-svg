@@ -68,6 +68,9 @@ const ztree = @import("ztree");
 const z2d = @import("z2d");
 
 const color = @import("color.zig");
+/// `feBlend`'s modes, which are Compositing and Blending's, which are
+/// `mix-blend-mode`'s.
+const BlendMode = @import("filter.zig").BlendMode;
 const length = @import("length.zig");
 const path = @import("path.zig");
 const resample = @import("resample.zig");
@@ -180,6 +183,10 @@ pub const Error = error{
     BadBaseline,
     /// A `shape-rendering` or `text-rendering` that is none of its keywords.
     BadRenderingHint,
+    /// An `isolation` that is neither `auto` nor `isolate`.
+    BadIsolation,
+    /// A `mix-blend-mode` that is not one of Compositing and Blending's.
+    BadBlendMode,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -496,6 +503,8 @@ pub const Image = struct {
     clip_path: ?[]const u8,
     mask: ?[]const u8,
     filter: ?FilterValue,
+    /// `mix-blend-mode`: how the finished rendering meets the backdrop.
+    blend: BlendMode = .normal,
     /// The `color` in force, which a `currentColor` in its filter resolves to.
     current_color: ?color.Color,
     /// False under `visibility: hidden`; see `Shape.visible`.
@@ -524,6 +533,8 @@ pub const Group = struct {
     /// §15 applies it before the clip, the mask and the opacity, so it sees
     /// the layer as painted and they see what it produced.
     filter: ?FilterValue,
+    /// `mix-blend-mode`: how the finished rendering meets the backdrop.
+    blend: BlendMode = .normal,
     /// The `color` in force on the container, which is what a `currentColor`
     /// inside its filter resolves to. Carried because a filter's own elements
     /// inherit nothing from the document -- they are in `<defs>`.
@@ -562,12 +573,21 @@ const Refs = struct {
     clip_path: ?[]const u8,
     mask: ?[]const u8,
     filter: ?FilterValue,
+    /// Compositing and Blending's `mix-blend-mode`: how the element's
+    /// rendering is blended onto what is beneath it.
+    blend: BlendMode = .normal,
+    /// `isolation: isolate`, which makes a group blend its children among
+    /// themselves before the group meets its backdrop.
+    isolate: bool = false,
 
-    /// Whether the element needs a surface of its own. Any of the three does
-    /// it: a clip and a mask because `dst_in` is a whole-surface operation,
-    /// and a filter because it reads the element's finished rendering.
+    /// Whether the element needs a surface of its own. Any of these does it:
+    /// a clip and a mask because `dst_in` is a whole-surface operation, a
+    /// filter because it reads the element's finished rendering, a blend
+    /// because it is how that rendering meets the backdrop, and isolation
+    /// because a surface of its own is what isolation is.
     fn any(self: Refs) bool {
-        return self.clip_path != null or self.mask != null or self.filter != null;
+        return self.clip_path != null or self.mask != null or self.filter != null or
+            self.blend != .normal or self.isolate;
     }
 };
 
@@ -631,6 +651,8 @@ pub const Shape = struct {
     /// The id of a `<filter>` this shape's rendering is put through, or
     /// null. §15 applies it before the clip, the mask and the opacity.
     filter: ?FilterValue,
+    /// `mix-blend-mode`: how the finished rendering meets the backdrop.
+    blend: BlendMode = .normal,
     /// The id of a `<mask>` this shape is cut to, or null. Not inherited
     /// either, and a shape may carry both.
     mask: ?[]const u8,
@@ -1070,6 +1092,7 @@ pub const PathIterator = struct {
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
                 .filter = refs.filter,
+                .blend = refs.blend,
                 .current_color = root_inherited.current_color,
                 .transform = ctm,
             } };
@@ -1533,6 +1556,19 @@ pub const PathIterator = struct {
             .clip_path = try self.referenceAttr(node, "clip-path"),
             .mask = try self.referenceAttr(node, "mask"),
             .filter = self.filterValue(node),
+            // Neither has an attribute form -- SVG 2 gives them none, and
+            // zig-css answers for them only from `style` or a stylesheet,
+            // which is also where resvg reads them. Neither is inherited.
+            .blend = if (self.presentation(node, "mix-blend-mode")) |v|
+                BlendMode.parse(std.mem.trim(u8, v, " \t\r\n")) orelse return error.BadBlendMode
+            else
+                .normal,
+            .isolate = if (self.presentation(node, "isolation")) |v| blk: {
+                const t = std.mem.trim(u8, v, " \t\r\n");
+                if (std.mem.eql(u8, t, "isolate")) break :blk true;
+                if (std.mem.eql(u8, t, "auto")) break :blk false;
+                return error.BadIsolation;
+            } else false,
         };
     }
 
@@ -1642,6 +1678,7 @@ pub const PathIterator = struct {
                     .clip_path = refs.clip_path,
                     .mask = refs.mask,
                     .filter = refs.filter,
+                    .blend = refs.blend,
                     .current_color = inherited.current_color,
                     .transform = ctm,
                 } };
@@ -1702,6 +1739,7 @@ pub const PathIterator = struct {
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
                 .filter = refs.filter,
+                .blend = refs.blend,
                 .transform = own_ctm,
             } };
         }
@@ -1753,6 +1791,7 @@ pub const PathIterator = struct {
                 .clip_path = refs.clip_path,
                 .mask = refs.mask,
                 .filter = refs.filter,
+                .blend = refs.blend,
                 .current_color = effective.current_color,
                 .transform = own_ctm,
                 .viewport = clip,
@@ -1808,6 +1847,7 @@ pub const PathIterator = struct {
             .clip_path = refs.clip_path,
             .mask = refs.mask,
             .filter = refs.filter,
+            .blend = refs.blend,
             .current_color = effective.current_color,
             .transform = ctm,
         } };
@@ -4063,4 +4103,35 @@ test "crisp edges are asked for per shape, and by text-rendering for text" {
     try testing.expectEqualSlices(bool, &.{ true, false, true, false }, got[0..n]);
     try testing.expectError(error.BadRenderingHint, read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" shape-rendering=\"sharp\"/></svg>"));
     try testing.expectError(error.BadRenderingHint, read(gpa, "<svg viewBox=\"0 0 8 8\"><text text-rendering=\"crispEdges\">a</text></svg>"));
+}
+
+test "mix-blend-mode and isolation come from style, and give a group its own layer" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"mix-blend-mode: color-dodge\"><rect width=\"1\" height=\"1\"/></g>" ++
+        "<g style=\"isolation: isolate\"><rect width=\"1\" height=\"1\" style=\"mix-blend-mode: multiply\"/></g>" ++
+        // SVG 2 gives neither an attribute, so this is no blend and no layer.
+        "<g mix-blend-mode=\"screen\"><rect width=\"1\" height=\"1\"/></g></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var groups: [2]Group = undefined;
+    var ng: usize = 0;
+    var shape_blend: [3]BlendMode = undefined;
+    var ns: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .open_group => |g| {
+            groups[ng] = g;
+            ng += 1;
+        },
+        .shape => |sh| {
+            shape_blend[ns] = sh.blend;
+            ns += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), ng);
+    try testing.expectEqual(BlendMode.color_dodge, groups[0].blend);
+    try testing.expectEqual(BlendMode.normal, groups[1].blend);
+    try testing.expectEqualSlices(BlendMode, &.{ .normal, .multiply, .normal }, shape_blend[0..ns]);
+    try testing.expectError(error.BadBlendMode, read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" style=\"mix-blend-mode: plus-lighter\"/></svg>"));
+    try testing.expectError(error.BadIsolation, read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"isolation: alone\"><rect width=\"1\" height=\"1\"/></g></svg>"));
 }

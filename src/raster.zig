@@ -1500,6 +1500,14 @@ const Chain = struct {
                 },
                 .color_matrix => |c| self.noteUse(i, c.in),
                 .component_transfer => |c| self.noteUse(i, c.in),
+                .composite => |c| {
+                    self.noteUse(i, c.in);
+                    self.noteUse(i, c.in2);
+                },
+                .blend => |b| {
+                    self.noteUse(i, b.in);
+                    self.noteUse(i, b.in2);
+                },
             }
         }
     }
@@ -1695,6 +1703,24 @@ const Chain = struct {
                 errdefer out.deinit(self.gpa);
                 const box = self.subregion(i, p, in.box);
                 fe.componentTransfer(&out, box, &c.funcs, self.f.spec.numbers);
+                self.finish(i, out, box, space);
+            },
+            .composite => |c| {
+                const a = try self.resolve(i, c.in, space);
+                const b = try self.resolve(i, c.in2, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, a.box.unite(b.box));
+                fe.composite(&out, a.sfc, b.sfc, box, c.operator, c.k);
+                self.finish(i, out, box, space);
+            },
+            .blend => |bl| {
+                const a = try self.resolve(i, bl.in, space);
+                const b = try self.resolve(i, bl.in2, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, a.box.unite(b.box));
+                fe.blend(&out, a.sfc, b.sfc, box, bl.mode);
                 self.finish(i, out, box, space);
             },
         }

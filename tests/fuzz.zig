@@ -132,7 +132,9 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "markermarker-startmarker-midmarker-endurl(#)orientauto-start-reverseturnradgraddeg" ++
     "markerUnitsstrokeWidthuserSpaceOnUsemarkerWidthmarkerHeightrefXrefY" ++
     "feColorMatrixtypevaluessaturatehueRotateluminanceToAlphamatrix" ++
-    "feComponentTransferfeFuncRfeFuncGfeFuncBfeFuncAtableValuestablediscretelineargammaidentityslopeinterceptamplitudeexponentoffset";
+    "feComponentTransferfeFuncRfeFuncGfeFuncBfeFuncAtableValuestablediscretelineargammaidentityslopeinterceptamplitudeexponentoffset" ++
+    "feCompositein2operatoroverinoutatopxorlighterarithmetick1k2k3k4" ++
+    "feBlendmodenormalmultiplyscreendarkenlightenoverlaycolor-dodgecolor-burnhard-lightsoft-lightdifferenceexclusionhuesaturationcolorluminosity";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -940,6 +942,8 @@ const document_corpus = [_][]const u8{
     // every transfer function.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feColorMatrix type=\"hueRotate\" values=\"30\"/><feColorMatrix values=\"0 1 0 0 0 0 0 1 0 0 1 0 0 0 0 0 0 0 1 0.5\"/></filter><rect width=\"4\" height=\"4\" fill=\"red\" fill-opacity=\"0.5\" filter=\"url(#f)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feComponentTransfer><feFuncR type=\"table\" tableValues=\"1 0 1\"/><feFuncG type=\"discrete\" tableValues=\"0 1\"/><feFuncB type=\"gamma\" exponent=\"2\"/><feFuncA type=\"linear\" intercept=\"0.5\"/></feComponentTransfer></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"teal\" filter=\"url(#f)\"/></svg>",
+    // The two-input primitives, reading a result and a source.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\" result=\"o\"/><feComposite in=\"SourceGraphic\" in2=\"o\" operator=\"arithmetic\" k1=\"1\" k2=\"0.5\" k3=\"0.5\" k4=\"-0.2\"/><feBlend in2=\"SourceAlpha\" mode=\"luminosity\"/></filter><rect width=\"4\" height=\"4\" fill=\"orange\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

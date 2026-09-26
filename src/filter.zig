@@ -97,6 +97,11 @@ pub const Error = error{
     /// An `feFuncR`, `feFuncG`, `feFuncB` or `feFuncA` whose `type` is not one
     /// of the five, or whose numbers do not parse.
     BadTransferFunction,
+    /// An `feComposite` whose `operator` is not one of §15.12's, or whose
+    /// `k1` to `k4` do not parse.
+    BadCompositeOperator,
+    /// An `feBlend` whose `mode` is not one of Compositing and Blending's.
+    BadBlendMode,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -164,6 +169,48 @@ pub const Kind = union(enum) {
     color_matrix: struct { in: Input, matrix: [20]f64 },
     /// §15.11: one function per channel, red, green, blue, alpha.
     component_transfer: struct { in: Input, funcs: [4]TransferFunction },
+    /// §15.12: `in` composited with `in2` by a Porter-Duff operator, or by
+    /// `arithmetic`'s `k1*i1*i2 + k2*i1 + k3*i2 + k4`.
+    composite: struct { in: Input, in2: Input, operator: CompositeOperator, k: [4]f64 = @splat(0) },
+    /// §15.9, with Filter Effects 1's modes: `in` blended over `in2`.
+    blend: struct { in: Input, in2: Input, mode: BlendMode },
+};
+
+/// §15.12's `operator`, and Filter Effects 1's `lighter`.
+pub const CompositeOperator = enum { over, in, out, atop, xor, lighter, arithmetic };
+
+/// The modes of Compositing and Blending Level 1, which Filter Effects 1 lets
+/// `feBlend` use; SVG 1.1 had the first five.
+pub const BlendMode = enum {
+    normal,
+    multiply,
+    screen,
+    darken,
+    lighten,
+    overlay,
+    color_dodge,
+    color_burn,
+    hard_light,
+    soft_light,
+    difference,
+    exclusion,
+    hue,
+    saturation,
+    color,
+    luminosity,
+
+    /// The keyword, which is the tag with hyphens for underscores.
+    pub fn parse(raw: []const u8) ?BlendMode {
+        inline for (@typeInfo(BlendMode).@"enum".fields) |field| {
+            const name = comptime blk: {
+                var n: [field.name.len]u8 = undefined;
+                for (&n, field.name) |*d, c| d.* = if (c == '_') '-' else c;
+                break :blk n;
+            };
+            if (std.mem.eql(u8, raw, &name)) return @enumFromInt(field.value);
+        }
+        return null;
+    }
 };
 
 /// One `feFunc` element of an `feComponentTransfer`. §15.11.
@@ -448,6 +495,31 @@ fn readPrimitives(
                 funcs[channel] = try transferFunction(gpa, tree, grand, &numbers);
             }
             break :blk .{ .component_transfer = .{ .in = inputOf(tree, child, "in"), .funcs = funcs } };
+        } else if (std.mem.eql(u8, name, "feComposite")) blk: {
+            const op_name = trimmedAttr(tree, child, "operator") orelse "over";
+            const op = std.meta.stringToEnum(CompositeOperator, op_name) orelse return error.BadCompositeOperator;
+            var k: [4]f64 = @splat(0);
+            if (op == .arithmetic) {
+                inline for (.{ "k1", "k2", "k3", "k4" }, 0..) |key, j| {
+                    if (trimmedAttr(tree, child, key)) |raw| {
+                        k[j] = std.fmt.parseFloat(f64, raw) catch return error.BadCompositeOperator;
+                        if (!std.math.isFinite(k[j])) return error.BadCompositeOperator;
+                    }
+                }
+            }
+            break :blk .{ .composite = .{
+                .in = inputOf(tree, child, "in"),
+                .in2 = inputOf(tree, child, "in2"),
+                .operator = op,
+                .k = k,
+            } };
+        } else if (std.mem.eql(u8, name, "feBlend")) blk: {
+            const mode_name = trimmedAttr(tree, child, "mode") orelse "normal";
+            break :blk .{ .blend = .{
+                .in = inputOf(tree, child, "in"),
+                .in2 = inputOf(tree, child, "in2"),
+                .mode = BlendMode.parse(mode_name) orelse return error.BadBlendMode,
+            } };
         } else return error.UnsupportedFilterPrimitive;
 
         try prims.append(gpa, .{
@@ -751,5 +823,36 @@ test "a transfer function with no type, an unknown one, or a bad number is refus
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadTransferFunction, readTest(src));
+    }
+}
+
+test "composite operators and blend modes are read by their keywords" {
+    var f = try primitivesOf("<feComposite in2=\"SourceAlpha\"/>" ++
+        "<feComposite operator=\"arithmetic\" k1=\"0.5\" k4=\"-1\"/>" ++
+        "<feBlend/>" ++
+        "<feBlend in=\"SourceGraphic\" mode=\"color-dodge\"/>");
+    defer f.deinit(testing.allocator);
+    const over = f.primitives[0].kind.composite;
+    try testing.expectEqual(CompositeOperator.over, over.operator);
+    try testing.expectEqual(Input.previous, over.in);
+    try testing.expectEqual(Input.source_alpha, over.in2);
+    try testing.expectEqual([4]f64{ 0.5, 0, 0, -1 }, f.primitives[1].kind.composite.k);
+    try testing.expectEqual(BlendMode.normal, f.primitives[2].kind.blend.mode);
+    // An omitted `in2` is the result before, as an omitted `in` is.
+    try testing.expectEqual(Input.previous, f.primitives[2].kind.blend.in2);
+    try testing.expectEqual(BlendMode.color_dodge, f.primitives[3].kind.blend.mode);
+}
+
+test "an unknown operator or mode is refused" {
+    const cases = [_]struct { []const u8, Error }{
+        .{ "<feComposite operator=\"plus\"/>", error.BadCompositeOperator },
+        .{ "<feComposite operator=\"arithmetic\" k2=\"half\"/>", error.BadCompositeOperator },
+        .{ "<feBlend mode=\"plus-lighter\"/>", error.BadBlendMode },
+        .{ "<feBlend mode=\"color_dodge\"/>", error.BadBlendMode },
+    };
+    for (cases) |case| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{case[0]});
+        try testing.expectError(case[1], readTest(src));
     }
 }

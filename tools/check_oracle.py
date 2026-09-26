@@ -142,6 +142,10 @@ DIVERGENCES = {
     # resvg still clamps to one, and draws the input unchanged. Measured at
     # 4.108 and 9.440%.
     "filter-color-matrix-saturate-over": (4.5, 0.10, "saturate above one oversaturates; resvg clamps it to one"),
+    # `feComposite operator="lighter"`, which Filter Effects 1 added: the two
+    # inputs summed. resvg does not know the operator and draws `over`, which
+    # is what SVG 1.1 made the default. Measured at 1.213 and 2.865%.
+    "filter-composite-lighter": (1.5, 0.035, "lighter is a sum; resvg does not know it and draws over"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

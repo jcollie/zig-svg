@@ -180,6 +180,14 @@ pub const Text = struct {
     letter_spacing: f64 = 0,
     word_spacing: f64 = 0,
 
+    /// `baseline-shift`, summed over the elements from this run's up to its
+    /// `<text>`: the lengths and percentages in user units, positive upward,
+    /// and how many `super`s and `sub`s -- which are the font's own offsets,
+    /// so only the renderer, with the font, can turn them into distances.
+    baseline_shift: f64 = 0,
+    supers: i16 = 0,
+    subs: i16 = 0,
+
     /// The path this run is laid along, when it sits inside a `<textPath>`.
     ///
     /// §10.13: the glyphs follow the shape rather than a straight line, each

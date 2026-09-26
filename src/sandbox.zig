@@ -666,6 +666,7 @@ const WireError = enum(u16) {
     unsupported_text_direction = 92,
     bad_text_direction = 93,
     bad_text_spacing = 94,
+    bad_baseline_shift = 95,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -764,6 +765,7 @@ fn wireFromError(err: anyerror) WireError {
         error.UnsupportedTextDirection => .unsupported_text_direction,
         error.BadTextDirection => .bad_text_direction,
         error.BadTextSpacing => .bad_text_spacing,
+        error.BadBaselineShift => .bad_baseline_shift,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -877,6 +879,7 @@ fn wireToError(status: u16) Error {
         .unsupported_text_direction => error.UnsupportedTextDirection,
         .bad_text_direction => error.BadTextDirection,
         .bad_text_spacing => error.BadTextSpacing,
+        .bad_baseline_shift => error.BadBaselineShift,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1182,6 +1185,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.UnsupportedTextDirection, .unsupported_text_direction },
         .{ error.BadTextDirection, .bad_text_direction },
         .{ error.BadTextSpacing, .bad_text_spacing },
+        .{ error.BadBaselineShift, .bad_baseline_shift },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

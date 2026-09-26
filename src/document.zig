@@ -169,6 +169,9 @@ pub const Error = error{
     /// A `letter-spacing` or `word-spacing` that is neither `normal` nor a
     /// length -- a percentage included, which SVG 1.1 does not allow them.
     BadTextSpacing,
+    /// A `baseline-shift` that is not `baseline`, `sub`, `super`, a length or
+    /// a percentage.
+    BadBaselineShift,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -1092,6 +1095,7 @@ pub const PathIterator = struct {
         }
         const raw = tree.node(child).value;
         const owner = self.textOwnerOf(parent.node);
+        const shift = try self.baselineShiftOf(owner);
 
         // The whitespace between runs belongs to the whole `<text>`, so it is
         // decided here, in order, rather than run by run. A run that is only
@@ -1133,6 +1137,9 @@ pub const PathIterator = struct {
                     .lead_space = lead_space,
                     .trail_space = trail_space,
                     .rotate = rotate,
+                    .baseline_shift = shift.length,
+                    .supers = shift.supers,
+                    .subs = shift.subs,
                     .letter_spacing = parent.inherited.letter_spacing orelse 0,
                     .word_spacing = parent.inherited.word_spacing orelse 0,
                     .text_length = text_length,
@@ -1213,6 +1220,48 @@ pub const PathIterator = struct {
 
     /// The `<text>` a run belongs to: the nearest such ancestor on the stack,
     /// which is the element `text-anchor` is measured across.
+    /// §10.9.2's `baseline-shift`, for a run: not inherited, but each
+    /// element between the run and its `<text>` shifts everything inside it,
+    /// so the shifts add up. The `<text>`'s own is left out, as resvg leaves
+    /// it -- a shift of the whole text is its `y`.
+    fn baselineShiftOf(self: *const PathIterator, owner: ztree.NodeId) Error!struct { length: f64, supers: i16, subs: i16 } {
+        var total: f64 = 0;
+        var supers: i16 = 0;
+        var subs: i16 = 0;
+        var i = self.depth + 1;
+        while (i > 0) {
+            i -= 1;
+            const frame = self.stack[i];
+            if (frame.node == owner) break;
+            const raw = self.presentation(frame.node, "baseline-shift") orelse continue;
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            if (std.mem.eql(u8, t, "baseline") or std.mem.eql(u8, t, "inherit") or std.mem.eql(u8, t, "initial")) continue;
+            if (std.mem.eql(u8, t, "super")) {
+                supers +|= 1;
+                continue;
+            }
+            if (std.mem.eql(u8, t, "sub")) {
+                subs +|= 1;
+                continue;
+            }
+            // A percentage is of the element's own font size, and so is an
+            // em: the frame holds what it came to.
+            const size = frame.inherited.font_size orelse 16;
+            if (std.mem.endsWith(u8, t, "%")) {
+                const v = std.fmt.parseFloat(f64, t[0 .. t.len - 1]) catch return error.BadBaselineShift;
+                if (!std.math.isFinite(v)) return error.BadBaselineShift;
+                total += v / 100 * size;
+                continue;
+            }
+            var vp = self.viewport;
+            vp.font_size = size;
+            const v = length.parse(t, .other, vp) catch return error.BadBaselineShift;
+            if (!std.math.isFinite(v)) return error.BadBaselineShift;
+            total += v;
+        }
+        return .{ .length = total, .supers = supers, .subs = subs };
+    }
+
     fn textOwnerOf(self: *const PathIterator, node: ztree.NodeId) ztree.NodeId {
         var i = self.depth + 1;
         while (i > 0) {
@@ -3757,4 +3806,33 @@ test "spacing is a length, its em the declaring element's own font size" {
         "<svg viewBox=\"0 0 8 8\"><text letter-spacing=\"10%\">a</text></svg>",
         "<svg viewBox=\"0 0 8 8\"><text word-spacing=\"wide\">a</text></svg>",
     }) |src| try testing.expectError(error.BadTextSpacing, read(gpa, src));
+}
+
+test "baseline shifts add up from the run to its text, and the text's own is left out" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><text font-size=\"10\" baseline-shift=\"99\">a" ++
+        "<tspan baseline-shift=\"50%\" font-size=\"20\">b<tspan baseline-shift=\"super\">c" ++
+        "<tspan style=\"baseline-shift: 1em\" font-size=\"4\">d<tspan baseline-shift=\"sub\">e</tspan></tspan></tspan></tspan></text></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var runs: [5]shapes.Text = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.geometry == .text) {
+            runs[n] = sh.geometry.text;
+            n += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqual(@as(f64, 0), runs[0].baseline_shift);
+    // Half of the tspan's own 20.
+    try testing.expectEqual(@as(f64, 10), runs[1].baseline_shift);
+    try testing.expectEqual(@as(i16, 1), runs[2].supers);
+    try testing.expectEqual(@as(f64, 10), runs[2].baseline_shift);
+    // Plus an em at 4.
+    try testing.expectEqual(@as(f64, 14), runs[3].baseline_shift);
+    try testing.expectEqual(@as(i16, 1), runs[4].subs);
+    try testing.expectEqual(@as(i16, 1), runs[4].supers);
+    try testing.expectError(error.BadBaselineShift, read(gpa, "<svg viewBox=\"0 0 8 8\"><text>a<tspan baseline-shift=\"high\">b</tspan></text></svg>"));
 }

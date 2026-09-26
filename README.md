@@ -546,6 +546,7 @@ short of the specification.
 | `<filter>` | yes — `feGaussianBlur`, `feOffset`, `feFlood`, `feMerge`, `feColorMatrix`, `feComponentTransfer`, `feComposite`, `feBlend`, `feTile`, `feMorphology`, `feConvolveMatrix`, `feDisplacementMap`, `feTurbulence`, `feDiffuseLighting`, `feSpecularLighting` and the three light sources, `feDropShadow`, `feImage` of a picture or an element; any other `fe` element is refused |
 | Filter functions in `filter` | all ten of Filter Effects 1, in a list with `url()`s, to `filter.max_functions` (16) |
 | `letter-spacing`, `word-spacing` | yes, inherited, as lengths (an `em` is the declaring element's font size); letter spacing after every character but the last of a chunk, word spacing after each word separator, as resvg; on a `<textPath>` too |
+| `baseline-shift` | yes — lengths, percentages of the element's font size, and `sub`/`super` at the font's own OS/2 offsets; nested shifts add up, the `<text>`'s own is ignored (as resvg); along a `<textPath>` too |
 | `writing-mode`, `direction`, `unicode-bidi` | horizontal left-to-right only; vertical, right-to-left or bidirectional text is refused (`UnsupportedTextDirection`) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
 | `color-interpolation-filters` | yes — linearRGB by default, per primitive |

@@ -3329,6 +3329,7 @@ fn buildText(
         return;
     }
 
+    const shift = baselineShift(run, &font, size);
     var glyphs = z2d.text.outline(
         gpa,
         &font,
@@ -3339,7 +3340,7 @@ fn buildText(
         // reflected about the em box rather than about the baseline. Passing
         // the baseline straight through puts every line one font-size down the
         // page, which looks like a plausible picture and is the wrong one.
-        pen.y - font.baselineOffset(size),
+        pen.y - shift - font.baselineOffset(size),
         .{ .size = size, .transformation = ctm },
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -3425,12 +3426,13 @@ fn buildGlyphs(
     }
 
     const baseline = font.baselineOffset(size);
+    const shift = baselineShift(run, font, size);
     var x = pen.x;
     for (0..count) |i| {
         const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
         // Each glyph is turned about its own origin, which is where it sits on
         // the baseline rather than the corner of its ink.
-        var placement = ctm.translate(x, pen.y);
+        var placement = ctm.translate(x, pen.y - shift);
         if (try rotationAt(run.rotate, i)) |degrees| {
             placement = placement.rotate(degrees * std.math.pi / 180.0);
         }
@@ -3497,6 +3499,8 @@ fn buildOnPath(
     if (count == 0) return;
 
     const baseline = font.baselineOffset(size);
+    // Along a path, a shift moves the glyph off the curve along its normal.
+    const shift = baselineShift(run, font, size);
     var along = start;
     for (0..count) |i| {
         const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
@@ -3512,7 +3516,7 @@ fn buildOnPath(
             const placement = ctm
                 .translate(spot.x, spot.y)
                 .rotate(spot.angle)
-                .translate(-width / 2, 0);
+                .translate(-width / 2, -shift);
             var one = z2d.text.outline(
                 gpa,
                 font,
@@ -3577,6 +3581,17 @@ fn splitCodepoints(
         i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
     }
     try out.append(gpa, utf8.len);
+}
+
+/// How far a run's `baseline-shift` raises it, in user units: its lengths,
+/// and its `super`s and `sub`s at the offsets the run's own font gives, as
+/// resvg reads them.
+fn baselineShift(run: shapes.Text, font: *const z2d.Font, size: f64) f64 {
+    if (run.supers == 0 and run.subs == 0) return run.baseline_shift;
+    const m = metricsOf(font, size);
+    return run.baseline_shift +
+        @as(f64, @floatFromInt(run.supers)) * m.superscript -
+        @as(f64, @floatFromInt(run.subs)) * m.subscript;
 }
 
 /// What `letter-spacing` and `word-spacing` add after one character of a

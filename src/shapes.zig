@@ -175,6 +175,11 @@ pub const Text = struct {
     /// and splitting it here would mean allocating.
     rotate: ?[]const u8,
 
+    /// CSS's `letter-spacing` and `word-spacing`, in user units: added after
+    /// every character, and after every word separator, respectively.
+    letter_spacing: f64 = 0,
+    word_spacing: f64 = 0,
+
     /// The path this run is laid along, when it sits inside a `<textPath>`.
     ///
     /// §10.13: the glyphs follow the shape rather than a straight line, each

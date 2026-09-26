@@ -214,6 +214,16 @@ DIVERGENCES = {
     # `filter-drop-shadow-srgb`, since functions always run in sRGB.)
     # Measured at 1.396 and 0.549%.
     "filter-functions-spread": (1.6, 0.006, "blur kernel, in blur() and drop-shadow()"),
+    # Text on a `<textPath>`. Every glyph is where resvg puts it to within
+    # half a pixel, the two agreeing on the whole run's centre of ink to a
+    # hundredth, but no closer: resvg finds each glyph's point on the path with
+    # kurbo's `inv_arclen` at an accuracy of half a user unit over the canvas
+    # scale (`collect_normals`, text/layout.rs), a quarter of a unit here,
+    # and even a straight line goes through that solver as a cubic whose
+    # control points sit at 0.33 and 0.66 rather than thirds. The same text
+    # laid glyph by glyph on a straight baseline agrees to a level. Measured at
+    # 1.304 and 1.074%.
+    "text-spacing-on-path": (1.5, 0.012, "resvg places glyphs on a path only to a quarter of a unit"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

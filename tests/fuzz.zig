@@ -144,7 +144,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feDropShadowdxdystdDeviationflood-colorflood-opacity" ++
     "feImagehrefxlink:hrefpreserveAspectRatioimage-renderingoptimizeSpeed#" ++
     "blur(drop-shadow(grayscale(sepia(saturate(hue-rotate(invert(opacity(brightness(contrast(url(#)%pxdegturnradgrad" ++
-    "writing-modehorizontal-tbvertical-rltblr-tbdirectionrtlltrunicode-bidinormalbidi-override";
+    "writing-modehorizontal-tbvertical-rltblr-tbdirectionrtlltrunicode-bidinormalbidi-override" ++
+    "letter-spacingword-spacingnormalem";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -973,6 +974,8 @@ const document_corpus = [_][]const u8{
     // Filter functions, alone and in a list with a url, in both the
     // attribute and a style.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\"/></filter><rect width=\"4\" height=\"4\" fill=\"teal\" filter=\"sepia(50%) url(#f) hue-rotate(1rad) drop-shadow(red 1px 1px 1px)\"/><circle cx=\"6\" cy=\"6\" r=\"1\" style=\"filter: blur(0.5px) invert() opacity(0.5) contrast(3) brightness(0) url(#nothing)\"/></svg>",
+    // Spacing, positive and negative, in em, anchored and along a path.
+    "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 4 Q4 0 8 4\"/><text x=\"4\" y=\"4\" font-size=\"2\" letter-spacing=\"0.3em\" word-spacing=\"-9\" text-anchor=\"middle\">a b<tspan letter-spacing=\"normal\">c d</tspan></text><text font-size=\"1\" letter-spacing=\"1e9\"><textPath href=\"#p\">e f</textPath></text></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

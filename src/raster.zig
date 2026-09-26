@@ -3317,14 +3317,14 @@ fn buildText(
     // §10.13: a run inside a `<textPath>` follows a shape rather than a
     // line, which is a different placement for every glyph.
     if (run.on_path) |on_path| {
-        try buildOnPath(gpa, p, &font, collapsed, on_path, size, pen, ctm, doc, build_opts, opts);
+        try buildOnPath(gpa, p, &font, collapsed, run, on_path, size, pen, ctm, doc, build_opts, opts);
         return;
     }
 
     // The attributes that place glyphs one at a time. Without them the whole
     // run goes down in one call, which is both faster and exactly what z2d
     // does internally anyway.
-    if (run.rotate != null or run.text_length != null) {
+    if (run.rotate != null or run.text_length != null or run.letter_spacing != 0 or run.word_spacing != 0) {
         try buildGlyphs(gpa, p, &font, collapsed, run, size, pen, ctm, build_opts);
         return;
     }
@@ -3411,7 +3411,8 @@ fn buildGlyphs(
     defer steps.deinit(gpa);
     var natural: f64 = 0;
     for (0..count) |i| {
-        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, opts);
+        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, opts) +
+            spacingAfter(run, utf8[bounds.items[i]..bounds.items[i + 1]]);
         try steps.append(gpa, step);
         natural += step;
     }
@@ -3469,6 +3470,7 @@ fn buildOnPath(
     p: *z2d.Path,
     font: *z2d.Font,
     utf8: []const u8,
+    run: shapes.Text,
     on_path: shapes.OnPath,
     size: f64,
     pen: *Pen,
@@ -3499,12 +3501,18 @@ fn buildOnPath(
     for (0..count) |i| {
         const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
         const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, text_opts);
-        // The midpoint of this glyph's advance is what sits on the curve.
-        if (arc.at(along + step / 2)) |spot| {
+        // The point that sits on the curve is the middle of the glyph
+        // itself -- its own width, not the step to the next, which carries
+        // the kerning with its neighbour and the spacing after it -- and the
+        // glyph is turned about it. That is resvg's placement, and it keeps a
+        // kerned pair from pushing a glyph off its own midpoint.
+        const width = z2d.text.measure(gpa, font, glyph, text_opts) catch return error.BadFont;
+        const advance = step + spacingAfter(run, glyph);
+        if (arc.at(along + width / 2)) |spot| {
             const placement = ctm
                 .translate(spot.x, spot.y)
                 .rotate(spot.angle)
-                .translate(-step / 2, 0);
+                .translate(-width / 2, 0);
             var one = z2d.text.outline(
                 gpa,
                 font,
@@ -3520,7 +3528,7 @@ fn buildOnPath(
             try withinBudget(p, one.nodes.items.len, build_opts);
             try p.nodes.appendSlice(gpa, one.nodes.items);
         }
-        along += step;
+        along += advance;
     }
     // A `<textPath>` leaves the pen where the run ended along the curve, which
     // is what a `<tspan>` after it carries on from.
@@ -3569,6 +3577,22 @@ fn splitCodepoints(
         i += std.unicode.utf8ByteSequenceLength(utf8[i]) catch return error.BadFont;
     }
     try out.append(gpa, utf8.len);
+}
+
+/// What `letter-spacing` and `word-spacing` add after one character of a
+/// run: the first after every character, the second after each word
+/// separator -- CSS Text 3's list, the space and no-break space among them,
+/// which is resvg's too.
+fn spacingAfter(run: shapes.Text, glyph: []const u8) f64 {
+    var gap = run.letter_spacing;
+    if (run.word_spacing != 0) {
+        const c = std.unicode.utf8Decode(glyph) catch return gap;
+        switch (c) {
+            0x20, 0xA0, 0x1361, 0x10100, 0x10101, 0x1039F, 0x1091F => gap += run.word_spacing,
+            else => {},
+        }
+    }
+    return gap;
 }
 
 /// The step from one glyph's origin to the next, kerning included.
@@ -3820,6 +3844,8 @@ fn chunkWidth(
     opts: Options,
 ) Error!f64 {
     var total: f64 = 0;
+    // The letter-spacing after the last character measured so far.
+    var trailing: f64 = 0;
     var started = false;
     // `textRuns` rather than `subtree`: the `<text>`'s own `font-size` and
     // `font-family` are what its runs are drawn with, and a walk that skipped
@@ -3851,11 +3877,21 @@ fn chunkWidth(
         if (collapsed.len == 0) continue;
         // `textLength` says what the run comes to, so that *is* its width --
         // which is the point of the attribute.
-        total += run.text_length orelse
-            z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
+        if (run.text_length) |w| {
+            total += w;
+            trailing = 0;
+            continue;
+        }
+        total += z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
             return error.BadFont;
+        var it_chars = (std.unicode.Utf8View.init(collapsed) catch return error.BadFont).iterator();
+        while (it_chars.nextCodepointSlice()) |glyph| total += spacingAfter(run, glyph);
+        trailing = run.letter_spacing;
     }
-    return total;
+    // The chunk's last character has no letter-spacing after it, as resvg
+    // measures a chunk: it would only widen the chunk by space nothing
+    // follows, and move its anchor off the letters.
+    return total - trailing;
 }
 
 /// XML whitespace collapsed the way SVG's default `xml:space` asks.
@@ -6405,4 +6441,26 @@ test "font metrics scale to the size, and default where the face is silent" {
     try testing.expectApproxEqAbs(bare.underline_thickness, bare.strikeout_thickness, 1e-9);
     try testing.expectApproxEqAbs(2, bare.subscript, 1e-9);
     try testing.expectApproxEqAbs(4, bare.superscript, 1e-9);
+}
+
+test "word spacing goes after word separators, letter spacing after everything" {
+    const run: shapes.Text = .{
+        .utf8 = "",
+        .x = null,
+        .y = null,
+        .dx = 0,
+        .dy = 0,
+        .owner = undefined,
+        .starts_element = false,
+        .rotate = null,
+        .text_length = null,
+        .on_path = null,
+        .letter_spacing = 1,
+        .word_spacing = 10,
+    };
+    try testing.expectEqual(@as(f64, 1), spacingAfter(run, "a"));
+    try testing.expectEqual(@as(f64, 11), spacingAfter(run, " "));
+    try testing.expectEqual(@as(f64, 11), spacingAfter(run, "\u{a0}"));
+    try testing.expectEqual(@as(f64, 11), spacingAfter(run, "\u{1361}"));
+    try testing.expectEqual(@as(f64, 1), spacingAfter(run, "\t"));
 }

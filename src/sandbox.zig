@@ -665,6 +665,7 @@ const WireError = enum(u16) {
     too_many_filter_functions = 91,
     unsupported_text_direction = 92,
     bad_text_direction = 93,
+    bad_text_spacing = 94,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -762,6 +763,7 @@ fn wireFromError(err: anyerror) WireError {
         error.TooManyFilterFunctions => .too_many_filter_functions,
         error.UnsupportedTextDirection => .unsupported_text_direction,
         error.BadTextDirection => .bad_text_direction,
+        error.BadTextSpacing => .bad_text_spacing,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -874,6 +876,7 @@ fn wireToError(status: u16) Error {
         .too_many_filter_functions => error.TooManyFilterFunctions,
         .unsupported_text_direction => error.UnsupportedTextDirection,
         .bad_text_direction => error.BadTextDirection,
+        .bad_text_spacing => error.BadTextSpacing,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1178,6 +1181,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.TooManyFilterFunctions, .too_many_filter_functions },
         .{ error.UnsupportedTextDirection, .unsupported_text_direction },
         .{ error.BadTextDirection, .bad_text_direction },
+        .{ error.BadTextSpacing, .bad_text_spacing },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

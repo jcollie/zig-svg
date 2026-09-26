@@ -166,6 +166,9 @@ pub const Error = error{
     /// A `writing-mode`, `direction` or `unicode-bidi` that is none of its
     /// keywords.
     BadTextDirection,
+    /// A `letter-spacing` or `word-spacing` that is neither `normal` nor a
+    /// length -- a percentage included, which SVG 1.1 does not allow them.
+    BadTextSpacing,
 } || transform.Error || color.Error || css.Error || length.Error || ztree.ParseError;
 
 /// The furthest from the origin a transformed point may land, in pixels.
@@ -366,6 +369,12 @@ pub const Inherited = struct {
     right_to_left: ?bool = null,
     bidi: ?bool = null,
 
+    /// CSS Text 3's `letter-spacing` and `word-spacing`, inherited as the
+    /// lengths they compute to: an `em` is the font size of the element that
+    /// wrote it, not of the text that inherits it.
+    letter_spacing: ?f64 = null,
+    word_spacing: ?f64 = null,
+
     /// `self` with everything `child` names overridden.
     pub fn with(self: Inherited, child: Inherited) Inherited {
         return .{
@@ -396,6 +405,8 @@ pub const Inherited = struct {
             .vertical = child.vertical orelse self.vertical,
             .right_to_left = child.right_to_left orelse self.right_to_left,
             .bidi = child.bidi orelse self.bidi,
+            .letter_spacing = child.letter_spacing orelse self.letter_spacing,
+            .word_spacing = child.word_spacing orelse self.word_spacing,
         };
     }
 };
@@ -1122,6 +1133,8 @@ pub const PathIterator = struct {
                     .lead_space = lead_space,
                     .trail_space = trail_space,
                     .rotate = rotate,
+                    .letter_spacing = parent.inherited.letter_spacing orelse 0,
+                    .word_spacing = parent.inherited.word_spacing orelse 0,
                     .text_length = text_length,
                     .on_path = on_path,
                 } },
@@ -1795,6 +1808,11 @@ pub const PathIterator = struct {
     }
 
     fn readInherited(self: *const PathIterator, node: ztree.NodeId) Error!Inherited {
+        // Read first, because the spacing properties' `em` is this element's
+        // own font size where it names one.
+        const font_size = try self.optionalPresentationLength(node, "font-size", .other);
+        var own = self.viewport;
+        if (font_size) |size| own.font_size = size;
         return .{
             .fill = if (self.presentation(node, "fill")) |v| try color.parsePaint(v) else null,
             .fill_opacity = if (self.presentation(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
@@ -1810,7 +1828,7 @@ pub const PathIterator = struct {
             .stroke_dasharray = self.presentation(node, "stroke-dasharray"),
             .stroke_dashoffset = try self.optionalPresentationLength(node, "stroke-dashoffset", .other),
             .font_family = self.presentation(node, "font-family"),
-            .font_size = try self.optionalPresentationLength(node, "font-size", .other),
+            .font_size = font_size,
             .font_weight = if (self.presentation(node, "font-weight")) |v| try parseFontWeight(v) else null,
             .font_italic = if (self.presentation(node, "font-style")) |v| try parseFontStyle(v) else null,
             .text_anchor = if (self.presentation(node, "text-anchor")) |v| try parseTextAnchor(v) else null,
@@ -1823,6 +1841,8 @@ pub const PathIterator = struct {
             .vertical = if (self.presentation(node, "writing-mode")) |v| try parseWritingMode(v) else null,
             .right_to_left = if (self.presentation(node, "direction")) |v| try parseDirection(v) else null,
             .bidi = if (self.presentation(node, "unicode-bidi")) |v| try parseUnicodeBidi(v) else null,
+            .letter_spacing = if (self.presentation(node, "letter-spacing")) |v| try parseSpacing(v, own) else null,
+            .word_spacing = if (self.presentation(node, "word-spacing")) |v| try parseSpacing(v, own) else null,
         };
     }
 
@@ -2129,6 +2149,17 @@ pub fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
     for (smooth) |k| if (std.mem.eql(u8, t, k)) return .smooth;
     for (nearest) |k| if (std.mem.eql(u8, t, k)) return .nearest;
     return error.BadImageRendering;
+}
+
+/// `letter-spacing` or `word-spacing`: `normal`, which is none, or a length.
+fn parseSpacing(raw: []const u8, viewport: length.Viewport) Error!?f64 {
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (std.mem.eql(u8, t, "inherit")) return null;
+    if (std.mem.eql(u8, t, "normal") or std.mem.eql(u8, t, "initial")) return 0;
+    if (std.mem.endsWith(u8, t, "%")) return error.BadTextSpacing;
+    const v = length.parse(t, .other, viewport) catch return error.BadTextSpacing;
+    if (!std.math.isFinite(v)) return error.BadTextSpacing;
+    return v;
 }
 
 /// `writing-mode`: true for vertical. CSS Writing Modes 3's keywords, and SVG
@@ -3700,4 +3731,30 @@ test "vertical, right-to-left and bidirectional text are refused, and horizontal
         var doc = try read(gpa, src);
         doc.deinit();
     }
+}
+
+test "spacing is a length, its em the declaring element's own font size" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g font-size=\"10\" letter-spacing=\"0.5em\">" ++
+        "<text font-size=\"20\" word-spacing=\"0.25em\">a<tspan letter-spacing=\"normal\">b</tspan></text></g></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    var runs: [2]shapes.Text = undefined;
+    var n: usize = 0;
+    while (try it.next()) |item| switch (item) {
+        .shape => |sh| if (sh.geometry == .text) {
+            runs[n] = sh.geometry.text;
+            n += 1;
+        },
+        else => {},
+    };
+    // 0.5em at the group's 10, inherited by the text at 20 as the 5 it
+    // computed to; 0.25em at the text's own 20.
+    try testing.expectEqual(@as(f64, 5), runs[0].letter_spacing);
+    try testing.expectEqual(@as(f64, 5), runs[0].word_spacing);
+    try testing.expectEqual(@as(f64, 0), runs[1].letter_spacing);
+    for ([_][]const u8{
+        "<svg viewBox=\"0 0 8 8\"><text letter-spacing=\"10%\">a</text></svg>",
+        "<svg viewBox=\"0 0 8 8\"><text word-spacing=\"wide\">a</text></svg>",
+    }) |src| try testing.expectError(error.BadTextSpacing, read(gpa, src));
 }

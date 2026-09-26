@@ -2547,9 +2547,20 @@ fn allWhitespace(raw: []const u8) bool {
 /// finds it.
 fn isIgnorable(name: []const u8) bool {
     const names = [_][]const u8{
-        "title",          "desc",           "metadata", "defs",     "style",
-        "linearGradient", "radialGradient", "pattern",  "clipPath", "mask",
-        "symbol",         "marker",         "filter",
+        "title",            "desc",           "metadata", "defs",     "style",
+        "linearGradient",   "radialGradient", "pattern",  "clipPath", "mask",
+        "symbol",           "marker",         "filter",
+        // Never rendered, whatever is in them: a view is a way to look at the
+        // picture, a script and a cursor are for a viewer that runs one, and
+        // a colour profile serves only `icc-color`, which is refused where it
+        // is used. Passing over them is the picture, not a part of it
+        // missing.
+          "view",     "script",
+        "cursor",           "color-profile",
+        // SVG's animation. A still picture is the one with nothing animated,
+        // which is what resvg draws.
+         "animate",  "set",      "animateMotion",
+        "animateTransform", "animateColor",
     };
     for (names) |n| {
         if (std.mem.eql(u8, name, n)) return true;

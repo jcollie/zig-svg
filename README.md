@@ -552,6 +552,8 @@ short of the specification.
 | `preserveAspectRatio` | all nine alignments, `meet`, `slice`, `none`, `defer` |
 | Entity references in attribute values | yes, resolved as the document is parsed |
 | `<title>`, `<desc>`, `<metadata>`, `<defs>` | passed over, and what is inside `<defs>` is not drawn |
+| `<view>`, `<script>`, `<cursor>`, `<color-profile>` | passed over: none is ever rendered |
+| `<animate>`, `<set>`, `<animateMotion>`, `<animateTransform>`, `<animateColor>` | passed over, so what is drawn is the picture with nothing animated, as resvg draws it |
 | `<a>` | yes, drawn as a group — including inside `<text>`, where it carries its words |
 | `<switch>` | yes — the first child whose conditions pass, so Illustrator's `<foreignObject>` wrapper falls through to the drawing |
 | `systemLanguage`, `requiredExtensions`, `requiredFeatures` | yes, on any element — languages from `Options.languages` (default `en`), by §5.8.5's prefix rule; no extensions |

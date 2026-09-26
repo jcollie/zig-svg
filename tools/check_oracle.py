@@ -268,13 +268,20 @@ DIVERGENCES = {
     # cubic end leaves before the close. Every other vertex agrees. Measured
     # at 0.956 and 0.772%.
     "marker-shapes": (1.1, 0.009, "resvg tilts the marker where a rounded shape closes on itself"),
+    # Held against Inkscape (see REFERENCES), which sets glyphs with Cairo:
+    # its antialiasing of a glyph's edge is not z2d's, and plain text measures
+    # 0.49 to 0.59 against it on its own. The layout is the same -- almost no
+    # pixel is more than a little apart. Measured at 0.739 and 0.015%.
+    "text-length-tspan": (0.9, 0.001, "Cairo's antialiasing of glyph edges, against Inkscape"),
 }
 
 
 # Fixtures held against another renderer than resvg, and why.
 #
-# Inkscape is given no font of ours -- it has no `--use-font-file` -- so a
-# fixture listed here must draw no text, or it would be comparing faces again.
+# Inkscape has no `--use-font-file`, so it is given the test font through
+# fontconfig instead: a configuration that names that font's directory and
+# nothing else, so that whatever family a fixture asks for, it is set in the
+# same face as the other two renderers use.
 REFERENCES = {
     # resvg 0.48 parses `vector-effect` and ignores it: the keyword is not in
     # its binary, and a stretched rectangle draws the same with and without
@@ -286,24 +293,55 @@ REFERENCES = {
     # the nested `<svg>`'s and not the screen. Chrome and Inkscape both draw
     # the screen there, and so does this.
     "vector-effect-nested": "inkscape",
+    # `textLength` on a `<text>` whose characters are in `<tspan>`s, with
+    # `spacing` and with `spacingAndGlyphs`. resvg loses the `<tspan>`s'
+    # letters under the one and piles the glyphs up under the other; Chrome
+    # and Inkscape agree with each other, and with this, to the pixel.
+    "text-length-tspan": "inkscape",
 }
 
 
-def render_inkscape(inkscape, svg_path, png_path, width, height):
+def inkscape_fonts(workdir):
+    """A fontconfig configuration that knows the test font and nothing else.
+
+    Returns the environment to run Inkscape in, or None when there is no test
+    font -- in which case a fixture with text cannot be sent to Inkscape.
+    """
+    font = os.environ.get("SVG_TEST_FONT")
+    if not font:
+        return None
+    workdir.mkdir(parents=True, exist_ok=True)
+    conf = workdir / "fonts.conf"
+    conf.write_text(
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+        "<fontconfig>\n"
+        f"  <dir>{os.path.dirname(font)}</dir>\n"
+        f"  <cachedir>{workdir / 'fontcache'}</cachedir>\n"
+        "</fontconfig>\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FONTCONFIG_FILE"] = str(conf)
+    return env
+
+
+def render_inkscape(inkscape, svg_path, png_path, width, height, env):
     """Render one fixture with Inkscape, at exactly the size we rendered it.
 
     Inkscape's `-w` and `-h` together are the size produced, not a box to fit,
     and the page keeps its transparency unless the document gives it a colour.
+    Text is set in the test font, through `env`; see `inkscape_fonts`.
     """
-    if "<text" in svg_path.read_text(encoding="utf-8"):
-        raise ValueError(f"{svg_path.name} draws text, which Inkscape would set in a face of its own")
+    if env is None and "<text" in svg_path.read_text(encoding="utf-8"):
+        raise ValueError(f"{svg_path.name} draws text, and there is no SVG_TEST_FONT to set it in")
     argv = [
         inkscape, str(svg_path),
         "--export-type=png",
         f"--export-filename={png_path}",
         "-w", str(width), "-h", str(height),
     ]
-    subprocess.run(argv, check=True, capture_output=True)
+    subprocess.run(argv, check=True, capture_output=True, env=env)
 
 
 def render_reference(resvg, svg_path, png_path, width, height):
@@ -402,6 +440,7 @@ def main():
         print("resvg is not on PATH; run this inside `nix develop`", file=sys.stderr)
         return 2
     inkscape = shutil.which("inkscape")
+    inkscape_env = None
 
     manifest_path = args.ours / "manifest.txt"
     if not manifest_path.exists():
@@ -431,7 +470,9 @@ def main():
             if inkscape is None:
                 print("inkscape is not on PATH; run this inside `nix develop`", file=sys.stderr)
                 return 2
-            render_inkscape(inkscape, svg_path, theirs_path, width, height)
+            if inkscape_env is None:
+                inkscape_env = inkscape_fonts(reference_dir / "inkscape-fonts")
+            render_inkscape(inkscape, svg_path, theirs_path, width, height, inkscape_env)
         else:
             render_reference(resvg, svg_path, theirs_path, width, height)
         by_reference[reference] = by_reference.get(reference, 0) + 1

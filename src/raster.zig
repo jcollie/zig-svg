@@ -553,6 +553,9 @@ fn drawWalk(
     var svgs: SvgImages = .{};
     defer svgs.deinit(gpa);
 
+    var texts: TextLayouts = .{};
+    defer texts.deinit(gpa);
+
     var walk = doc.paths();
     return drawItems(gpa, &layers, doc, &walk, .{
         .base = base,
@@ -561,6 +564,7 @@ fn drawWalk(
         .images = &images,
         .markers_left = &markers_left,
         .svgs = &svgs,
+        .texts = &texts,
     }, opts);
 }
 
@@ -704,6 +708,7 @@ fn paintSvg(
             .images = pass.images,
             .markers_left = pass.markers_left,
             .svgs = pass.svgs,
+            .texts = pass.texts,
         }, opts) catch |err| {
             if (err == error.MeasureFailed) if (measuring.failure) |f| return f;
             return err;
@@ -779,6 +784,8 @@ const Pass = struct {
     /// The SVGs drawn as pictures so far, read once each for the whole
     /// render as the bitmaps are decoded once.
     svgs: *SvgImages,
+    /// The `<text>` elements laid out so far, each once for the whole render.
+    texts: *TextLayouts,
     /// The markers this pass is drawing the content of, innermost first. A
     /// marker met again inside itself draws nothing, as resvg's does: its
     /// content inherits from the marker's ancestors, so a `marker` property
@@ -809,10 +816,9 @@ fn drawItems(
     const height = layers.bottom.getHeight();
     const view_box = pass.base;
 
-    // Where the next run of text goes. One per walk, because the runs of a
-    // `<text>` arrive consecutively and each carries on from the last; a run
-    // that begins a new element resets it.
-    var pen: Pen = .{};
+    // What the runs of a `<text>` share: its layout, and where the last one
+    // went, for its decorations.
+    var pen: Pen = .{ .layouts = pass.texts };
 
     while (try items.next()) |item| {
         const shape = switch (item) {
@@ -1364,6 +1370,7 @@ fn drawMarker(
         .images = pass.images,
         .markers_left = pass.markers_left,
         .svgs = pass.svgs,
+        .texts = pass.texts,
         .drawing = &link,
     };
 
@@ -2942,7 +2949,7 @@ fn buildClip(
 
     const white: z2d.Pattern = .{ .opaque_pattern = .{ .pixel = .{ .alpha8 = .{ .a = 255 } } } };
 
-    var clip_pen: Pen = .{};
+    var clip_pen: Pen = .{ .layouts = pass.texts };
     var it = doc.subtree(node, placed);
     while (try it.next()) |item| {
         const shape = switch (item) {
@@ -3074,6 +3081,7 @@ fn buildMask(
             .images = pass.images,
             .markers_left = pass.markers_left,
             .svgs = pass.svgs,
+            .texts = pass.texts,
             .drawing = pass.drawing,
         }, opts);
     }
@@ -3499,6 +3507,7 @@ fn paintTiled(
                     .images = pass.images,
                     .markers_left = pass.markers_left,
                     .svgs = pass.svgs,
+                    .texts = pass.texts,
                     .drawing = pass.drawing,
                 }, opts);
             }
@@ -3657,24 +3666,506 @@ fn buildGeometry(
     };
 }
 
-/// Where the next run of text begins.
-///
-/// A `<text>` is a sequence of runs sharing a pen: a `<tspan>` with no position
-/// of its own carries on from wherever the previous run left off, so drawing
-/// one run means knowing what the ones before it came to. The renderer keeps
-/// this across the runs of a text element and resets it when a new one starts.
+/// What the runs of a `<text>` carry from one drawing call to the next: where
+/// the layouts of the render's `<text>` elements are kept, and where the last
+/// run laid out began and ended, which is what a decoration is drawn across.
 const Pen = struct {
-    x: f64 = 0,
-    y: f64 = 0,
-    /// Whether anything has been drawn yet in this `<text>`. Until something
-    /// has, a run with no position of its own has nothing to carry on from.
-    placed: bool = false,
+    /// The render's laid-out `<text>` elements, or null for a caller that
+    /// lays one out afresh each time it asks.
+    layouts: ?*TextLayouts = null,
     /// Where the last run laid out began and ended along its line, and its
-    /// baseline with any shift: what a decoration is drawn across.
+    /// baseline with any shift.
     run_x0: f64 = 0,
     run_x1: f64 = 0,
     run_baseline: f64 = 0,
 };
+
+/// Every `<text>` a render has laid out, by the document and element.
+///
+/// A layout is in the text's own user space, so it holds however the text is
+/// drawn -- through a `<use>`, in a clip, measured for a box -- and is made
+/// once. Each is on the heap so that the map can grow under a pointer to one.
+const TextLayouts = struct {
+    entries: std.AutoHashMapUnmanaged(bitmap.Key, *TextLayout) = .empty,
+
+    fn deinit(self: *TextLayouts, gpa: Allocator) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |l| {
+            l.*.deinit(gpa);
+            gpa.destroy(l.*);
+        }
+        self.entries.deinit(gpa);
+    }
+
+    fn get(self: *TextLayouts, gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId, opts: Options) Error!*TextLayout {
+        const key: bitmap.Key = .{ .tree = doc.tree, .node = owner };
+        if (self.entries.get(key)) |l| return l;
+        const l = try gpa.create(TextLayout);
+        errdefer gpa.destroy(l);
+        l.* = try layoutText(gpa, doc, owner, opts);
+        errdefer l.deinit(gpa);
+        try self.entries.putNoClobber(gpa, key, l);
+        return l;
+    }
+};
+
+/// A `<text>` laid out: where every glyph of every run goes.
+///
+/// SVG 1.1 §10.4 and SVG 2's text layout algorithm, for horizontal text:
+/// each character's `x`, `y`, `dx`, `dy` and `rotate` come from the innermost
+/// element whose list reaches it, counting the characters of the whole
+/// `<text>` in order; an absolute `x` starts a chunk; `textLength` is applied
+/// innermost element first; and then each chunk is moved by its
+/// `text-anchor`. Characters are the ones drawn, after whitespace is
+/// collapsed, which is why the walk that finds them is the one that draws.
+const TextLayout = struct {
+    runs: std.ArrayList(RunPlace) = .empty,
+    glyphs: std.ArrayList(GlyphPlace) = .empty,
+    /// Which run a run's characters are, by where they are in the tree's
+    /// arena -- which is what a run drawn through a `<use>` still points at.
+    by_run: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+
+    const RunPlace = struct {
+        first: usize,
+        count: usize,
+        /// Nothing moved one of its glyphs on its own, so it is drawn as one
+        /// string from its first glyph -- as exactly as before there were
+        /// lists, and kerned by the font.
+        whole: bool = true,
+        /// Something inside the run moved the pen by itself -- a position of
+        /// its own for a character after the first -- which a single
+        /// decoration across the run cannot follow.
+        broken: bool = false,
+        x0: f64 = 0,
+        x1: f64 = 0,
+        baseline: f64 = 0,
+    };
+
+    const GlyphPlace = struct {
+        /// Its origin, on its baseline with any shift.
+        x: f64,
+        y: f64,
+        /// To the next glyph: the advance, the kerning with the next
+        /// character of its run, and any spacing after it.
+        advance: f64,
+        /// The letter-spacing inside `advance`, which the end of a chunk does
+        /// not count.
+        trail: f64,
+        rotate: f64 = 0,
+        /// `lengthAdjust="spacingAndGlyphs"`'s stretch.
+        scale: f64 = 1,
+        /// Starts a chunk: an `x` of its own, or the first of the text.
+        chunk: bool = false,
+        anchor: document.TextAnchor = .start,
+        /// Where it is in its run's collapsed characters.
+        start: usize,
+        end: usize,
+    };
+
+    fn deinit(self: *TextLayout, gpa: Allocator) void {
+        self.runs.deinit(gpa);
+        self.glyphs.deinit(gpa);
+        self.by_run.deinit(gpa);
+    }
+
+    fn runFor(self: *const TextLayout, utf8: []const u8) ?RunPlace {
+        const i = self.by_run.get(@intFromPtr(utf8.ptr)) orelse return null;
+        return self.runs.items[i];
+    }
+};
+
+/// The position lists on one element of a `<text>`, read.
+const PositionLists = struct {
+    x: []f64 = &.{},
+    y: []f64 = &.{},
+    dx: []f64 = &.{},
+    dy: []f64 = &.{},
+    rotate: []f64 = &.{},
+    text_length: ?f64 = null,
+    glyphs_too: bool = false,
+
+    fn deinit(self: *PositionLists, gpa: Allocator) void {
+        gpa.free(self.x);
+        gpa.free(self.y);
+        gpa.free(self.dx);
+        gpa.free(self.dy);
+        gpa.free(self.rotate);
+    }
+};
+
+fn readLengths(gpa: Allocator, raw: ?[]const u8, axis: length.Axis, vp: length.Viewport) Error![]f64 {
+    const text = raw orelse return &.{};
+    var out: std.ArrayList(f64) = .empty;
+    errdefer out.deinit(gpa);
+    var entries = length.list(text, axis, vp);
+    while (try entries.next()) |v| try out.append(gpa, v);
+    return out.toOwnedSlice(gpa);
+}
+
+fn readPositionLists(gpa: Allocator, doc: *const document.Document, node: ztree.NodeId, vp_width: f64, vp_height: f64) Error!PositionLists {
+    const tree = doc.tree;
+    const vp: length.Viewport = .{ .width = vp_width, .height = vp_height, .font_size = try doc.fontSizeAt(node) };
+    var lists: PositionLists = .{};
+    errdefer lists.deinit(gpa);
+    lists.x = try readLengths(gpa, tree.attributeValue(node, "", "x"), .x, vp);
+    lists.y = try readLengths(gpa, tree.attributeValue(node, "", "y"), .y, vp);
+    lists.dx = try readLengths(gpa, tree.attributeValue(node, "", "dx"), .x, vp);
+    lists.dy = try readLengths(gpa, tree.attributeValue(node, "", "dy"), .y, vp);
+    if (tree.attributeValue(node, "", "rotate")) |raw| {
+        var out: std.ArrayList(f64) = .empty;
+        errdefer out.deinit(gpa);
+        var entries = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
+        while (entries.next()) |entry| {
+            const v = std.fmt.parseFloat(f64, entry) catch return error.BadLength;
+            if (!std.math.isFinite(v)) return error.BadLength;
+            try out.append(gpa, v);
+        }
+        lists.rotate = try out.toOwnedSlice(gpa);
+    }
+    if (tree.attributeValue(node, "", "textLength")) |raw| {
+        lists.text_length = try length.parse(raw, .x, vp);
+        if (tree.attributeValue(node, "", "lengthAdjust")) |adjust| {
+            lists.glyphs_too = std.mem.eql(u8, std.mem.trim(u8, adjust, " \t\r\n"), "spacingAndGlyphs");
+        }
+    }
+    return lists;
+}
+
+/// Lay out the whole of the `<text>` at `owner`. See `TextLayout`.
+fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId, opts: Options) Error!TextLayout {
+    const tree = doc.tree;
+    var out: TextLayout = .{};
+    errdefer out.deinit(gpa);
+
+    const Run = struct {
+        shape: document.Shape,
+        run: shapes.Text,
+        text: []u8,
+        bounds: []usize,
+        font: ?z2d.Font,
+        size: f64,
+        /// Its first character's place among the whole text's.
+        index: usize,
+    };
+    var runs: std.ArrayList(Run) = .empty;
+    defer {
+        for (runs.items) |r| {
+            gpa.free(r.text);
+            gpa.free(r.bounds);
+        }
+        runs.deinit(gpa);
+    }
+    // Where each element's characters begin and end, among the text's.
+    var starts: std.AutoHashMapUnmanaged(ztree.NodeId, usize) = .empty;
+    defer starts.deinit(gpa);
+    var ends: std.AutoHashMapUnmanaged(ztree.NodeId, usize) = .empty;
+    defer ends.deinit(gpa);
+    var lists: std.AutoHashMapUnmanaged(ztree.NodeId, PositionLists) = .empty;
+    defer {
+        var li = lists.valueIterator();
+        while (li.next()) |l| l.deinit(gpa);
+        lists.deinit(gpa);
+    }
+
+    // The walk that draws, rooted at the `<text>` and inheriting what it
+    // inherits where it is written, so that every run has the font it is
+    // drawn in and every character counted is one that is drawn.
+    var total: usize = 0;
+    var it = try doc.elementOf(owner, .identity);
+    while (try it.next()) |item| {
+        const shape = switch (item) {
+            .shape => |sh| sh,
+            else => continue,
+        };
+        const run = switch (shape.geometry) {
+            .text => |t| t,
+            else => continue,
+        };
+        const text = try runText(gpa, run);
+        var text_owned = true;
+        defer if (text_owned) gpa.free(text);
+        var bounds_list: std.ArrayListUnmanaged(usize) = .empty;
+        defer bounds_list.deinit(gpa);
+        try splitCodepoints(gpa, text, &bounds_list);
+        const bounds = try bounds_list.toOwnedSlice(gpa);
+        var bounds_owned = true;
+        defer if (bounds_owned) gpa.free(bounds);
+        const n = bounds.len - 1;
+        const size = shape.font_size orelse 16;
+        const font: ?z2d.Font = if (n > 0 and size > 0) try faceFor(shape, opts) else null;
+
+        var node = run.element;
+        while (true) {
+            const gop = try starts.getOrPut(gpa, node);
+            if (!gop.found_existing) gop.value_ptr.* = total;
+            try ends.put(gpa, node, total + n);
+            if (!lists.contains(node)) {
+                var read = try readPositionLists(gpa, doc, node, run.viewport_width, run.viewport_height);
+                errdefer read.deinit(gpa);
+                try lists.put(gpa, node, read);
+            }
+            if (node == owner) break;
+            node = tree.node(node).parent orelse break;
+        }
+        try runs.append(gpa, .{ .shape = shape, .run = run, .text = text, .bounds = bounds, .font = font, .size = size, .index = total });
+        text_owned = false;
+        bounds_owned = false;
+        total += n;
+    }
+
+    // Which glyph each character became; null for one laid along a path.
+    const glyph_of = try gpa.alloc(?usize, total);
+    defer gpa.free(glyph_of);
+    @memset(glyph_of, null);
+
+    const pick = struct {
+        const Which = enum { x, y, dx, dy };
+        fn value(l: *const std.AutoHashMapUnmanaged(ztree.NodeId, PositionLists), s: *const std.AutoHashMapUnmanaged(ztree.NodeId, usize), t: *const ztree.Document, from: ztree.NodeId, top: ztree.NodeId, g: usize, which: Which) ?f64 {
+            var node = from;
+            while (true) {
+                if (l.getPtr(node)) |p| {
+                    const list = switch (which) {
+                        .x => p.x,
+                        .y => p.y,
+                        .dx => p.dx,
+                        .dy => p.dy,
+                    };
+                    const k = g - s.get(node).?;
+                    if (k < list.len) return list[k];
+                }
+                if (node == top) return null;
+                node = t.node(node).parent orelse return null;
+            }
+        }
+        // The innermost `rotate` reaching the character decides, its last
+        // angle standing for every character past the end of its list.
+        fn rotation(l: *const std.AutoHashMapUnmanaged(ztree.NodeId, PositionLists), s: *const std.AutoHashMapUnmanaged(ztree.NodeId, usize), t: *const ztree.Document, from: ztree.NodeId, top: ztree.NodeId, g: usize) f64 {
+            var node = from;
+            while (true) {
+                if (l.getPtr(node)) |p| if (p.rotate.len > 0) {
+                    const k = g - s.get(node).?;
+                    return p.rotate[@min(k, p.rotate.len - 1)];
+                };
+                if (node == top) return 0;
+                node = t.node(node).parent orelse return 0;
+            }
+        }
+    };
+
+    var pen_x: f64 = 0;
+    var pen_y: f64 = 0;
+    for (runs.items) |*r| {
+        var place: TextLayout.RunPlace = .{ .first = out.glyphs.items.len, .count = 0 };
+        const n = r.bounds.len - 1;
+        // Laid along its shape by `buildOnPath`, which takes a character's
+        // place in the count and none of the line.
+        if (r.run.on_path != null or r.font == null) {
+            place.x0 = pen_x;
+            place.x1 = pen_x;
+            place.baseline = pen_y;
+            try out.by_run.put(gpa, @intFromPtr(r.run.utf8.ptr), out.runs.items.len);
+            try out.runs.append(gpa, place);
+            continue;
+        }
+        var font = r.font.?;
+        const shift = baselineShift(r.run, &font, r.size);
+        const text_opts: z2d.text.ShowTextOptions = .{ .size = r.size };
+        for (0..n) |i| {
+            const g = r.index + i;
+            const abs_x = pick.value(&lists, &starts, tree, r.run.element, owner, g, .x);
+            const abs_y = pick.value(&lists, &starts, tree, r.run.element, owner, g, .y);
+            const dx = pick.value(&lists, &starts, tree, r.run.element, owner, g, .dx) orelse 0;
+            const dy = pick.value(&lists, &starts, tree, r.run.element, owner, g, .dy) orelse 0;
+            const rotate = pick.rotation(&lists, &starts, tree, r.run.element, owner, g);
+            if (abs_x) |x| pen_x = x;
+            if (abs_y) |y| pen_y = y;
+            pen_x += dx;
+            pen_y += dy;
+            if (i > 0 and (abs_x != null or abs_y != null or dx != 0 or dy != 0)) {
+                place.whole = false;
+                place.broken = true;
+            }
+            // A turned glyph is drawn on its own, and a decoration cannot
+            // follow it any more than it follows a jump.
+            if (rotate != 0) {
+                place.whole = false;
+                place.broken = true;
+            }
+            const glyph = r.text[r.bounds[i]..r.bounds[i + 1]];
+            const spacing = spacingAfter(r.run, glyph);
+            if (spacing != 0) place.whole = false;
+            const step = try glyphStep(gpa, &font, r.text, r.bounds, i, n, text_opts) + spacing;
+            glyph_of[g] = out.glyphs.items.len;
+            try out.glyphs.append(gpa, .{
+                .x = pen_x,
+                .y = pen_y - shift,
+                .advance = step,
+                .trail = r.run.letter_spacing,
+                .rotate = rotate,
+                .chunk = out.glyphs.items.len == 0 or abs_x != null,
+                .anchor = r.shape.text_anchor orelse .start,
+                .start = r.bounds[i],
+                .end = r.bounds[i + 1],
+            });
+            pen_x += step;
+        }
+        place.count = n;
+        place.x0 = pen_x;
+        place.x1 = pen_x;
+        place.baseline = pen_y - shift;
+        try out.by_run.put(gpa, @intFromPtr(r.run.utf8.ptr), out.runs.items.len);
+        try out.runs.append(gpa, place);
+    }
+    const glyphs = out.glyphs.items;
+
+    // §10.4's `textLength`, innermost element first, so that an outer one
+    // adjusts what the inner ones already came to.
+    const Adjust = struct { node: ztree.NodeId, depth: usize };
+    var adjusts: std.ArrayList(Adjust) = .empty;
+    defer adjusts.deinit(gpa);
+    {
+        var li = lists.iterator();
+        while (li.next()) |e| if (e.value_ptr.text_length != null) {
+            var depth: usize = 0;
+            var n = e.key_ptr.*;
+            while (n != owner) : (depth += 1) n = tree.node(n).parent orelse break;
+            try adjusts.append(gpa, .{ .node = e.key_ptr.*, .depth = depth });
+        };
+    }
+    std.mem.sort(Adjust, adjusts.items, {}, struct {
+        fn deeper(_: void, a: Adjust, b: Adjust) bool {
+            return a.depth > b.depth;
+        }
+    }.deeper);
+    // SVG 2's "resolve text length": the extent of the element's characters
+    // is made its `textLength`, the last character moving by the whole
+    // difference and the ones before it by their share. An element inside
+    // it that has already been adjusted is one character in this, so that
+    // what it was made to fit, it keeps; and what follows in the same chunk
+    // moves along by the difference, so that the text carries on after it.
+    var resolved: std.AutoHashMapUnmanaged(ztree.NodeId, void) = .empty;
+    defer resolved.deinit(gpa);
+    for (adjusts.items) |a| {
+        const l = lists.get(a.node).?;
+        const want = l.text_length.?;
+        if (!(want > 0)) continue;
+        const from = starts.get(a.node).?;
+        const to = ends.get(a.node).?;
+        // The already-adjusted elements inside this one that are not inside
+        // another of them, by the characters they hold.
+        var units: std.ArrayList([2]usize) = .empty;
+        defer units.deinit(gpa);
+        {
+            var ri = resolved.keyIterator();
+            while (ri.next()) |node| {
+                const ns = starts.get(node.*).?;
+                const ne = ends.get(node.*).?;
+                if (ns < from or ne > to or node.* == a.node) continue;
+                try units.append(gpa, .{ ns, ne });
+            }
+        }
+        // Keep only the outermost: one inside another is part of it.
+        var outer: std.ArrayList([2]usize) = .empty;
+        defer outer.deinit(gpa);
+        for (units.items) |u| {
+            var inside = false;
+            for (units.items) |v| {
+                if ((v[0] < u[0] and u[1] <= v[1]) or (v[0] <= u[0] and u[1] < v[1])) inside = true;
+            }
+            if (!inside) try outer.append(gpa, u);
+        }
+
+        var lo: f64 = std.math.inf(f64);
+        var hi: f64 = -std.math.inf(f64);
+        var first: ?usize = null;
+        var last: usize = 0;
+        var n_units: usize = 0;
+        var g = from;
+        while (g < to) : (g += 1) {
+            const k = glyph_of[g] orelse continue;
+            lo = @min(lo, @min(glyphs[k].x, glyphs[k].x + glyphs[k].advance));
+            hi = @max(hi, @max(glyphs[k].x, glyphs[k].x + glyphs[k].advance));
+            if (first == null) first = k;
+            last = k;
+            var in_unit = false;
+            for (outer.items) |u| if (g >= u[0] and g < u[1]) {
+                in_unit = true;
+                if (g == u[0]) n_units += 1;
+            };
+            if (!in_unit) n_units += 1;
+        }
+        const k0 = first orelse continue;
+        const natural = hi - lo;
+        if (!(natural > 0)) continue;
+        const delta = want - natural;
+        if (l.glyphs_too) {
+            const s = want / natural;
+            g = from;
+            while (g < to) : (g += 1) {
+                const k = glyph_of[g] orelse continue;
+                glyphs[k].x = lo + (glyphs[k].x - lo) * s;
+                glyphs[k].advance *= s;
+                glyphs[k].scale *= s;
+            }
+        } else {
+            // With one character there is no gap to put the difference in.
+            if (n_units < 2) continue;
+            const share = delta / @as(f64, @floatFromInt(n_units - 1));
+            var shift: f64 = 0;
+            g = from;
+            while (g < to) : (g += 1) {
+                const k = glyph_of[g] orelse continue;
+                glyphs[k].x += shift;
+                // Past a character, the next is a share further along --
+                // unless it is inside an adjusted element that goes on.
+                var goes_on = false;
+                for (outer.items) |u| if (g >= u[0] and g + 1 < u[1]) {
+                    goes_on = true;
+                };
+                if (!goes_on) shift += share;
+            }
+        }
+        try resolved.put(gpa, a.node, {});
+        // The length now fixes the width, and the letter-spacing inside it is
+        // part of that width.
+        glyphs[last].trail = 0;
+        var j = last + 1;
+        while (j < glyphs.len and !glyphs[j].chunk) : (j += 1) glyphs[j].x += delta;
+        for (out.runs.items) |*rp| {
+            if (rp.count > 0 and rp.first <= last and rp.first + rp.count > k0) rp.whole = false;
+        }
+    }
+
+    // §10.9: each chunk is moved by its anchor, measured from its first
+    // glyph to the end of its last, less the letter-spacing after that.
+    var c: usize = 0;
+    while (c < glyphs.len) {
+        var e = c + 1;
+        while (e < glyphs.len and !glyphs[e].chunk) : (e += 1) {}
+        const end = glyphs[e - 1].x + glyphs[e - 1].advance - glyphs[e - 1].trail;
+        const width = end - glyphs[c].x;
+        const move: f64 = switch (glyphs[c].anchor) {
+            .start => 0,
+            .middle => -width / 2,
+            .end => -width,
+        };
+        if (move != 0) for (glyphs[c..e]) |*gl| {
+            gl.x += move;
+        };
+        c = e;
+    }
+
+    // What a decoration is drawn across.
+    for (out.runs.items) |*rp| {
+        if (rp.count == 0) continue;
+        const a = glyphs[rp.first];
+        const z = glyphs[rp.first + rp.count - 1];
+        rp.x0 = a.x;
+        rp.x1 = z.x + z.advance;
+        rp.baseline = a.y;
+    }
+    return out;
+}
 
 /// Build a `<text>` run's glyph outlines into `p`, under `ctm`.
 ///
@@ -3682,6 +4173,9 @@ const Pen = struct {
 /// whole point of doing it this way: text is filled, stroked, clipped, masked
 /// and pattern-filled by the same code as every other shape, rather than by a
 /// second set of routines that would drift from it.
+///
+/// Where each glyph goes is the business of the whole `<text>`, which is laid
+/// out once -- see `TextLayout` -- and this draws the run's part of it.
 ///
 /// The caller's `FontResolver` runs here. A document with text and no resolver
 /// is refused -- `error.NoFontSupplied` -- rather than drawn with the text
@@ -3697,44 +4191,20 @@ fn buildText(
     build_opts: path.Options,
     opts: Options,
 ) Error!void {
-    var font = try faceFor(shape, opts);
-    const size = shape.font_size orelse 16;
+    var own: TextLayouts = .{};
+    defer own.deinit(gpa);
+    const layout = try (pen.layouts orelse &own).get(gpa, doc, run.owner, opts);
+    const place = layout.runFor(run.utf8) orelse return;
+    pen.run_x0 = place.x0;
+    pen.run_x1 = place.x1;
+    pen.run_baseline = place.baseline;
 
+    const size = shape.font_size orelse 16;
+    if (!(size > 0)) return;
     const collapsed = try runText(gpa, run);
     defer gpa.free(collapsed);
-
-    // §10.4: `x` and `y` are absolute and start a new *chunk*; `dx` and `dy`
-    // shift the pen without starting one. A run with neither carries on.
-    if (run.starts_element or !pen.placed) {
-        pen.x = 0;
-        pen.y = 0;
-        pen.placed = true;
-    }
-    var starts_chunk = run.starts_element;
-    if (run.x) |x| {
-        pen.x = x;
-        starts_chunk = true;
-    }
-    if (run.y) |y| pen.y = y;
-    pen.x += run.dx;
-    pen.y += run.dy;
-
-    if (collapsed.len == 0 or !(size > 0)) return;
-
-    const text_opts: z2d.text.ShowTextOptions = .{ .size = size };
-
-    // §10.9: the anchor moves a whole *chunk*, not a run -- so placing the
-    // first run of one means knowing the width of every run in it, and those
-    // widths need the font. The chunk is measured by walking the `<text>` this
-    // run belongs to, which is the same trick a clip in bounding-box units
-    // uses to measure a group.
-    if (starts_chunk) {
-        const anchor = shape.text_anchor orelse .start;
-        if (anchor != .start) {
-            const width = try chunkWidth(gpa, doc, run, opts);
-            pen.x -= if (anchor == .middle) width / 2 else width;
-        }
-    }
+    if (collapsed.len == 0) return;
+    var font = try faceFor(shape, opts);
 
     // §10.13: a run inside a `<textPath>` follows a shape rather than a
     // line, which is a different placement for every glyph.
@@ -3742,47 +4212,54 @@ fn buildText(
         try buildOnPath(gpa, p, &font, collapsed, run, on_path, size, pen, ctm, doc, build_opts, opts);
         return;
     }
+    if (place.count == 0) return;
+    // A decoration is one band across the run, which cannot follow a run
+    // whose characters jump about inside it.
+    if (shape.decorations.any() and place.broken) return error.UnsupportedTextLayout;
 
-    // The attributes that place glyphs one at a time. Without them the whole
-    // run goes down in one call, which is both faster and exactly what z2d
-    // does internally anyway.
-    if (run.rotate != null or run.text_length != null or run.letter_spacing != 0 or run.word_spacing != 0) {
-        try buildGlyphs(gpa, p, &font, collapsed, run, size, pen, ctm, build_opts);
-        return;
-    }
-
-    const shift = baselineShift(run, &font, size);
-    pen.run_x0 = pen.x;
-    pen.run_baseline = pen.y - shift;
-    var glyphs = z2d.text.outline(
-        gpa,
-        &font,
-        collapsed,
-        pen.x,
+    const baseline = font.baselineOffset(size);
+    const glyphs = layout.glyphs.items[place.first..][0..place.count];
+    if (place.whole) {
         // §10.4: a `<text>`'s `y` is the **baseline**. z2d places a run by the
         // top of its em box, one em above, because the glyph outline is
         // reflected about the em box rather than about the baseline. Passing
-        // the baseline straight through puts every line one font-size down the
-        // page, which looks like a plausible picture and is the wrong one.
-        pen.y - shift - font.baselineOffset(size),
-        .{ .size = size, .transformation = ctm },
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // Every other way this fails is the font or the string being
-        // something the shaper cannot read.
-        else => return error.BadFont,
-    };
-    defer glyphs.deinit(gpa);
-
-    pen.x += z2d.text.measure(gpa, &font, collapsed, text_opts) catch
-        return error.BadFont;
-    pen.run_x1 = pen.x;
-
-    // A run of text is as many nodes as its glyphs need, and a document can
-    // always write more text. Without this the budget would be the one thing
-    // text did not answer to.
-    try withinBudget(p, glyphs.nodes.items.len, build_opts);
-    try p.nodes.appendSlice(gpa, glyphs.nodes.items);
+        // the baseline straight through puts every line one font-size down
+        // the page, which looks like a plausible picture and is the wrong one.
+        var all = z2d.text.outline(gpa, &font, collapsed, glyphs[0].x, glyphs[0].y - baseline, .{
+            .size = size,
+            .transformation = ctm,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Every other way this fails is the font or the string being
+            // something the shaper cannot read.
+            else => return error.BadFont,
+        };
+        defer all.deinit(gpa);
+        // A run of text is as many nodes as its glyphs need, and a document
+        // can always write more text. Without this the budget would be the
+        // one thing text did not answer to.
+        try withinBudget(p, all.nodes.items.len, build_opts);
+        try p.nodes.appendSlice(gpa, all.nodes.items);
+        return;
+    }
+    for (glyphs) |g| {
+        // Each glyph is turned about its own origin, which is where it sits
+        // on the baseline rather than the corner of its ink, and stretched
+        // along the line from there.
+        var placement = ctm.translate(g.x, g.y);
+        if (g.rotate != 0) placement = placement.rotate(g.rotate * std.math.pi / 180.0);
+        if (g.scale != 1) placement = placement.scale(g.scale, 1);
+        var one = z2d.text.outline(gpa, &font, collapsed[g.start..g.end], 0, -baseline, .{
+            .size = size,
+            .transformation = placement,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.BadFont,
+        };
+        defer one.deinit(gpa);
+        try withinBudget(p, one.nodes.items.len, build_opts);
+        try p.nodes.appendSlice(gpa, one.nodes.items);
+    }
 }
 
 /// Refuse when adding `adding` nodes would put `p` past what `opts` allows.
@@ -3796,93 +4273,6 @@ fn withinBudget(p: *const z2d.Path, adding: usize, opts: path.Options) Error!voi
     const after = std.math.add(usize, p.nodes.items.len, adding) catch
         std.math.maxInt(usize);
     if (after > ceiling) return error.PathTooComplex;
-}
-
-/// Build a run one glyph at a time, for `rotate` and `textLength`.
-///
-/// Both need each glyph placed on its own: `rotate` turns each about its own
-/// origin, and `textLength` changes the gaps between them without touching
-/// their shapes -- which is §10.4's `lengthAdjust="spacing"`, the initial
-/// value, and what resvg draws.
-///
-/// The whole difficulty is the step from one glyph's origin to the next,
-/// because it is the glyph's advance *plus the kerning pair* with what follows
-/// and z2d exposes neither on its own. Measuring a two-character string and
-/// taking away the second character's own width leaves exactly that step, so
-/// the kerning survives being placed by hand -- which is the thing that would
-/// otherwise go quietly wrong, since text without kerning looks like text.
-fn buildGlyphs(
-    gpa: Allocator,
-    p: *z2d.Path,
-    font: *z2d.Font,
-    utf8: []const u8,
-    run: shapes.Text,
-    size: f64,
-    pen: *Pen,
-    ctm: z2d.Transformation,
-    build_opts: path.Options,
-) Error!void {
-    const opts: z2d.text.ShowTextOptions = .{ .size = size };
-
-    // Where each character begins and ends, so that a glyph can be cut out of
-    // the run and measured or drawn on its own.
-    var bounds: std.ArrayListUnmanaged(usize) = .empty;
-    defer bounds.deinit(gpa);
-    try splitCodepoints(gpa, utf8, &bounds);
-    const count = bounds.items.len - 1;
-    if (count == 0) return;
-
-    // The step from each glyph's origin to the next, kerning included.
-    var steps: std.ArrayListUnmanaged(f64) = .empty;
-    defer steps.deinit(gpa);
-    var natural: f64 = 0;
-    for (0..count) |i| {
-        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, opts) +
-            spacingAfter(run, utf8[bounds.items[i]..bounds.items[i + 1]]);
-        try steps.append(gpa, step);
-        natural += step;
-    }
-
-    // §10.4: `textLength` is the width the run is adjusted to. With one glyph
-    // there is no gap to put the difference in, so there is nothing to adjust.
-    var extra: f64 = 0;
-    if (run.text_length) |want| {
-        if (count > 1) extra = (want - natural) / @as(f64, @floatFromInt(count - 1));
-    }
-
-    const baseline = font.baselineOffset(size);
-    const shift = baselineShift(run, font, size);
-    var x = pen.x;
-    pen.run_x0 = x;
-    pen.run_baseline = pen.y - shift;
-    for (0..count) |i| {
-        const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
-        // Each glyph is turned about its own origin, which is where it sits on
-        // the baseline rather than the corner of its ink.
-        var placement = ctm.translate(x, pen.y - shift);
-        if (try rotationAt(run.rotate, i)) |degrees| {
-            placement = placement.rotate(degrees * std.math.pi / 180.0);
-        }
-        var one = z2d.text.outline(
-            gpa,
-            font,
-            glyph,
-            0,
-            -baseline,
-            .{ .size = size, .transformation = placement },
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.BadFont,
-        };
-        defer one.deinit(gpa);
-        try withinBudget(p, one.nodes.items.len, build_opts);
-        try p.nodes.appendSlice(gpa, one.nodes.items);
-
-        x += steps.items[i];
-        if (i + 1 < count) x += extra;
-    }
-    pen.x = x;
-    pen.run_x1 = x;
 }
 
 /// Lay a run along a `<textPath>`'s shape.
@@ -3962,9 +4352,7 @@ fn buildOnPath(
         }
         along += advance;
     }
-    // A `<textPath>` leaves the pen where the run ended along the curve, which
-    // is what a `<tspan>` after it carries on from.
-    pen.placed = true;
+    _ = pen;
 }
 
 /// The shape a `<textPath>` names, flattened and measured.
@@ -4200,25 +4588,6 @@ fn flatten(gpa: Allocator, nodes: []const PathNode, out: *Arc) Error!void {
     };
 }
 
-/// The angle for the glyph at `index` in a `rotate` list, in degrees.
-///
-/// §10.4: the list is one angle per character and the **last** one repeats for
-/// whatever is left, which is what makes `rotate="45"` turn every glyph rather
-/// than only the first.
-fn rotationAt(list: ?[]const u8, index: usize) Error!?f64 {
-    const raw = list orelse return null;
-    var it = std.mem.tokenizeAny(u8, raw, " ,\t\r\n");
-    var seen: usize = 0;
-    var last: ?f64 = null;
-    while (it.next()) |tok| {
-        const v = std.fmt.parseFloat(f64, tok) catch return error.BadLength;
-        last = v;
-        if (seen == index) return v;
-        seen += 1;
-    }
-    return last;
-}
-
 /// The face a shape's text is drawn in.
 /// A face's measurements at one size, in user units, positive upward from the
 /// baseline: what decorations and shifted text are placed by.
@@ -4282,73 +4651,6 @@ fn faceFor(shape: document.Shape, opts: Options) Error!z2d.Font {
     const resolver = opts.fonts orelse return error.NoFontSupplied;
     const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
     return z2d.Font.loadBuffer(bytes) catch error.BadFont;
-}
-
-/// How wide the chunk beginning at `from` is, in user units.
-///
-/// A chunk runs from a position the document gave outright to the next one, so
-/// this walks the `<text>` and adds up every run from `from` until another
-/// names an `x` of its own. Each is measured in *its* font at *its* size,
-/// because a `<tspan>` may change both.
-///
-/// It costs a second walk of the element, which is what §10.9 asks for:
-/// `text-anchor` cannot be applied to the first run until the last one is
-/// known.
-fn chunkWidth(
-    gpa: Allocator,
-    doc: *const document.Document,
-    from: shapes.Text,
-    opts: Options,
-) Error!f64 {
-    var total: f64 = 0;
-    // The letter-spacing after the last character measured so far.
-    var trailing: f64 = 0;
-    var started = false;
-    // `textRuns` rather than `subtree`: the `<text>`'s own `font-size` and
-    // `font-family` are what its runs are drawn with, and a walk that skipped
-    // them would measure at the default size instead -- which is a ratio
-    // wrong, not a rounding.
-    var it = try doc.textRuns(from.owner);
-    while (try it.next()) |item| {
-        const shape = switch (item) {
-            .shape => |sh| sh,
-            else => continue,
-        };
-        const run = switch (shape.geometry) {
-            .text => |t| t,
-            else => continue,
-        };
-        // Wait for the run this chunk starts at, then stop at the next one
-        // that places itself.
-        if (!started) {
-            if (run.utf8.ptr != from.utf8.ptr) continue;
-            started = true;
-        } else if (run.x != null) break;
-
-        const size = shape.font_size orelse 16;
-        if (!(size > 0)) continue;
-        var font = try faceFor(shape, opts);
-        const collapsed = try runText(gpa, run);
-        defer gpa.free(collapsed);
-        total += run.dx;
-        if (collapsed.len == 0) continue;
-        // `textLength` says what the run comes to, so that *is* its width --
-        // which is the point of the attribute.
-        if (run.text_length) |w| {
-            total += w;
-            trailing = 0;
-            continue;
-        }
-        total += z2d.text.measure(gpa, &font, collapsed, .{ .size = size }) catch
-            return error.BadFont;
-        var it_chars = (std.unicode.Utf8View.init(collapsed) catch return error.BadFont).iterator();
-        while (it_chars.nextCodepointSlice()) |glyph| total += spacingAfter(run, glyph);
-        trailing = run.letter_spacing;
-    }
-    // The chunk's last character has no letter-spacing after it, as resvg
-    // measures a chunk: it would only widen the chunk by space nothing
-    // follows, and move its anchor off the letters.
-    return total - trailing;
 }
 
 /// XML whitespace collapsed the way SVG's default `xml:space` asks.
@@ -4651,7 +4953,9 @@ fn extentOf(
     var max_x: f64 = -std.math.inf(f64);
     var max_y: f64 = -std.math.inf(f64);
 
-    var measure_pen: Pen = .{};
+    var texts: TextLayouts = .{};
+    defer texts.deinit(gpa);
+    var measure_pen: Pen = .{ .layouts = &texts };
     while (try it.next()) |item| {
         const shape = switch (item) {
             .shape => |sh| sh,
@@ -6323,26 +6627,6 @@ test "a run keeps the spaces at its edges it is told to" {
     }
 }
 
-test "a rotate list gives its last angle to every glyph after it" {
-    // §10.4: one angle per character, and the last repeats for whatever is
-    // left -- which is what makes `rotate="45"` turn every glyph rather than
-    // only the first.
-    try testing.expectEqual(@as(?f64, null), try rotationAt(null, 0));
-    for (0..4) |i| {
-        try testing.expectEqual(@as(?f64, 45), try rotationAt("45", i));
-    }
-    try testing.expectEqual(@as(?f64, 0), try rotationAt("0 30 -30", 0));
-    try testing.expectEqual(@as(?f64, 30), try rotationAt("0 30 -30", 1));
-    try testing.expectEqual(@as(?f64, -30), try rotationAt("0 30 -30", 2));
-    try testing.expectEqual(@as(?f64, -30), try rotationAt("0 30 -30", 9));
-    // Commas and runs of space separate as well as single spaces do.
-    try testing.expectEqual(@as(?f64, 30), try rotationAt(" 0 , 30 ,-30 ", 1));
-    // An empty list has no angle to give.
-    try testing.expectEqual(@as(?f64, null), try rotationAt("   ", 0));
-    // And something that is not a number is refused rather than skipped.
-    try testing.expectError(error.BadLength, rotationAt("0 wobbly", 1));
-}
-
 test "a node budget too small to draw with is refused, not overflowed" {
     const gpa = testing.allocator;
 
@@ -6964,6 +7248,7 @@ test "word spacing goes after word separators, letter spacing after everything" 
         .dx = 0,
         .dy = 0,
         .owner = undefined,
+        .element = undefined,
         .starts_element = false,
         .rotate = null,
         .text_length = null,

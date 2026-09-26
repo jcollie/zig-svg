@@ -571,7 +571,7 @@ short of the specification.
 | Filter functions in `filter` | all ten of Filter Effects 1, in a list with `url()`s, to `filter.max_functions` (16) |
 | `letter-spacing`, `word-spacing` | yes, inherited, as lengths (an `em` is the declaring element's font size); letter spacing after every character but the last of a chunk, word spacing after each word separator, as resvg; on a `<textPath>` too |
 | `baseline-shift` | yes — lengths, percentages of the element's font size, and `sub`/`super` at the font's own OS/2 offsets; nested shifts add up, the `<text>`'s own is ignored (as resvg); along a `<textPath>` too |
-| `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; not along a `<textPath>` or with `rotate`, where it is refused |
+| `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; not along a `<textPath>`, with `rotate`, or across a run whose characters are placed one by one, where it is refused |
 | `dominant-baseline`, `alignment-baseline` | every SVG 1.1 keyword and CSS Inline 3's `text-top`/`text-bottom`, placed by resvg's distances from the font's ascent, descent and x-height; `dominant-baseline` inherits, as SVG 2 has it, where resvg reads it from the element alone |
 | `shape-rendering`, `text-rendering` | yes, inherited — `crispEdges` and `optimizeSpeed` draw a shape without anti-aliasing, `text-rendering: optimizeSpeed` its text and decorations (text ignores `shape-rendering`, as in resvg); clips and masks keep theirs |
 | `mix-blend-mode`, `isolation` | yes, from `style` or a stylesheet (SVG 2 gives them no attribute) — all sixteen modes, on groups, shapes, text and images, each blended onto what is beneath it in its parent layer; `isolate` gives a group its own |
@@ -583,10 +583,10 @@ short of the specification.
 | Definitions outside `<defs>` | yes — a gradient or clip path is never drawn where it stands |
 | `<pattern>` | yes — `patternUnits`, `patternContentUnits`, `patternTransform`, `viewBox`, `href`, and `overflow` |
 | `<text>`, `<tspan>` | yes — a sequence of runs, filled or stroked, and usable as a clip |
-| `x`, `y`, `dx`, `dy` on a run | yes — `x`/`y` start a chunk, `dx`/`dy` shift the pen |
+| `x`, `y`, `dx`, `dy` | yes, as lists: a value per character, counted across the whole `<text>`, the innermost element whose list reaches a character deciding it; an `x` starts a chunk, which `text-anchor` moves on its own |
 | `font-family`, `font-size`, `font-weight`, `font-style` | yes, inherited; the caller resolves the family |
 | `text-anchor` | yes — `start`, `middle`, `end` |
-| `rotate`, `textLength` | yes — `lengthAdjust="spacing"`, which is the initial value |
+| `rotate`, `textLength`, `lengthAdjust` | yes, reaching into `<tspan>`s as the position lists do; `rotate`'s last angle stands for the characters past its end; `textLength` is applied innermost first, by `spacing` or by `spacingAndGlyphs`, an element already adjusted moving as one character within the one around it, as SVG 2's algorithm has it |
 | `<textPath>`, `startOffset` | yes, including a percentage of the path's length |
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style` | yes — §6.3's declaration block, which outranks the attributes |

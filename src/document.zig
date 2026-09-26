@@ -972,6 +972,29 @@ pub const Document = struct {
         return it;
     }
 
+    /// The `font-size` in force on `node`, from its ancestors and itself, or
+    /// null when nothing names one: what an `em` in a list of positions on
+    /// that element is of.
+    pub fn fontSizeAt(self: *const Document, node: ztree.NodeId) Error!?f64 {
+        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
+        var chain: [max_container_depth + 1]ztree.NodeId = undefined;
+        var count: usize = 0;
+        var at: ?ztree.NodeId = node;
+        while (at) |n| : (at = self.tree.node(n).parent) {
+            if (self.tree.node(n).kind != .element) continue;
+            if (count == chain.len) return error.TooDeeplyNested;
+            chain[count] = n;
+            count += 1;
+        }
+        var size: ?f64 = null;
+        while (count > 0) {
+            count -= 1;
+            it.viewport.font_size = size;
+            if (try it.optionalPresentationLength(chain[count], "font-size", .other)) |s| size = s;
+        }
+        return size;
+    }
+
     /// A walk of `node` alone, under `ctm`, as a `<use>` of it would draw it:
     /// the element and what is inside it, inheriting from where it is
     /// written. What an `feImage` naming an element draws.
@@ -980,36 +1003,6 @@ pub const Document = struct {
         if (self.tree.node(parent).kind != .element) return self.subtree(node, ctm);
         var it = try self.contentOf(parent, ctm, null);
         it.stack[0].only_child = node;
-        return it;
-    }
-
-    /// The runs of one `<text>`, for measuring.
-    ///
-    /// `subtree` deliberately leaves the root's own attributes alone, because
-    /// a `<clipPath>` or a `<pattern>` contributes none of its own to what is
-    /// inside it. A `<text>` is the opposite: its `font-size`, its
-    /// `font-family` and its `text-anchor` are exactly what its runs are drawn
-    /// with, and measuring them without it measures the wrong thing -- at the
-    /// default size rather than the document's, which is a ratio rather than a
-    /// small error.
-    ///
-    /// Used to find the width of a chunk, which `text-anchor` needs before the
-    /// first run of one can be placed.
-    pub fn textRuns(self: *const Document, root: ztree.NodeId) Error!PathIterator {
-        var it: PathIterator = .{ .doc = self, .viewport = self.viewport() };
-        it.started = true;
-        // The element's own `font-size` first, against nothing -- there is no
-        // parent here to make an `em` relative to -- and then everything else
-        // against what it came to.
-        it.viewport.font_size = null;
-        const own = try it.readInherited(root);
-        it.viewport.font_size = own.font_size;
-        it.stack[0] = .{
-            .node = root,
-            .next_child = 0,
-            .inherited = own,
-            .transform = .identity,
-        };
         return it;
     }
 
@@ -1361,30 +1354,27 @@ pub const PathIterator = struct {
     fn runFrom(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
         self.enterViewport(parent);
-        // `lengthAdjust="spacingAndGlyphs"` stretches the glyphs themselves
-        // rather than the gaps between them, which is a different drawing and
-        // not one this does. The initial value is `spacing`, which is.
         const inherited = parent.inherited;
         if ((inherited.vertical orelse false) or (inherited.right_to_left orelse false) or (inherited.bidi orelse false)) {
             return error.UnsupportedTextDirection;
         }
+        // §10.4: the gaps between glyphs, or the glyphs as well. Anything
+        // else is no adjustment anybody can draw.
         if (self.attr(parent.node, "lengthAdjust")) |raw| {
             const t = std.mem.trim(u8, raw, " \t\r\n");
-            if (!std.mem.eql(u8, t, "spacing")) return error.UnsupportedTextLayout;
+            if (!std.mem.eql(u8, t, "spacing") and !std.mem.eql(u8, t, "spacingAndGlyphs")) return error.UnsupportedTextLayout;
         }
         // §10.13: a `<textPath>` lays its run along the shape it names, each
         // glyph turned to the tangent where it sits.
         const on_path = try self.onPathOf(parent.node);
 
+        // Each of these is a list with a value per character, indexed across
+        // the element and everything inside it -- which the renderer lays out
+        // for the whole `<text>` at once. Read in full here, so that a list
+        // with a bad entry anywhere is refused before anything is drawn.
         const rotate = self.attr(parent.node, "rotate");
+        if (rotate) |raw| try checkNumberList(raw);
         const text_length = try self.optionalLengthOf(parent.node, "textLength", .x);
-        // Both index into the characters of the element as a whole, so a
-        // `<tspan>` inside one that carries them would have to be counted
-        // into the same sequence. Refused rather than applied per run, which
-        // would put the angles on the wrong letters.
-        if ((rotate != null or text_length != null) and hasElementChild(tree, parent.node)) {
-            return error.UnsupportedTextLayout;
-        }
         const raw = tree.node(child).value;
         const owner = self.textOwnerOf(parent.node);
         const shift = try self.baselineShiftOf(owner);
@@ -1435,10 +1425,13 @@ pub const PathIterator = struct {
                 .geometry = .{
                     .text = .{
                         .utf8 = raw,
-                        .x = if (first) try self.optionalLengthOf(parent.node, "x", .x) else null,
-                        .y = if (first) try self.optionalLengthOf(parent.node, "y", .y) else null,
-                        .dx = if (first) try self.lengthOf(parent.node, "dx", .x, 0) else 0,
-                        .dy = if (first) try self.lengthOf(parent.node, "dy", .y, 0) else 0,
+                        .x = if (first) try self.firstOfList(parent.node, "x", .x) else null,
+                        .y = if (first) try self.firstOfList(parent.node, "y", .y) else null,
+                        .dx = if (first) (try self.firstOfList(parent.node, "dx", .x)) orelse 0 else 0,
+                        .dy = if (first) (try self.firstOfList(parent.node, "dy", .y)) orelse 0 else 0,
+                        .element = parent.node,
+                        .viewport_width = self.viewport.width,
+                        .viewport_height = self.viewport.height,
                         .owner = owner,
                         .starts_element = owner == parent.node and first,
                         .lead_space = lead_space,
@@ -1658,6 +1651,16 @@ pub const PathIterator = struct {
         const tree = self.doc.tree;
         return localIs(tree, node, "linearGradient") or localIs(tree, node, "radialGradient") or
             localIs(tree, node, "pattern");
+    }
+
+    /// The first length of a position list, after reading the rest of it to
+    /// make sure it is one; null when the element has none.
+    fn firstOfList(self: *const PathIterator, node: ztree.NodeId, name: []const u8, axis: length.Axis) Error!?f64 {
+        const raw = self.attr(node, name) orelse return null;
+        var entries = length.list(raw, axis, self.viewport);
+        const first = try entries.next();
+        while (try entries.next()) |_| {}
+        return first;
     }
 
     fn preservesSpace(self: *const PathIterator, node: ztree.NodeId) Error!bool {
@@ -2496,11 +2499,13 @@ fn isXmlSpace(c: u8) bool {
 /// whitespace in a text element goes -- so a run that is nothing else is not a
 /// run at all.
 /// Whether an element has any element children -- a `<tspan>`, for a `<text>`.
-fn hasElementChild(tree: *const ztree.Document, node: ztree.NodeId) bool {
-    for (tree.node(node).children.items) |child| {
-        if (tree.node(child).kind == .element) return true;
+/// Refuses a `rotate` list that is not a list of numbers.
+fn checkNumberList(raw: []const u8) Error!void {
+    var entries = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
+    while (entries.next()) |entry| {
+        const v = std.fmt.parseFloat(f64, entry) catch return error.BadLength;
+        if (!std.math.isFinite(v)) return error.BadLength;
     }
-    return false;
 }
 
 /// XML's own namespace, which the `xml:` prefix is bound to without being
@@ -4009,39 +4014,45 @@ test "a textPath naming nothing is refused" {
             "<textPath>go</textPath></text></svg>",
     ));
 }
-test "rotate and textLength are read, and refused where they would mislead" {
+test "position lists, rotate and textLength are read, and a bad one is refused" {
     const gpa = testing.allocator;
     {
-        var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" font-size=\"10\"" ++
+        var doc = try read(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4 9, 14\" y=\"20\" dx=\"1 2\" font-size=\"10\"" ++
             " rotate=\"0 30\" textLength=\"40\">ab</text></svg>");
         defer doc.deinit();
         var it = doc.paths();
         const run = (try it.next()).?.shape.geometry.text;
+        // The run carries the first of each list; the renderer reads the
+        // rest, for every character of the `<text>`.
+        try testing.expectEqual(@as(?f64, 4), run.x);
+        try testing.expectEqual(@as(f64, 1), run.dx);
         try testing.expectEqualStrings("0 30", run.rotate.?);
         try testing.expectEqual(@as(?f64, 40), run.text_length);
     }
 
-    // Both index into the characters of the element as a whole, so a `<tspan>`
-    // inside one would have to be counted into the same sequence. Refused
-    // rather than applied per run, which would put the angles on the wrong
-    // letters.
-    for ([_][]const u8{ "rotate=\"30\"", "textLength=\"40\"" }) |attr| {
-        const src = try std.fmt.allocPrint(
-            gpa,
-            "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>a<tspan>b</tspan></text></svg>",
-            .{attr},
-        );
+    // Lists reach into a `<tspan>`, and `spacingAndGlyphs` is drawn: neither
+    // is refused any more.
+    for ([_][]const u8{ "rotate=\"30\"", "textLength=\"40\"", "textLength=\"40\" lengthAdjust=\"spacingAndGlyphs\"", "dx=\"1 2 3\"" }) |attr| {
+        const src = try std.fmt.allocPrint(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>a<tspan>b</tspan></text></svg>", .{attr});
         defer gpa.free(src);
-        try testing.expectError(error.UnsupportedTextLayout, read(gpa, src));
+        var doc = try read(gpa, src);
+        doc.deinit();
     }
 
-    // `spacingAndGlyphs` stretches the glyphs themselves, which is a different
-    // drawing; `spacing` is the initial value and is the one implemented.
-    try testing.expectError(error.UnsupportedTextLayout, read(
-        gpa,
-        "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" textLength=\"40\"" ++
-            " lengthAdjust=\"spacingAndGlyphs\">ab</text></svg>",
-    ));
+    // A list with a bad entry anywhere in it is refused, as is an adjustment
+    // that is neither of the two.
+    for ([_][]const u8{ "x=\"1 2 three\"", "dy=\"1,,x\"", "rotate=\"10 twenty\"", "textLength=\"40\" lengthAdjust=\"squash\"" }) |attr| {
+        const src = try std.fmt.allocPrint(gpa, "<svg viewBox=\"0 0 96 32\"><text x=\"4\" y=\"20\" {s}>ab</text></svg>", .{attr});
+        defer gpa.free(src);
+        testing.expect(if (read(gpa, src)) |d| blk: {
+            var doc = d;
+            doc.deinit();
+            break :blk false;
+        } else |_| true) catch |err| {
+            std.debug.print("{s}\n", .{attr});
+            return err;
+        };
+    }
 }
 
 test "a style declaration outranks the presentation attribute" {

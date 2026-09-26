@@ -156,6 +156,24 @@ pub fn parse(text: []const u8, axis: Axis, viewport: Viewport) Error!f64 {
     return result;
 }
 
+/// The lengths of a list, one at a time: `x="10 20 30"` on a `<text>`, where
+/// each is the position of one character. Separated by whitespace, commas,
+/// or both, as every number list in SVG is.
+pub const List = struct {
+    entries: std.mem.TokenIterator(u8, .any),
+    axis: Axis,
+    viewport: Viewport,
+
+    pub fn next(self: *List) Error!?f64 {
+        const entry = self.entries.next() orelse return null;
+        return try parse(entry, self.axis, self.viewport);
+    }
+};
+
+pub fn list(text: []const u8, axis: Axis, viewport: Viewport) List {
+    return .{ .entries = std.mem.tokenizeAny(u8, text, " \t\r\n,"), .axis = axis, .viewport = viewport };
+}
+
 // -- tests -------------------------------------------------------------------
 
 const square: Viewport = .{ .width = 100, .height = 100 };
@@ -235,4 +253,15 @@ test "a percentage of an unknown viewport is zero rather than an error" {
     // Used for the root's own `width` and `height`, which cannot be a
     // percentage of themselves; the caller falls back to the viewBox.
     try testing.expectApproxEqAbs(@as(f64, 0), try parse("100%", .x, .unknown), 1e-12);
+}
+
+test "a list of lengths is read one at a time, and refused at the first bad one" {
+    var l = list(" 10, 20%  3in", .x, square);
+    try testing.expectEqual(@as(?f64, 10), try l.next());
+    try testing.expectEqual(@as(?f64, 20), try l.next());
+    try testing.expectEqual(@as(?f64, 288), try l.next());
+    try testing.expectEqual(@as(?f64, null), try l.next());
+    var bad = list("1 two", .x, square);
+    _ = try bad.next();
+    try testing.expectError(error.BadLength, bad.next());
 }

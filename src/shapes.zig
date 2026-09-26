@@ -147,6 +147,16 @@ pub const Text = struct {
     dx: f64,
     dy: f64,
 
+    /// The element the run's characters are written in -- the `<text>`, a
+    /// `<tspan>`, a `<textPath>` or an `<a>` -- which is where the position
+    /// lists that reach them begin to be looked for.
+    element: ztree.NodeId,
+
+    /// The viewport a percentage in a position list on this run's elements
+    /// is of: the nearest one, which a nested `<svg>` changes.
+    viewport_width: f64 = 0,
+    viewport_height: f64 = 0,
+
     /// The `<text>` this run belongs to.
     ///
     /// The renderer needs it to measure: `text-anchor` applies to a whole
@@ -209,12 +219,12 @@ pub const Text = struct {
     /// means flattening it, and that is drawing work.
     on_path: ?OnPath,
 
-    /// §10.4's `textLength`: the width the run is to be adjusted to fit.
+    /// §10.4's `textLength` on the run's own element, as the walk read it.
     ///
-    /// Only `lengthAdjust="spacing"` is implemented, which is the initial
-    /// value: the gaps between glyphs change and the glyphs do not. resvg
-    /// draws it that way too, which a fixture pins by showing the same letters
-    /// at different spacings.
+    /// The renderer lays the whole `<text>` out at once and reads every
+    /// element's `textLength` and `lengthAdjust` from the tree itself, since
+    /// one on a `<text>` reaches the characters of its `<tspan>`s as well;
+    /// this is what the walk checked, and what a caller inspecting a run sees.
     text_length: ?f64,
 };
 

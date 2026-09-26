@@ -1510,6 +1510,7 @@ const Chain = struct {
                 },
                 .tile => |t| self.noteUse(i, t.in),
                 .morphology => |m| self.noteUse(i, m.in),
+                .convolve_matrix => |c| self.noteUse(i, c.in),
             }
         }
     }
@@ -1748,6 +1749,20 @@ const Chain = struct {
                     try fe.morphology(self.gpa, &out, in.sfc, m.dilate, radiusPixels(rx), radiusPixels(ry));
                 }
                 self.finish(i, out, self.subregion(i, p, in.box), space);
+            },
+            .convolve_matrix => |c| {
+                const in = try self.resolve(i, c.in, space);
+                var out = try in.sfc.clone(self.gpa);
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, in.box);
+                // No kernel, or one the wrong length for its order, is a
+                // pass-through (Filter Effects 1). The edge the edge modes
+                // speak of is the filter region's: it is the image the
+                // primitive is given.
+                if (c.kernel) |k| {
+                    fe.convolve(&out, in.sfc, self.f.region, box, c, self.f.spec.numbers[k.first..][0..k.count]);
+                }
+                self.finish(i, out, box, space);
             },
         }
     }

@@ -474,6 +474,84 @@ const Lines = struct {
     }
 };
 
+/// `feConvolveMatrix`, §15.13: every pixel of `box` in `out` the weighted sum
+/// of the `order_x` by `order_y` pixels of `in` around it, the kernel turned
+/// through a half turn as convolution has it, divided by the divisor and
+/// offset by the bias.
+///
+/// `bounds` is the image the primitive is given -- the filter region -- and
+/// `edge` says what lies past it: the nearest pixel on the edge, the pixel
+/// from the far side, or transparent black. With `preserve_alpha` the
+/// colour is convolved with the alpha divided out and the alpha is kept;
+/// without it, every channel is convolved as it is, premultiplied.
+pub fn convolve(
+    out: *z2d.Surface,
+    in: *const z2d.Surface,
+    bounds: image.PixelBox,
+    box: image.PixelBox,
+    c: filter.ConvolveMatrix,
+    kernel: []const f64,
+) void {
+    const b = bounds.intersect(image.extent(in));
+    const clipped = box.intersect(b);
+    if (clipped.isEmpty()) return;
+    const w = in.getWidth();
+    const src = in.image_surface_rgba.buf;
+    const dst = out.image_surface_rgba.buf;
+    const ox: i32 = @intCast(c.order_x);
+    const oy: i32 = @intCast(c.order_y);
+    const tx: i32 = @intCast(c.target_x);
+    const ty: i32 = @intCast(c.target_y);
+    const divisor: f32 = @floatCast(c.divisor);
+    const bias: f32 = @floatCast(c.bias);
+
+    var y = clipped.y0;
+    while (y < clipped.y1) : (y += 1) {
+        var x = clipped.x0;
+        while (x < clipped.x1) : (x += 1) {
+            var sum: [4]f32 = .{ 0, 0, 0, 0 };
+            var j: i32 = 0;
+            while (j < oy) : (j += 1) {
+                var i: i32 = 0;
+                while (i < ox) : (i += 1) {
+                    const sx = edgeOf(c.edge, x - tx + i, b.x0, b.x1) orelse continue;
+                    const sy = edgeOf(c.edge, y - ty + j, b.y0, b.y1) orelse continue;
+                    const k: f32 = @floatCast(kernel[@intCast((oy - 1 - j) * ox + (ox - 1 - i))]);
+                    const px = src[@intCast(sy * w + sx)];
+                    const v = if (c.preserve_alpha) straight(px) else fractions(px);
+                    for (0..4) |ch| sum[ch] += v[ch] * k;
+                }
+            }
+            const here = src[@intCast(y * w + x)];
+            // Alpha first, since the bias is scaled by it -- by the value
+            // before it is clamped, as resvg has it.
+            const alpha = if (c.preserve_alpha)
+                @as(f32, @floatFromInt(here.a)) / 255
+            else
+                sum[3] / divisor + bias;
+            const a = std.math.clamp(alpha, 0, 1);
+            var result: [4]f32 = undefined;
+            for (0..3) |ch| {
+                const v = sum[ch] / divisor + bias * alpha;
+                result[ch] = if (c.preserve_alpha) std.math.clamp(v, 0, 1) * a else std.math.clamp(v, 0, a);
+            }
+            result[3] = a;
+            dst[@intCast(y * w + x)] = fromFractions(result);
+        }
+    }
+}
+
+/// Where a coordinate past the edge of `[lo, hi)` reads from, or null for
+/// transparent black.
+fn edgeOf(mode: filter.EdgeMode, v: i32, lo: i32, hi: i32) ?i32 {
+    if (v >= lo and v < hi) return v;
+    return switch (mode) {
+        .duplicate => std.math.clamp(v, lo, hi - 1),
+        .wrap => lo + @mod(v - lo, hi - lo),
+        .none => null,
+    };
+}
+
 // -- tests -------------------------------------------------------------------
 
 fn surfaceOf(px: RGBA) !z2d.Surface {
@@ -676,4 +754,92 @@ test "a radius wider than the picture is the extreme over all of it" {
     defer out.deinit(gpa);
     try morphology(gpa, &out, &in, true, 1000, 1000);
     for (out.image_surface_rgba.buf) |px| try testing.expectEqual(@as(u8, 9), px.a);
+}
+
+fn convolveOne(kernel: []const f64, c: filter.ConvolveMatrix, row: []const RGBA) ![]RGBA {
+    const gpa = testing.allocator;
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, @intCast(row.len), 1);
+    defer in.deinit(gpa);
+    @memcpy(in.image_surface_rgba.buf, row);
+    var out = try in.clone(gpa);
+    defer out.deinit(gpa);
+    convolve(&out, &in, image.extent(&in), image.extent(&in), c, kernel);
+    return gpa.dupe(RGBA, out.image_surface_rgba.buf);
+}
+
+const opaque_grey = [_]RGBA{
+    .{ .r = 0, .g = 0, .b = 0, .a = 255 },
+    .{ .r = 100, .g = 100, .b = 100, .a = 255 },
+    .{ .r = 200, .g = 200, .b = 200, .a = 255 },
+};
+
+fn rowKernel(order_x: u32, edge: filter.EdgeMode) filter.ConvolveMatrix {
+    return .{
+        .in = .previous,
+        .order_x = order_x,
+        .order_y = 1,
+        .kernel = .{ .first = 0, .count = order_x },
+        .divisor = 1,
+        .bias = 0,
+        .target_x = order_x / 2,
+        .target_y = 0,
+        .edge = edge,
+        .preserve_alpha = false,
+    };
+}
+
+test "the kernel is turned through a half turn" {
+    // [1 0 0] reads the pixel to the *right*: the kernel's first entry
+    // weighs the last of the neighbourhood.
+    const got = try convolveOne(&.{ 1, 0, 0 }, rowKernel(3, .duplicate), &opaque_grey);
+    defer testing.allocator.free(got);
+    try testing.expectEqual(@as(u8, 100), got[0].r);
+    try testing.expectEqual(@as(u8, 200), got[1].r);
+    // Past the right edge, duplicated.
+    try testing.expectEqual(@as(u8, 200), got[2].r);
+}
+
+test "each edge mode says what lies past the edge" {
+    const cases = [_]struct { filter.EdgeMode, u8, u8 }{
+        .{ .duplicate, 200, 255 },
+        .{ .wrap, 0, 255 },
+        // Transparent black: the colour and the alpha both fall away.
+        .{ .none, 0, 0 },
+    };
+    for (cases) |case| {
+        const got = try convolveOne(&.{ 1, 0, 0 }, rowKernel(3, case[0]), &opaque_grey);
+        defer testing.allocator.free(got);
+        try testing.expectEqual(case[1], got[2].r);
+        try testing.expectEqual(case[2], got[2].a);
+    }
+}
+
+test "the divisor divides, the bias adds, and preserveAlpha keeps the alpha" {
+    var c = rowKernel(3, .duplicate);
+    c.divisor = 3;
+    const box = try convolveOne(&.{ 1, 1, 1 }, c, &opaque_grey);
+    defer testing.allocator.free(box);
+    try testing.expectEqual(@as(u8, 100), box[1].r);
+
+    // Half-transparent white under a kernel that takes half: without
+    // preserveAlpha the alpha halves too; with it the alpha is kept and the
+    // colour, straight, is halved.
+    const half = [_]RGBA{.{ .r = 128, .g = 128, .b = 128, .a = 128 }} ** 3;
+    c.divisor = 2;
+    c.kernel = .{ .first = 0, .count = 3 };
+    const plain = try convolveOne(&.{ 0, 1, 0 }, c, &half);
+    defer testing.allocator.free(plain);
+    try testing.expectEqual(@as(u8, 64), plain[1].a);
+    c.preserve_alpha = true;
+    const kept = try convolveOne(&.{ 0, 1, 0 }, c, &half);
+    defer testing.allocator.free(kept);
+    try testing.expectEqual(@as(u8, 128), kept[1].a);
+    try testing.expectEqual(@as(u8, 64), kept[1].r);
+    // And a bias, scaled by the alpha.
+    c.preserve_alpha = false;
+    c.bias = 0.5;
+    const biased = try convolveOne(&.{ 0, 1, 0 }, c, &opaque_grey);
+    defer testing.allocator.free(biased);
+    try testing.expectEqual(@as(u8, 255), biased[1].a);
+    try testing.expectEqual(@as(u8, 178), biased[1].r);
 }

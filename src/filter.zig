@@ -105,10 +105,20 @@ pub const Error = error{
     /// An `feMorphology` whose `operator` is neither `erode` nor `dilate`, or
     /// whose `radius` is not one or two numbers.
     BadMorphology,
+    /// An `feConvolveMatrix` whose `order` is not one or two whole numbers
+    /// from 1 to `max_convolve_order`, whose target is outside the kernel,
+    /// whose `edgeMode` or `preserveAlpha` is not one of its keywords, or
+    /// whose numbers do not parse.
+    BadConvolveMatrix,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
 pub const max_href_hops = 16;
+
+/// The widest or tallest `feConvolveMatrix` kernel. Every output pixel costs
+/// the kernel's area in multiplications, so this bounds the work of one
+/// primitive at 256 per pixel; the kernels documents use are three or five.
+pub const max_convolve_order = 16;
 
 /// The most primitives one filter may chain. Each is a full-canvas surface
 /// while it is live, so this is a memory bound as much as a sanity one.
@@ -184,6 +194,27 @@ pub const Kind = union(enum) {
     /// `primitiveUnits`. Zero or less in either passes the input through, as
     /// Filter Effects 1 has it.
     morphology: struct { in: Input, dilate: bool, radius_x: f64, radius_y: f64 },
+    /// §15.13: a weighted sum over an `order_x` by `order_y` neighbourhood.
+    convolve_matrix: ConvolveMatrix,
+};
+
+pub const EdgeMode = enum { duplicate, wrap, none };
+
+pub const ConvolveMatrix = struct {
+    in: Input,
+    order_x: u32,
+    order_y: u32,
+    /// `kernelMatrix`, row by row, as a window into `Filter.numbers`. Null
+    /// where it is missing or the wrong length for the order, which Filter
+    /// Effects 1 makes a pass-through rather than an error.
+    kernel: ?struct { first: usize, count: usize },
+    /// Already defaulted: the kernel's sum, or one where that is nothing.
+    divisor: f64,
+    bias: f64,
+    target_x: u32,
+    target_y: u32,
+    edge: EdgeMode,
+    preserve_alpha: bool,
 };
 
 /// §15.12's `operator`, and Filter Effects 1's `lighter`.
@@ -548,6 +579,8 @@ fn readPrimitives(
                 .radius_x = if (r.len > 0) r[0] else 0,
                 .radius_y = if (r.len > 1) r[1] else if (r.len > 0) r[0] else 0,
             } };
+        } else if (std.mem.eql(u8, name, "feConvolveMatrix")) blk: {
+            break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
         } else return error.UnsupportedFilterPrimitive;
 
         try prims.append(gpa, .{
@@ -656,6 +689,93 @@ fn transferFunction(
         }
     }
     return f;
+}
+
+fn convolveMatrix(
+    gpa: Allocator,
+    tree: *const ztree.Document,
+    node: ztree.NodeId,
+    numbers: *std.ArrayList(f64),
+) Error!ConvolveMatrix {
+    var order_buf: [2]f64 = undefined;
+    const order = try numberList(attr(tree, node, "order") orelse "", &order_buf, error.BadConvolveMatrix);
+    const ox = if (order.len > 0) try wholeOrder(order[0]) else 3;
+    const oy = if (order.len > 1) try wholeOrder(order[1]) else ox;
+
+    // Every entry has to be a number, whatever the length; only a list of
+    // the right length goes into the pool.
+    var count: usize = 0;
+    const raw_kernel = attr(tree, node, "kernelMatrix") orelse "";
+    var check = std.mem.tokenizeAny(u8, raw_kernel, " \t\r\n,");
+    while (check.next()) |word| {
+        const v = std.fmt.parseFloat(f64, word) catch return error.BadConvolveMatrix;
+        if (!std.math.isFinite(v)) return error.BadConvolveMatrix;
+        count += 1;
+    }
+    const fits = count == ox * oy;
+    const first = numbers.items.len;
+    if (fits) {
+        var it = std.mem.tokenizeAny(u8, raw_kernel, " \t\r\n,");
+        while (it.next()) |word| try numbers.append(gpa, std.fmt.parseFloat(f64, word) catch unreachable);
+    }
+
+    var sum: f64 = 0;
+    if (fits) for (numbers.items[first..]) |v| {
+        sum += v;
+    };
+    // Filter Effects 1: the sum of the kernel, or one where the sum is
+    // nothing; and a divisor of zero written out means that default too.
+    const default_divisor: f64 = if (@abs(sum) < 1e-6) 1 else sum;
+    var divisor = default_divisor;
+    if (trimmedAttr(tree, node, "divisor")) |raw| {
+        const v = std.fmt.parseFloat(f64, raw) catch return error.BadConvolveMatrix;
+        if (!std.math.isFinite(v)) return error.BadConvolveMatrix;
+        if (v != 0) divisor = v;
+    }
+    const bias: f64 = if (trimmedAttr(tree, node, "bias")) |raw| blk: {
+        const v = std.fmt.parseFloat(f64, raw) catch return error.BadConvolveMatrix;
+        if (!std.math.isFinite(v)) return error.BadConvolveMatrix;
+        break :blk v;
+    } else 0;
+
+    const tx = try targetOf(trimmedAttr(tree, node, "targetX"), ox);
+    const ty = try targetOf(trimmedAttr(tree, node, "targetY"), oy);
+    const edge_name = trimmedAttr(tree, node, "edgeMode") orelse "duplicate";
+    const edge = std.meta.stringToEnum(EdgeMode, edge_name) orelse return error.BadConvolveMatrix;
+    const preserve = trimmedAttr(tree, node, "preserveAlpha") orelse "false";
+    const preserve_alpha = if (std.mem.eql(u8, preserve, "true"))
+        true
+    else if (std.mem.eql(u8, preserve, "false"))
+        false
+    else
+        return error.BadConvolveMatrix;
+
+    return .{
+        .in = inputOf(tree, node, "in"),
+        .order_x = ox,
+        .order_y = oy,
+        .kernel = if (fits) .{ .first = first, .count = count } else null,
+        .divisor = divisor,
+        .bias = bias,
+        .target_x = tx,
+        .target_y = ty,
+        .edge = edge,
+        .preserve_alpha = preserve_alpha,
+    };
+}
+
+fn wholeOrder(v: f64) Error!u32 {
+    if (v != @floor(v) or v < 1 or v > max_convolve_order) return error.BadConvolveMatrix;
+    return @intFromFloat(v);
+}
+
+/// `targetX` or `targetY`: inside the kernel, and the middle of it by
+/// default.
+fn targetOf(raw: ?[]const u8, order: u32) Error!u32 {
+    const t = raw orelse return order / 2;
+    const v = std.fmt.parseFloat(f64, t) catch return error.BadConvolveMatrix;
+    if (v != @floor(v) or v < 0 or v >= @as(f64, @floatFromInt(order))) return error.BadConvolveMatrix;
+    return @intFromFloat(v);
 }
 
 /// Up to `buf.len` numbers separated by whitespace or commas; more than that,
@@ -909,5 +1029,45 @@ test "a morphology radius is one number or two, and the operator one of two" {
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadMorphology, readTest(src));
+    }
+}
+
+test "a convolve matrix defaults its order, target and divisor" {
+    var f = try primitivesOf("<feConvolveMatrix kernelMatrix=\"1 2 1 2 4 2 1 2 1\"/>" ++
+        "<feConvolveMatrix order=\"2 1\" kernelMatrix=\"1 -1\" divisor=\"0\" targetX=\"1\" edgeMode=\"wrap\" preserveAlpha=\"true\"/>" ++
+        // The wrong length for the order: a pass-through, not an error.
+        "<feConvolveMatrix kernelMatrix=\"1 2 3\"/>" ++
+        "<feConvolveMatrix/>");
+    defer f.deinit(testing.allocator);
+    const a = f.primitives[0].kind.convolve_matrix;
+    try testing.expectEqual(@as(u32, 3), a.order_x);
+    try testing.expectEqual(@as(u32, 1), a.target_y);
+    try testing.expectEqual(@as(f64, 16), a.divisor);
+    try testing.expectEqual(EdgeMode.duplicate, a.edge);
+    const b = f.primitives[1].kind.convolve_matrix;
+    try testing.expectEqual(@as(u32, 1), b.order_y);
+    // A kernel summing to nothing divides by one, and a written divisor of
+    // zero means that default.
+    try testing.expectEqual(@as(f64, 1), b.divisor);
+    try testing.expectEqual(@as(u32, 1), b.target_x);
+    try testing.expect(b.preserve_alpha);
+    try testing.expectEqualSlices(f64, &.{ 1, -1 }, f.numbers[b.kernel.?.first..][0..b.kernel.?.count]);
+    try testing.expectEqual(@as(@TypeOf(a.kernel), null), f.primitives[2].kind.convolve_matrix.kernel);
+    try testing.expectEqual(@as(@TypeOf(a.kernel), null), f.primitives[3].kind.convolve_matrix.kernel);
+}
+
+test "a convolve matrix with a bad order, target or keyword is refused" {
+    for ([_][]const u8{
+        "<feConvolveMatrix order=\"0\" kernelMatrix=\"1\"/>",
+        "<feConvolveMatrix order=\"2.5\" kernelMatrix=\"1\"/>",
+        "<feConvolveMatrix order=\"17\"/>",
+        "<feConvolveMatrix kernelMatrix=\"1 x 1 1 1 1 1 1 1\"/>",
+        "<feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" targetX=\"3\"/>",
+        "<feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" edgeMode=\"mirror\"/>",
+        "<feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" preserveAlpha=\"yes\"/>",
+    }) |body| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
+        try testing.expectError(error.BadConvolveMatrix, readTest(src));
     }
 }

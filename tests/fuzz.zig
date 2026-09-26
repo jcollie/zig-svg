@@ -135,7 +135,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feComponentTransferfeFuncRfeFuncGfeFuncBfeFuncAtableValuestablediscretelineargammaidentityslopeinterceptamplitudeexponentoffset" ++
     "feCompositein2operatoroverinoutatopxorlighterarithmetick1k2k3k4" ++
     "feBlendmodenormalmultiplyscreendarkenlightenoverlaycolor-dodgecolor-burnhard-lightsoft-lightdifferenceexclusionhuesaturationcolorluminosity" ++
-    "feTilefeMorphologyradiuserodedilate";
+    "feTilefeMorphologyradiuserodedilate" ++
+    "feConvolveMatrixorderkernelMatrixdivisorbiastargetXtargetYedgeModeduplicatewrapnonepreserveAlphatruefalse";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -947,6 +948,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\" result=\"o\"/><feComposite in=\"SourceGraphic\" in2=\"o\" operator=\"arithmetic\" k1=\"1\" k2=\"0.5\" k3=\"0.5\" k4=\"-0.2\"/><feBlend in2=\"SourceAlpha\" mode=\"luminosity\"/></filter><rect width=\"4\" height=\"4\" fill=\"orange\" filter=\"url(#f)\"/></svg>",
     // Morphology on the alpha, then tiled from a subregion.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"1 0.5\"/><feOffset x=\"1\" y=\"1\" width=\"2\" height=\"3\"/><feTile/><feMorphology radius=\"0.3\"/></filter><circle cx=\"3\" cy=\"3\" r=\"2\" fill=\"purple\" filter=\"url(#f)\"/></svg>",
+    // Convolution with an off-centre target, each edge mode in turn.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feConvolveMatrix order=\"3 2\" kernelMatrix=\"1 -1 0 2 0 -2\" targetY=\"1\" bias=\"0.3\" edgeMode=\"wrap\"/><feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" edgeMode=\"none\" preserveAlpha=\"true\"/></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"coral\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

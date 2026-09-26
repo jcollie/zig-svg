@@ -658,6 +658,7 @@ const WireError = enum(u16) {
     bad_blend_mode = 84,
     bad_morphology = 85,
     bad_convolve_matrix = 86,
+    bad_displacement_map = 87,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -748,6 +749,7 @@ fn wireFromError(err: anyerror) WireError {
         error.BadBlendMode => .bad_blend_mode,
         error.BadMorphology => .bad_morphology,
         error.BadConvolveMatrix => .bad_convolve_matrix,
+        error.BadDisplacementMap => .bad_displacement_map,
         error.UnsupportedFilterPrimitive => .unsupported_filter_primitive,
         error.BadClipPath => .bad_clip_path,
         error.UnsupportedClipUnits => .unsupported_clip_units,
@@ -853,6 +855,7 @@ fn wireToError(status: u16) Error {
         .bad_blend_mode => error.BadBlendMode,
         .bad_morphology => error.BadMorphology,
         .bad_convolve_matrix => error.BadConvolveMatrix,
+        .bad_displacement_map => error.BadDisplacementMap,
         .unsupported_filter_primitive => error.UnsupportedFilterPrimitive,
         .bad_clip_path => error.BadClipPath,
         .unsupported_clip_units => error.UnsupportedClipUnits,
@@ -1150,6 +1153,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.BadBlendMode, .bad_blend_mode },
         .{ error.BadMorphology, .bad_morphology },
         .{ error.BadConvolveMatrix, .bad_convolve_matrix },
+        .{ error.BadDisplacementMap, .bad_displacement_map },
     };
     for (cases) |c| {
         try testing.expectEqual(c[1], wireFromError(c[0]));

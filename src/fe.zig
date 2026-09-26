@@ -552,6 +552,49 @@ fn edgeOf(mode: filter.EdgeMode, v: i32, lo: i32, hi: i32) ?i32 {
     };
 }
 
+/// `feDisplacementMap`, §15.15: every pixel of `box` in `out` fetched from
+/// `in` at an offset of `scale` times how far a channel of `map` is from a
+/// half -- the map's colour with its alpha divided out, as the specification
+/// says. `scale` is in canvas pixels, per axis. A fetch from outside
+/// `bounds`, the image the primitive is given, is transparent black.
+///
+/// The nearest pixel is fetched, as resvg does, rather than interpolating
+/// between four: the specification leaves it open, and a displacement map is
+/// usually noise, where the difference does not show.
+pub fn displace(
+    out: *z2d.Surface,
+    in: *const z2d.Surface,
+    map: *const z2d.Surface,
+    bounds: image.PixelBox,
+    box: image.PixelBox,
+    scale: [2]f64,
+    x_channel: u2,
+    y_channel: u2,
+) void {
+    const b = bounds.intersect(image.extent(in));
+    const clipped = box.intersect(b);
+    if (clipped.isEmpty()) return;
+    const w = in.getWidth();
+    const src = in.image_surface_rgba.buf;
+    const m = map.image_surface_rgba.buf;
+    const dst = out.image_surface_rgba.buf;
+    var y = clipped.y0;
+    while (y < clipped.y1) : (y += 1) {
+        var x = clipped.x0;
+        while (x < clipped.x1) : (x += 1) {
+            const c = straight(m[@intCast(y * w + x)]);
+            const fx = @as(f64, @floatFromInt(x)) + scale[0] * (@as(f64, c[x_channel]) - 0.5);
+            const fy = @as(f64, @floatFromInt(y)) + scale[1] * (@as(f64, c[y_channel]) - 0.5);
+            if (!std.math.isFinite(fx) or !std.math.isFinite(fy)) continue;
+            const sx = @round(fx);
+            const sy = @round(fy);
+            if (sx < @as(f64, @floatFromInt(b.x0)) or sx >= @as(f64, @floatFromInt(b.x1)) or
+                sy < @as(f64, @floatFromInt(b.y0)) or sy >= @as(f64, @floatFromInt(b.y1))) continue;
+            dst[@intCast(y * w + x)] = src[@as(usize, @intFromFloat(sy)) * @as(usize, @intCast(w)) + @as(usize, @intFromFloat(sx))];
+        }
+    }
+}
+
 // -- tests -------------------------------------------------------------------
 
 fn surfaceOf(px: RGBA) !z2d.Surface {
@@ -842,4 +885,27 @@ test "the divisor divides, the bias adds, and preserveAlpha keeps the alpha" {
     defer testing.allocator.free(biased);
     try testing.expectEqual(@as(u8, 255), biased[1].a);
     try testing.expectEqual(@as(u8, 178), biased[1].r);
+}
+
+test "a displacement fetches from a half-scale step either way, and nothing past the edge" {
+    const gpa = testing.allocator;
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, 8, 1);
+    defer in.deinit(gpa);
+    for (in.image_surface_rgba.buf, 0..) |*px, i| px.* = .{ .r = @intCast(i * 10), .g = 0, .b = 0, .a = 255 };
+    var map = try z2d.Surface.init(.image_surface_rgba, gpa, 8, 1);
+    defer map.deinit(gpa);
+    // Red full is a half forward; half-transparent red at full strength,
+    // straight, is the same -- the map is read with its alpha divided out.
+    // Green at a half is no step at all, so the y channel stays put.
+    @memset(map.image_surface_rgba.buf, .{ .r = 255, .g = 128, .b = 0, .a = 255 });
+    map.image_surface_rgba.buf[1] = .{ .r = 128, .g = 64, .b = 0, .a = 128 };
+    var out = try z2d.Surface.init(.image_surface_rgba, gpa, 8, 1);
+    defer out.deinit(gpa);
+    displace(&out, &in, &map, image.extent(&in), image.extent(&in), .{ 4, 4 }, 0, 1);
+    const got = out.image_surface_rgba.buf;
+    try testing.expectEqual(@as(u8, 20), got[0].r);
+    try testing.expectEqual(@as(u8, 30), got[1].r);
+    try testing.expectEqual(@as(u8, 70), got[5].r);
+    // From 8, past the edge.
+    try testing.expectEqual(@as(u8, 0), got[6].a);
 }

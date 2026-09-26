@@ -136,7 +136,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feCompositein2operatoroverinoutatopxorlighterarithmetick1k2k3k4" ++
     "feBlendmodenormalmultiplyscreendarkenlightenoverlaycolor-dodgecolor-burnhard-lightsoft-lightdifferenceexclusionhuesaturationcolorluminosity" ++
     "feTilefeMorphologyradiuserodedilate" ++
-    "feConvolveMatrixorderkernelMatrixdivisorbiastargetXtargetYedgeModeduplicatewrapnonepreserveAlphatruefalse";
+    "feConvolveMatrixorderkernelMatrixdivisorbiastargetXtargetYedgeModeduplicatewrapnonepreserveAlphatruefalse" ++
+    "feDisplacementMapscalexChannelSelectoryChannelSelectorRGBA";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -950,6 +951,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"1 0.5\"/><feOffset x=\"1\" y=\"1\" width=\"2\" height=\"3\"/><feTile/><feMorphology radius=\"0.3\"/></filter><circle cx=\"3\" cy=\"3\" r=\"2\" fill=\"purple\" filter=\"url(#f)\"/></svg>",
     // Convolution with an off-centre target, each edge mode in turn.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feConvolveMatrix order=\"3 2\" kernelMatrix=\"1 -1 0 2 0 -2\" targetY=\"1\" bias=\"0.3\" edgeMode=\"wrap\"/><feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" edgeMode=\"none\" preserveAlpha=\"true\"/></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"coral\" filter=\"url(#f)\"/></svg>",
+    // Displacement by a translucent map, reading each channel.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood flood-color=\"rgba(200,20,90,0.5)\" result=\"m\"/><feDisplacementMap in=\"SourceGraphic\" in2=\"m\" scale=\"3\" xChannelSelector=\"B\" yChannelSelector=\"A\"/><feDisplacementMap in2=\"SourceAlpha\" scale=\"-40\"/></filter><rect x=\"1\" y=\"1\" width=\"5\" height=\"5\" fill=\"navy\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

@@ -1511,6 +1511,10 @@ const Chain = struct {
                 .tile => |t| self.noteUse(i, t.in),
                 .morphology => |m| self.noteUse(i, m.in),
                 .convolve_matrix => |c| self.noteUse(i, c.in),
+                .displacement_map => |d| {
+                    self.noteUse(i, d.in);
+                    self.noteUse(i, d.in2);
+                },
             }
         }
     }
@@ -1762,6 +1766,23 @@ const Chain = struct {
                 if (c.kernel) |k| {
                     fe.convolve(&out, in.sfc, self.f.region, box, c, self.f.spec.numbers[k.first..][0..k.count]);
                 }
+                self.finish(i, out, box, space);
+            },
+            .displacement_map => |d| {
+                // Filter Effects 1 converts only `in2` into the primitive's
+                // colour space and leaves `in` as it is. Both are converted
+                // here, which comes to the same picture: a displacement moves
+                // pixels and does not mix them, so it commutes with a
+                // conversion done pixel by pixel.
+                const in = try self.resolve(i, d.in, space);
+                const map = try self.resolve(i, d.in2, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                const box = self.subregion(i, p, in.box.unite(map.box));
+                fe.displace(&out, in.sfc, map.sfc, self.f.region, box, .{
+                    self.lengthX(d.scale),
+                    self.lengthY(d.scale),
+                }, d.x_channel, d.y_channel);
                 self.finish(i, out, box, space);
             },
         }

@@ -157,6 +157,14 @@ DIVERGENCES = {
     # left and up than right and down, so everything it erodes or dilates is
     # a pixel out along two of its four edges. Measured at 1.881 and 1.900%.
     "filter-morphology": (2.2, 0.022, "resvg's window is 2*ceil(r) wide and off centre by a pixel"),
+    # `feDisplacementMap` with a `scale` other than one. §15.15 fetches from
+    # `scale * (C - 0.5)` away; resvg multiplies by `scale` twice -- once in
+    # `scale_coordinates` and again in `displacement_map::apply` -- so it
+    # displaces by the square of the scale. Measured on a one-pixel canvas,
+    # `scale="4"` moves a half-red map's content eight pixels where the
+    # formula gives two. `filter-displacement-map`, at a scale of one where
+    # the two agree, matches to a level. Measured at 48.113 and 40.975%.
+    "filter-displacement-map-scale": (50.0, 0.42, "resvg displaces by the square of the scale"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

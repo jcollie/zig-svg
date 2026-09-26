@@ -110,6 +110,9 @@ pub const Error = error{
     /// whose `edgeMode` or `preserveAlpha` is not one of its keywords, or
     /// whose numbers do not parse.
     BadConvolveMatrix,
+    /// An `feDisplacementMap` whose channel selector is not `R`, `G`, `B` or
+    /// `A`, or whose `scale` does not parse.
+    BadDisplacementMap,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -196,6 +199,10 @@ pub const Kind = union(enum) {
     morphology: struct { in: Input, dilate: bool, radius_x: f64, radius_y: f64 },
     /// §15.13: a weighted sum over an `order_x` by `order_y` neighbourhood.
     convolve_matrix: ConvolveMatrix,
+    /// §15.15: each pixel of `in` fetched from where `in2` says, `scale`
+    /// times a channel's distance from a half, in `primitiveUnits`. The
+    /// channels are 0 to 3 for red, green, blue and alpha.
+    displacement_map: struct { in: Input, in2: Input, scale: f64, x_channel: u2, y_channel: u2 },
 };
 
 pub const EdgeMode = enum { duplicate, wrap, none };
@@ -581,6 +588,19 @@ fn readPrimitives(
             } };
         } else if (std.mem.eql(u8, name, "feConvolveMatrix")) blk: {
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
+        } else if (std.mem.eql(u8, name, "feDisplacementMap")) blk: {
+            const scale: f64 = if (trimmedAttr(tree, child, "scale")) |raw| s: {
+                const v = std.fmt.parseFloat(f64, raw) catch return error.BadDisplacementMap;
+                if (!std.math.isFinite(v)) return error.BadDisplacementMap;
+                break :s v;
+            } else 0;
+            break :blk .{ .displacement_map = .{
+                .in = inputOf(tree, child, "in"),
+                .in2 = inputOf(tree, child, "in2"),
+                .scale = scale,
+                .x_channel = try channelOf(trimmedAttr(tree, child, "xChannelSelector")),
+                .y_channel = try channelOf(trimmedAttr(tree, child, "yChannelSelector")),
+            } };
         } else return error.UnsupportedFilterPrimitive;
 
         try prims.append(gpa, .{
@@ -761,6 +781,19 @@ fn convolveMatrix(
         .target_y = ty,
         .edge = edge,
         .preserve_alpha = preserve_alpha,
+    };
+}
+
+/// `xChannelSelector` or `yChannelSelector`: alpha by default.
+fn channelOf(raw: ?[]const u8) Error!u2 {
+    const t = raw orelse return 3;
+    if (t.len != 1) return error.BadDisplacementMap;
+    return switch (t[0]) {
+        'R' => 0,
+        'G' => 1,
+        'B' => 2,
+        'A' => 3,
+        else => error.BadDisplacementMap,
     };
 }
 
@@ -1069,5 +1102,27 @@ test "a convolve matrix with a bad order, target or keyword is refused" {
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
         try testing.expectError(error.BadConvolveMatrix, readTest(src));
+    }
+}
+
+test "a displacement map's channels default to alpha, and its scale to nothing" {
+    var f = try primitivesOf("<feDisplacementMap/>" ++
+        "<feDisplacementMap in2=\"SourceGraphic\" scale=\"-2.5\" xChannelSelector=\"R\" yChannelSelector=\"B\"/>");
+    defer f.deinit(testing.allocator);
+    const a = f.primitives[0].kind.displacement_map;
+    try testing.expectEqual(@as(u2, 3), a.x_channel);
+    try testing.expectEqual(@as(f64, 0), a.scale);
+    const b = f.primitives[1].kind.displacement_map;
+    try testing.expectEqual(@as(u2, 0), b.x_channel);
+    try testing.expectEqual(@as(u2, 2), b.y_channel);
+    try testing.expectEqual(@as(f64, -2.5), b.scale);
+    for ([_][]const u8{
+        "<feDisplacementMap xChannelSelector=\"r\"/>",
+        "<feDisplacementMap yChannelSelector=\"RG\"/>",
+        "<feDisplacementMap scale=\"large\"/>",
+    }) |body| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
+        try testing.expectError(error.BadDisplacementMap, readTest(src));
     }
 }

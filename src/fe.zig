@@ -361,6 +361,119 @@ fn setSat(c: [3]f32, s: f32) [3]f32 {
     return out;
 }
 
+/// `feTile`, §15.20: `out`'s `box` covered with copies of `tile`, the input's
+/// subregion, lined up so that one copy sits exactly where the input was.
+pub fn tile(out: *z2d.Surface, in: *z2d.Surface, tile_box: image.PixelBox, box: image.PixelBox) void {
+    const t = tile_box.intersect(image.extent(in));
+    const clipped = box.intersect(image.extent(out));
+    if (t.isEmpty() or clipped.isEmpty()) return;
+    const tw = t.x1 - t.x0;
+    const th = t.y1 - t.y0;
+    const w = out.getWidth();
+    const src = in.image_surface_rgba.buf;
+    const dst = out.image_surface_rgba.buf;
+    var y = clipped.y0;
+    while (y < clipped.y1) : (y += 1) {
+        const sy = t.y0 + @mod(y - t.y0, th);
+        var x = clipped.x0;
+        while (x < clipped.x1) : (x += 1) {
+            const sx = t.x0 + @mod(x - t.x0, tw);
+            dst[@intCast(y * w + x)] = src[@intCast(sy * w + sx)];
+        }
+    }
+}
+
+/// `feMorphology`, §15.18: every channel of `out` the least (erode) or the
+/// greatest (dilate) of that channel of `in` over the `2rx+1` by `2ry+1`
+/// rectangle centred on it. Pixels past the edge of the surface take no
+/// part, rather than counting as transparent: an erosion does not eat in
+/// from the edge of the canvas.
+///
+/// The rectangle is separable -- the extreme over a rectangle is the extreme
+/// over its rows' extremes -- and each pass is van Herk and Gil-Werman's, so
+/// a radius of a thousand costs what a radius of one does.
+pub fn morphology(gpa: std.mem.Allocator, out: *z2d.Surface, in: *const z2d.Surface, dilate: bool, rx: u32, ry: u32) std.mem.Allocator.Error!void {
+    const w: usize = @intCast(out.getWidth());
+    const h: usize = @intCast(out.getHeight());
+    const src = in.image_surface_rgba.buf;
+    const dst = out.image_surface_rgba.buf;
+    const longest = @max(w, h);
+    const rmax = @max(@min(rx, w), @min(ry, h));
+    // One line, padded by the radius either side, and the two running
+    // extremes van Herk needs, per channel.
+    const line = try gpa.alloc([4]u8, longest + 2 * rmax);
+    defer gpa.free(line);
+    const g = try gpa.alloc([4]u8, longest + 2 * rmax);
+    defer gpa.free(g);
+    const hh = try gpa.alloc([4]u8, longest + 2 * rmax);
+    defer gpa.free(hh);
+    const lines: Lines = .{ .line = line, .g = g, .h = hh, .dilate = dilate };
+
+    // Across each row, from `in` into `out`...
+    const r_x: usize = @min(rx, w);
+    for (0..h) |y| {
+        lines.run(src[y * w ..][0..w], 1, dst[y * w ..][0..w], 1, w, r_x);
+    }
+    // ...and down each column of `out`, in place: the line is copied out
+    // before anything is written back.
+    const r_y: usize = @min(ry, h);
+    for (0..w) |x| {
+        lines.run(dst[x..], w, dst[x..], w, h, r_y);
+    }
+}
+
+const Lines = struct {
+    line: [][4]u8,
+    g: [][4]u8,
+    h: [][4]u8,
+    dilate: bool,
+
+    fn pick(self: Lines, a: [4]u8, b: [4]u8) [4]u8 {
+        var out: [4]u8 = undefined;
+        for (0..4) |i| out[i] = if (self.dilate) @max(a[i], b[i]) else @min(a[i], b[i]);
+        return out;
+    }
+
+    /// `n` pixels `stride` apart from `from`, each replaced in `to` by the
+    /// extreme over the `2r+1` of them centred on it.
+    fn run(self: Lines, from: []const RGBA, from_stride: usize, to: []RGBA, to_stride: usize, n: usize, r: usize) void {
+        if (r == 0) {
+            if (from.ptr != to.ptr) for (0..n) |i| {
+                to[i * to_stride] = from[i * from_stride];
+            };
+            return;
+        }
+        // The identity of the operation beyond each end, so that every
+        // window is full length and the edges need no case of their own.
+        const pad: [4]u8 = if (self.dilate) .{ 0, 0, 0, 0 } else .{ 255, 255, 255, 255 };
+        const len = n + 2 * r;
+        const f = self.line[0..len];
+        @memset(f[0..r], pad);
+        @memset(f[r + n ..], pad);
+        for (0..n) |i| {
+            const px = from[i * from_stride];
+            f[r + i] = .{ px.r, px.g, px.b, px.a };
+        }
+        const k = 2 * r + 1;
+        const g = self.g[0..len];
+        const h = self.h[0..len];
+        for (0..len) |i| {
+            g[i] = if (i % k == 0) f[i] else self.pick(g[i - 1], f[i]);
+        }
+        var i = len;
+        while (i > 0) {
+            i -= 1;
+            h[i] = if (i == len - 1 or (i + 1) % k == 0) f[i] else self.pick(h[i + 1], f[i]);
+        }
+        // The window for output `j` is `f[j .. j + k]`: a suffix of one block
+        // and a prefix of the next.
+        for (0..n) |j| {
+            const v = self.pick(h[j], g[j + k - 1]);
+            to[j * to_stride] = .{ .r = v[0], .g = v[1], .b = v[2], .a = v[3] };
+        }
+    }
+};
+
 // -- tests -------------------------------------------------------------------
 
 fn surfaceOf(px: RGBA) !z2d.Surface {
@@ -512,4 +625,55 @@ test "a blend over nothing is the source, and nothing over a backdrop is the bac
         try testing.expect(@abs(@as(i32, got.g) - case[2].g) <= 1);
         try testing.expectEqual(case[2].a, got.a);
     }
+}
+
+test "a tile repeats the input's subregion, lined up with where it was" {
+    const gpa = testing.allocator;
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, 6, 1);
+    defer in.deinit(gpa);
+    var out = try z2d.Surface.init(.image_surface_rgba, gpa, 6, 1);
+    defer out.deinit(gpa);
+    const buf = in.image_surface_rgba.buf;
+    buf[2] = .{ .r = 1, .g = 0, .b = 0, .a = 255 };
+    buf[3] = .{ .r = 2, .g = 0, .b = 0, .a = 255 };
+    tile(&out, &in, .{ .x0 = 2, .y0 = 0, .x1 = 4, .y1 = 1 }, image.extent(&out));
+    var reds: [6]u8 = undefined;
+    for (out.image_surface_rgba.buf, &reds) |px, *r| r.* = px.r;
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 1, 2, 1, 2 }, &reds);
+}
+
+test "morphology takes the extreme over a centred window, the edge taking no part" {
+    const gpa = testing.allocator;
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, 9, 1);
+    defer in.deinit(gpa);
+    const buf = in.image_surface_rgba.buf;
+    // Opaque from 3 to 5, and one brighter pixel at 4.
+    for (buf[3..6]) |*px| px.* = .{ .r = 10, .g = 0, .b = 0, .a = 255 };
+    buf[4].r = 200;
+    buf[0] = .{ .r = 5, .g = 0, .b = 0, .a = 255 };
+
+    var out = try in.clone(gpa);
+    defer out.deinit(gpa);
+    try morphology(gpa, &out, &in, true, 1, 0);
+    var alphas: [9]u8 = undefined;
+    for (out.image_surface_rgba.buf, &alphas) |px, *a| a.* = px.a;
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255, 255, 255, 255, 0, 0 }, &alphas);
+    try testing.expectEqual(@as(u8, 200), out.image_surface_rgba.buf[5].r);
+
+    try morphology(gpa, &out, &in, false, 1, 0);
+    for (out.image_surface_rgba.buf, &alphas) |px, *a| a.* = px.a;
+    // Pixel 0 keeps its alpha: past the edge counts for nothing.
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 255, 0, 0, 0, 0 }, &alphas);
+    try testing.expectEqual(@as(u8, 10), out.image_surface_rgba.buf[4].r);
+}
+
+test "a radius wider than the picture is the extreme over all of it" {
+    const gpa = testing.allocator;
+    var in = try z2d.Surface.init(.image_surface_rgba, gpa, 3, 3);
+    defer in.deinit(gpa);
+    in.image_surface_rgba.buf[4] = .{ .r = 9, .g = 9, .b = 9, .a = 9 };
+    var out = try in.clone(gpa);
+    defer out.deinit(gpa);
+    try morphology(gpa, &out, &in, true, 1000, 1000);
+    for (out.image_surface_rgba.buf) |px| try testing.expectEqual(@as(u8, 9), px.a);
 }

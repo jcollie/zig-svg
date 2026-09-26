@@ -1508,6 +1508,8 @@ const Chain = struct {
                     self.noteUse(i, b.in);
                     self.noteUse(i, b.in2);
                 },
+                .tile => |t| self.noteUse(i, t.in),
+                .morphology => |m| self.noteUse(i, m.in),
             }
         }
     }
@@ -1723,6 +1725,30 @@ const Chain = struct {
                 fe.blend(&out, a.sfc, b.sfc, box, bl.mode);
                 self.finish(i, out, box, space);
             },
+            .tile => |t| {
+                const in = try self.resolve(i, t.in, space);
+                var out = try self.blank();
+                errdefer out.deinit(self.gpa);
+                // §15.7.6 makes feTile the exception to "the union of the
+                // inputs": replicating is the point of it, so by default it
+                // fills the whole filter region.
+                const box = self.subregion(i, p, self.f.region);
+                fe.tile(&out, in.sfc, in.box.intersect(self.f.region), box);
+                self.finish(i, out, box, space);
+            },
+            .morphology => |m| {
+                const in = try self.resolve(i, m.in, space);
+                var out = try in.sfc.clone(self.gpa);
+                errdefer out.deinit(self.gpa);
+                // Whole pixels either side, rounded: the window is 2r+1
+                // wide and centred, as Skia's is.
+                const rx = self.lengthX(m.radius_x);
+                const ry = self.lengthY(m.radius_y);
+                if (rx > 0 and ry > 0) {
+                    try fe.morphology(self.gpa, &out, in.sfc, m.dilate, radiusPixels(rx), radiusPixels(ry));
+                }
+                self.finish(i, out, self.subregion(i, p, in.box), space);
+            },
         }
     }
 
@@ -1746,6 +1772,13 @@ fn convert(sfc: *z2d.Surface, want: filter.ColorSpace) void {
         .linear_rgb => image.toLinear(sfc),
         .srgb => image.toSrgb(sfc),
     }
+}
+
+/// A morphology radius in whole pixels. No wider than a canvas can be, so
+/// that an absurd radius costs what a canvas-wide one does.
+fn radiusPixels(v: f64) u32 {
+    if (!std.math.isFinite(v)) return 1 << 16;
+    return @intFromFloat(@round(std.math.clamp(v, 0, 1 << 16)));
 }
 
 /// `feOffset` moves by whole pixels. The fractional part is rounded away

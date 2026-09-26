@@ -134,7 +134,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "feColorMatrixtypevaluessaturatehueRotateluminanceToAlphamatrix" ++
     "feComponentTransferfeFuncRfeFuncGfeFuncBfeFuncAtableValuestablediscretelineargammaidentityslopeinterceptamplitudeexponentoffset" ++
     "feCompositein2operatoroverinoutatopxorlighterarithmetick1k2k3k4" ++
-    "feBlendmodenormalmultiplyscreendarkenlightenoverlaycolor-dodgecolor-burnhard-lightsoft-lightdifferenceexclusionhuesaturationcolorluminosity";
+    "feBlendmodenormalmultiplyscreendarkenlightenoverlaycolor-dodgecolor-burnhard-lightsoft-lightdifferenceexclusionhuesaturationcolorluminosity" ++
+    "feTilefeMorphologyradiuserodedilate";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -944,6 +945,8 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feComponentTransfer><feFuncR type=\"table\" tableValues=\"1 0 1\"/><feFuncG type=\"discrete\" tableValues=\"0 1\"/><feFuncB type=\"gamma\" exponent=\"2\"/><feFuncA type=\"linear\" intercept=\"0.5\"/></feComponentTransfer></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"teal\" filter=\"url(#f)\"/></svg>",
     // The two-input primitives, reading a result and a source.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\" result=\"o\"/><feComposite in=\"SourceGraphic\" in2=\"o\" operator=\"arithmetic\" k1=\"1\" k2=\"0.5\" k3=\"0.5\" k4=\"-0.2\"/><feBlend in2=\"SourceAlpha\" mode=\"luminosity\"/></filter><rect width=\"4\" height=\"4\" fill=\"orange\" filter=\"url(#f)\"/></svg>",
+    // Morphology on the alpha, then tiled from a subregion.
+    "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"1 0.5\"/><feOffset x=\"1\" y=\"1\" width=\"2\" height=\"3\"/><feTile/><feMorphology radius=\"0.3\"/></filter><circle cx=\"3\" cy=\"3\" r=\"2\" fill=\"purple\" filter=\"url(#f)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

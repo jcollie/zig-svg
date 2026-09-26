@@ -146,6 +146,17 @@ DIVERGENCES = {
     # inputs summed. resvg does not know the operator and draws `over`, which
     # is what SVG 1.1 made the default. Measured at 1.213 and 2.865%.
     "filter-composite-lighter": (1.5, 0.035, "lighter is a sum; resvg does not know it and draws over"),
+    # `feTile` in linearRGB. resvg's `apply_tile` labels what it makes as
+    # sRGB whatever space its input was in, so a tile of linearRGB pixels is
+    # never converted back and comes out dark -- the same filter with
+    # `color-interpolation-filters="sRGB"`, `filter-tile`, agrees to a
+    # fraction of a level. Measured at 15.386 and 27.083%.
+    "filter-tile-linear": (16.0, 0.28, "resvg labels a tile sRGB whatever its input was, and never converts it back"),
+    # `feMorphology`. §15.18's window is centred on the pixel, `2r+1` wide,
+    # as Skia's is. resvg's is `2*ceil(r)` wide and reaches one pixel further
+    # left and up than right and down, so everything it erodes or dilates is
+    # a pixel out along two of its four edges. Measured at 1.881 and 1.900%.
+    "filter-morphology": (2.2, 0.022, "resvg's window is 2*ceil(r) wide and off centre by a pixel"),
     # Three marker fixtures, each where resvg departs from §11.6 and from
     # Firefox's marker code, and each kept apart from the fixtures that agree
     # so that those still hold markers to the ordinary tolerance.

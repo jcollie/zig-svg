@@ -102,6 +102,9 @@ pub const Error = error{
     BadCompositeOperator,
     /// An `feBlend` whose `mode` is not one of Compositing and Blending's.
     BadBlendMode,
+    /// An `feMorphology` whose `operator` is neither `erode` nor `dilate`, or
+    /// whose `radius` is not one or two numbers.
+    BadMorphology,
 } || color.Error || length.Error || document.Error || Allocator.Error;
 
 /// The most `href` links to follow before giving up.
@@ -174,6 +177,13 @@ pub const Kind = union(enum) {
     composite: struct { in: Input, in2: Input, operator: CompositeOperator, k: [4]f64 = @splat(0) },
     /// §15.9, with Filter Effects 1's modes: `in` blended over `in2`.
     blend: struct { in: Input, in2: Input, mode: BlendMode },
+    /// §15.20: the input's subregion repeated across this one's.
+    tile: struct { in: Input },
+    /// §15.18: each channel's least or greatest value over a rectangle
+    /// `radius_x` either side and `radius_y` above and below, in
+    /// `primitiveUnits`. Zero or less in either passes the input through, as
+    /// Filter Effects 1 has it.
+    morphology: struct { in: Input, dilate: bool, radius_x: f64, radius_y: f64 },
 };
 
 /// §15.12's `operator`, and Filter Effects 1's `lighter`.
@@ -520,6 +530,24 @@ fn readPrimitives(
                 .in2 = inputOf(tree, child, "in2"),
                 .mode = BlendMode.parse(mode_name) orelse return error.BadBlendMode,
             } };
+        } else if (std.mem.eql(u8, name, "feTile")) blk: {
+            break :blk .{ .tile = .{ .in = inputOf(tree, child, "in") } };
+        } else if (std.mem.eql(u8, name, "feMorphology")) blk: {
+            const op = trimmedAttr(tree, child, "operator") orelse "erode";
+            const dilate = if (std.mem.eql(u8, op, "dilate"))
+                true
+            else if (std.mem.eql(u8, op, "erode"))
+                false
+            else
+                return error.BadMorphology;
+            var buf: [2]f64 = undefined;
+            const r = try numberList(attr(tree, child, "radius") orelse "", &buf, error.BadMorphology);
+            break :blk .{ .morphology = .{
+                .in = inputOf(tree, child, "in"),
+                .dilate = dilate,
+                .radius_x = if (r.len > 0) r[0] else 0,
+                .radius_y = if (r.len > 1) r[1] else if (r.len > 0) r[0] else 0,
+            } };
         } else return error.UnsupportedFilterPrimitive;
 
         try prims.append(gpa, .{
@@ -854,5 +882,32 @@ test "an unknown operator or mode is refused" {
         var buf: [256]u8 = undefined;
         const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{case[0]});
         try testing.expectError(case[1], readTest(src));
+    }
+}
+
+test "a morphology radius is one number or two, and the operator one of two" {
+    var f = try primitivesOf("<feMorphology/>" ++
+        "<feMorphology operator=\"dilate\" radius=\"2\"/>" ++
+        "<feMorphology radius=\"1, 3\"/>" ++
+        "<feTile in=\"SourceAlpha\"/>");
+    defer f.deinit(testing.allocator);
+    const none = f.primitives[0].kind.morphology;
+    try testing.expect(!none.dilate);
+    // No radius is zero, which passes the input through.
+    try testing.expectEqual(@as(f64, 0), none.radius_x);
+    const both = f.primitives[1].kind.morphology;
+    try testing.expect(both.dilate);
+    try testing.expectEqual(@as(f64, 2), both.radius_y);
+    try testing.expectEqual(@as(f64, 3), f.primitives[2].kind.morphology.radius_y);
+    try testing.expectEqual(Input.source_alpha, f.primitives[3].kind.tile.in);
+
+    for ([_][]const u8{
+        "<feMorphology operator=\"open\"/>",
+        "<feMorphology radius=\"1 2 3\"/>",
+        "<feMorphology radius=\"wide\"/>",
+    }) |body| {
+        var buf: [256]u8 = undefined;
+        const src = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 8 8\"><filter id=\"f\">{s}</filter><rect width=\"8\" height=\"8\"/></svg>", .{body});
+        try testing.expectError(error.BadMorphology, readTest(src));
     }
 }

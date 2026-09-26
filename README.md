@@ -435,6 +435,22 @@ Inkscape writes every gradient it saves, was being ignored.
 
 [zig-css]: https://git.jcollie.dev/jeff/zig-css
 
+**A caller can add sheets of its own**, through `Options.stylesheets`. They
+are read as though they were `<style>` elements placed before everything in
+the document, so the document's own rules win a tie of specificity; but a rule
+of any kind outweighs a presentation attribute, so a caller's
+`path { fill: red }` beats a document's `fill="blue"`. That is how a picture is
+recoloured or outlined without editing it:
+
+```zig
+try svg.draw(gpa, &surface, source, box, .{
+    .stylesheets = &.{"path { fill: #ffff00; stroke: #ff0000; stroke-width: 1.5 }"},
+});
+```
+
+A `stroke-width` there is in the document's user units, like any other, so
+drawing a 24-unit icon at 72 pixels makes a width of 1 three pixels wide.
+
 What is refused rather than skipped: at-rules, pseudo-classes, pseudo-elements,
 namespace selectors, and the CSS 3 attribute operators. `@import` could not be
 implemented here in any case — fetching a stylesheet is the I/O that being

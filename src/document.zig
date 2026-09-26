@@ -2639,6 +2639,19 @@ pub const ReadOptions = struct {
     /// chosen when the caller says nothing.
     languages: []const []const u8 = default_languages,
 
+    /// Stylesheets from the caller, as CSS text, applied as though they were
+    /// `<style>` elements placed **before** everything in the document.
+    ///
+    /// Before, so that the document's own sheets win a tie of specificity,
+    /// as the later of two sheets does. A caller's sheet still beats a
+    /// presentation attribute -- `fill="blue"` loses to `path { fill: red }`
+    /// -- because an attribute has less weight than any stylesheet at all,
+    /// which is §6.4's rule and what makes this useful: it is how a caller
+    /// recolours or outlines a picture without editing it.
+    ///
+    /// Copied into the document, so they need not outlive the call.
+    stylesheets: []const []const u8 = &.{},
+
     pub const default_languages: []const []const u8 = &.{"en"};
 };
 
@@ -2677,7 +2690,7 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
     try indexIds(&doc);
     // Before anything reads a property, because from here on every one of them
     // goes through the cascade.
-    try readStylesheet(gpa, &doc);
+    try readStylesheet(gpa, &doc, options.stylesheets);
     try readRoot(&doc, root);
 
     var it = doc.paths();
@@ -2713,17 +2726,26 @@ fn indexIds(doc: *Document) Error!void {
     }
 }
 
-/// Parse every `<style>` element of the document into one stylesheet.
+/// Parse the caller's stylesheets and every `<style>` element of the document
+/// into one stylesheet.
 ///
 /// §6.2 makes them one sheet in document order, which is what breaks a
-/// specificity tie between two of them. The text of each is concatenated from
-/// its children, so a `<style>` written as CDATA -- which is how a document
-/// with a `>` in a selector has to write it -- reads the same as one written
-/// as plain text.
-fn readStylesheet(gpa: std.mem.Allocator, doc: *Document) Error!void {
+/// specificity tie between two of them; the caller's come first, so the
+/// document wins such a tie. The text of each `<style>` is concatenated from
+/// its children, so one written as CDATA -- which is how a document with a
+/// `>` in a selector has to write it -- reads the same as one written as plain
+/// text.
+fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []const u8) Error!void {
     const arena = doc.tree.alloc();
     var sources: std.ArrayList([]const u8) = .empty;
     defer sources.deinit(gpa);
+
+    // Into the tree's arena, for the same reason the `<style>` text below is:
+    // the parsed sheet slices into its sources and lives as long as the tree.
+    for (caller) |text| {
+        if (text.len == 0) continue;
+        try sources.append(gpa, try arena.dupe(u8, text));
+    }
 
     for (doc.tree.nodes.items, 0..) |node, id| {
         if (node.kind != .element) continue;

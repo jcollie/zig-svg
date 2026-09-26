@@ -250,6 +250,12 @@ pub const Options = struct {
     /// `systemLanguage` attribute is tested against. Borrowed for the render.
     /// See `document.ReadOptions.languages`.
     languages: []const []const u8 = document.ReadOptions.default_languages,
+
+    /// Stylesheets from the caller, applied before the document's own. See
+    /// `document.ReadOptions.stylesheets`: this is how a picture is recoloured
+    /// or outlined without editing it, since a stylesheet outweighs any
+    /// presentation attribute the document wrote.
+    stylesheets: []const []const u8 = &.{},
 };
 
 /// How the caller supplies a picture an `<image>` names by URL. See
@@ -376,7 +382,10 @@ pub const Box = struct {
 ///
 /// The caller owns the surface and releases it with `z2d.Surface.deinit`.
 pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!z2d.Surface {
-    var doc = try document.readWith(gpa, src, .{ .languages = opts.languages });
+    var doc = try document.readWith(gpa, src, .{
+        .languages = opts.languages,
+        .stylesheets = opts.stylesheets,
+    });
     defer doc.deinit();
 
     // The document's own size, which is what `width` and `height` say when it
@@ -411,7 +420,10 @@ pub fn draw(
     box: Box,
     opts: Options,
 ) Error!void {
-    var doc = try document.readWith(gpa, src, .{ .languages = opts.languages });
+    var doc = try document.readWith(gpa, src, .{
+        .languages = opts.languages,
+        .stylesheets = opts.stylesheets,
+    });
     defer doc.deinit();
     return drawDocument(gpa, surface, &doc, box, opts);
 }
@@ -6642,4 +6654,47 @@ test "word spacing goes after word separators, letter spacing after everything" 
     try testing.expectEqual(@as(f64, 11), spacingAfter(run, "\u{a0}"));
     try testing.expectEqual(@as(f64, 11), spacingAfter(run, "\u{1361}"));
     try testing.expectEqual(@as(f64, 1), spacingAfter(run, "\t"));
+}
+
+test "a caller's stylesheet recolours and outlines a picture without editing it" {
+    // A square in the middle of a 24-unit box, with nothing said about paint.
+    const plain =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 6H18V18H6Z"/></svg>
+    ;
+    var surface = try render(testing.allocator, plain, .{
+        .width = 48,
+        .height = 48,
+        .background = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } },
+        .stylesheets = &.{"path { fill: #00ff00; stroke: #0000ff; stroke-width: 2 }"},
+    });
+    defer surface.deinit(testing.allocator);
+
+    // The inside is the sheet's fill rather than the caller's default.
+    try testing.expectEqual(@as(u8, 255), surface.getPixel(24, 24).?.rgb.g);
+    // The edge, at 12 pixels, is under a stroke two units -- four pixels --
+    // wide, so a pixel just inside it is the stroke's colour.
+    const edge = surface.getPixel(13, 24).?.rgb;
+    try testing.expectEqual(@as(u8, 255), edge.b);
+    try testing.expectEqual(@as(u8, 0), edge.g);
+}
+
+test "a caller's stylesheet outweighs an attribute, and loses a tie to the document's own" {
+    const attributed =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#0000ff" d="M0 0H24V24H0Z"/></svg>
+    ;
+    var over = try render(testing.allocator, attributed, .{
+        .stylesheets = &.{"path { fill: #ff0000 }"},
+    });
+    defer over.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 255), over.getPixel(12, 12).?.rgba.r);
+
+    const styled =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><style>path { fill: #0000ff }</style><path d="M0 0H24V24H0Z"/></svg>
+    ;
+    var tie = try render(testing.allocator, styled, .{
+        .stylesheets = &.{"path { fill: #ff0000 }"},
+    });
+    defer tie.deinit(testing.allocator);
+    try testing.expectEqual(@as(u8, 255), tie.getPixel(12, 12).?.rgba.b);
+    try testing.expectEqual(@as(u8, 0), tie.getPixel(12, 12).?.rgba.r);
 }

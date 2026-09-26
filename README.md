@@ -522,8 +522,8 @@ short of the specification.
 | Path data — SVG 1.1 §8.3 | complete, every command in both spellings |
 | Elliptical arcs — appendix F.6 | complete, including the degenerate cases |
 | Several shapes | yes, painted in document order |
-| `<rect>` | yes, including `rx`/`ry` rounded corners |
-| `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>` | yes |
+| `<rect>` | yes, including `rx`/`ry` rounded corners, and SVG 2's `auto` for either |
+| `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>` | yes; an ellipse's radius that is `auto` or absent is the other one, as SVG 2 has it, so `<ellipse rx="8">` is a circle |
 | `<line>` | yes, and visible once stroked |
 | `<g>` | yes, nested, with inherited attributes |
 | `<use>`, `<defs>` | yes — `href` and `xlink:href`, forward references, chains |

@@ -2257,6 +2257,14 @@ pub const PathIterator = struct {
         return try length.parse(raw, axis, self.viewport);
     }
 
+    /// An `rx` or `ry`: a length, or null when it is absent or SVG 2's
+    /// `auto`, both of which mean "whatever the other one is".
+    fn radiusOf(self: *const PathIterator, node: ztree.NodeId, name: []const u8, axis: length.Axis) Error!?f64 {
+        const raw = self.attr(node, name) orelse return null;
+        if (std.mem.eql(u8, std.mem.trim(u8, raw, " \t\r\n"), "auto")) return null;
+        return try length.parse(raw, axis, self.viewport);
+    }
+
     /// A length that is also a presentation property, so `style` may carry it:
     /// `stroke-width`, `font-size`, `stroke-dashoffset`.
     fn optionalPresentationLength(
@@ -2340,9 +2348,10 @@ pub const PathIterator = struct {
                     .height = try self.lengthOf(node, "height", .y, 0),
                     // Null rather than zero: §9.2 makes one specified radius
                     // supply the other, which "not specified" has to be
-                    // distinguishable from zero to express.
-                    .rx = try self.optionalLengthOf(node, "rx", .x),
-                    .ry = try self.optionalLengthOf(node, "ry", .y),
+                    // distinguishable from zero to express. SVG 2's `auto`
+                    // says the same thing out loud.
+                    .rx = try self.radiusOf(node, "rx", .x),
+                    .ry = try self.radiusOf(node, "ry", .y),
                 },
             };
         }
@@ -2356,11 +2365,17 @@ pub const PathIterator = struct {
             } };
         }
         if (std.mem.eql(u8, name, "ellipse")) {
+            // SVG 2 §10.4: a radius that is `auto` -- which is also what an
+            // absent one is, `auto` being the initial value -- is the other
+            // one, so `<ellipse rx="8">` is a circle. SVG 1.1 drew nothing
+            // for it; resvg and Chrome both draw the circle.
+            const rx = try self.radiusOf(node, "rx", .x);
+            const ry = try self.radiusOf(node, "ry", .y);
             return .{ .ellipse = .{
                 .cx = try self.lengthOf(node, "cx", .x, 0),
                 .cy = try self.lengthOf(node, "cy", .y, 0),
-                .rx = try self.lengthOf(node, "rx", .x, 0),
-                .ry = try self.lengthOf(node, "ry", .y, 0),
+                .rx = rx orelse ry orelse 0,
+                .ry = ry orelse rx orelse 0,
             } };
         }
         if (std.mem.eql(u8, name, "line")) {
@@ -4666,4 +4681,22 @@ test "xml:space preserve keeps every run whole, from wherever it is set" {
     try testing.expect(got[2].preserve);
     try testing.expectEqualStrings("c\t", got[3].utf8);
     try testing.expectError(error.BadXmlSpace, read(gpa, "<svg viewBox=\"0 0 8 8\"><text xml:space=\"Preserve\">a</text></svg>"));
+}
+
+test "a radius that is auto, or absent from an ellipse, is the other one" {
+    const gpa = testing.allocator;
+    var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"4\" height=\"4\" rx=\"auto\" ry=\"1\"/>" ++
+        "<ellipse rx=\"3\"/><ellipse rx=\"auto\" ry=\"2\"/><ellipse ry=\"auto\"/></svg>");
+    defer doc.deinit();
+    var it = doc.paths();
+    const r = (try it.next()).?.shape.geometry.rect;
+    try testing.expectEqual(@as(?f64, null), r.rx);
+    try testing.expectEqual(@as(?f64, 1), r.ry);
+    const Want = struct { rx: f64, ry: f64 };
+    for ([_]Want{ .{ .rx = 3, .ry = 3 }, .{ .rx = 2, .ry = 2 }, .{ .rx = 0, .ry = 0 } }) |w| {
+        const e = (try it.next()).?.shape.geometry.ellipse;
+        try testing.expectEqual(w.rx, e.rx);
+        try testing.expectEqual(w.ry, e.ry);
+    }
+    try testing.expectError(error.BadLength, read(gpa, "<svg viewBox=\"0 0 8 8\"><ellipse rx=\"automatic\" ry=\"1\"/></svg>"));
 }

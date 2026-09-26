@@ -1397,12 +1397,6 @@ pub const PathIterator = struct {
         const owner = self.textOwnerOf(parent.node);
         const shift = try self.baselineShiftOf(owner);
         const decorations = try self.decorationsOf();
-        // Along a path a decoration follows the curve -- Chrome draws it so,
-        // and resvg draws none -- which is a layout of its own that this does
-        // not draw.
-        if (decorations.any() and try self.onPathOf(parent.node) != null) {
-            return error.UnsupportedTextLayout;
-        }
 
         // The whitespace between runs belongs to the whole `<text>`, so it is
         // decided here, in order, rather than run by run. A run that is only
@@ -4627,9 +4621,10 @@ test "a decoration takes the paint of the element that declared it" {
     try testing.expectEqual(@as(u8, 255), runs[1].decorations.underline.?.fill.?.color.b);
     try testing.expectEqual(@as(u8, 255), runs[1].decorations.line_through.?.fill.?.color.b);
     try testing.expectError(error.BadTextDecoration, read(gpa, "<svg viewBox=\"0 0 8 8\"><text text-decoration=\"blink\">a</text></svg>"));
-    // Broken glyph by glyph along a path, which is not drawn.
-    try testing.expectError(error.UnsupportedTextLayout, read(gpa, "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 0 L8 8\"/>" ++
-        "<text text-decoration=\"underline\"><textPath href=\"#p\">a</textPath></text></svg>"));
+    // Along a path too, in a piece under each glyph.
+    var along = try read(gpa, "<svg viewBox=\"0 0 8 8\"><path id=\"p\" d=\"M0 0 L8 8\"/>" ++
+        "<text text-decoration=\"underline\"><textPath href=\"#p\">a</textPath></text></svg>");
+    along.deinit();
 }
 
 test "an alignment baseline wins over the dominant one, which is inherited" {

@@ -230,6 +230,11 @@ DIVERGENCES = {
     # laid glyph by glyph on a straight baseline agrees to a level. Measured at
     # 1.304 and 1.074%.
     "text-spacing-on-path": (1.5, 0.012, "resvg places glyphs on a path only to a quarter of a unit"),
+    # Decorations along the same kind of path: a piece under each glyph, as
+    # resvg draws them too, and those pieces agree. The difference is on the
+    # glyphs, placed on the curve to resvg's quarter of a unit as above.
+    # Measured at 1.261 and 1.138%.
+    "text-decoration-path": (1.5, 0.013, "resvg places glyphs on a path only to a quarter of a unit"),
     # A text decoration under `paint-order: stroke`. This paints a decoration
     # in its text's order, stroke and then fill; resvg paints every
     # decoration fill then stroke whatever the order says, so under a stroke

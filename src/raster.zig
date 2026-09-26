@@ -996,7 +996,7 @@ fn paintDecoration(
     opts: Options,
 ) Error!void {
     const paint = declared orelse return;
-    if (!(span.run_x1 > span.run_x0)) return;
+    if (span.run_glyphs.len == 0 and !(span.run_x1 > span.run_x0)) return;
     const size = shape.font_size orelse 16;
     if (!(size > 0)) return;
     const font = try faceFor(shape, opts);
@@ -1025,6 +1025,7 @@ fn paintDecoration(
         var w: std.Io.Writer.Allocating = .init(gpa);
         errdefer w.deinit();
         for (span.run_glyphs) |g| {
+            if (g.hidden) continue;
             var frame = z2d.Transformation.identity.translate(g.x, g.y);
             if (g.rotate != 0) frame = frame.rotate(g.rotate * std.math.pi / 180.0);
             if (g.scale != 1) frame = frame.scale(g.scale, 1);
@@ -3796,6 +3797,11 @@ const TextLayout = struct {
         /// Where it is in its run's collapsed characters.
         start: usize,
         end: usize,
+        /// Laid along a `<textPath>`'s shape, which chunks and `textLength`
+        /// leave alone.
+        on_path: bool = false,
+        /// Off either end of that shape, and so not drawn at all.
+        hidden: bool = false,
     };
 
     fn deinit(self: *TextLayout, gpa: Allocator) void {
@@ -3993,9 +3999,9 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
     for (runs.items) |*r| {
         var place: TextLayout.RunPlace = .{ .first = out.glyphs.items.len, .count = 0 };
         const n = r.bounds.len - 1;
-        // Laid along its shape by `buildOnPath`, which takes a character's
-        // place in the count and none of the line.
-        if (r.run.on_path != null or r.font == null) {
+        // With no characters, or no font to lay them out in, it takes no
+        // room at all.
+        if (r.font == null) {
             place.x0 = pen_x;
             place.x1 = pen_x;
             place.baseline = pen_y;
@@ -4006,6 +4012,20 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
         var font = r.font.?;
         const shift = baselineShift(r.run, &font, r.size);
         const text_opts: z2d.text.ShowTextOptions = .{ .size = r.size };
+        if (r.run.on_path) |on_path| {
+            try placeOnPath(gpa, doc, &out, r.run, on_path, &font, text_opts, r.text, r.bounds, shift, opts);
+            // It takes a character's place in the count and none of the
+            // line: what follows carries on from where the line had got to.
+            place.count = n;
+            place.whole = false;
+            place.broken = true;
+            place.x0 = pen_x;
+            place.x1 = pen_x;
+            place.baseline = pen_y;
+            try out.by_run.put(gpa, TextLayout.keyOf(r.run), out.runs.items.len);
+            try out.runs.append(gpa, place);
+            continue;
+        }
         for (0..n) |i| {
             const g = r.index + i;
             const abs_x = pick.value(&lists, &starts, tree, r.run.element, owner, g, .x);
@@ -4174,20 +4194,29 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
 
     // §10.9: each chunk is moved by its anchor, measured from its first
     // glyph to the end of its last, less the letter-spacing after that.
+    // Glyphs on a path are placed by it, and have no part in this.
     var c: usize = 0;
     while (c < glyphs.len) {
         var e = c + 1;
         while (e < glyphs.len and !glyphs[e].chunk) : (e += 1) {}
-        const end = glyphs[e - 1].x + glyphs[e - 1].advance - glyphs[e - 1].trail;
-        const width = end - glyphs[c].x;
-        const move: f64 = switch (glyphs[c].anchor) {
-            .start => 0,
-            .middle => -width / 2,
-            .end => -width,
+        var first: ?usize = null;
+        var last: usize = c;
+        for (c..e) |k| if (!glyphs[k].on_path) {
+            if (first == null) first = k;
+            last = k;
         };
-        if (move != 0) for (glyphs[c..e]) |*gl| {
-            gl.x += move;
-        };
+        if (first) |f| {
+            const end = glyphs[last].x + glyphs[last].advance - glyphs[last].trail;
+            const width = end - glyphs[f].x;
+            const move: f64 = switch (glyphs[f].anchor) {
+                .start => 0,
+                .middle => -width / 2,
+                .end => -width,
+            };
+            if (move != 0) for (glyphs[c..e]) |*gl| {
+                if (!gl.on_path) gl.x += move;
+            };
+        }
         c = e;
     }
 
@@ -4201,6 +4230,74 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
         rp.baseline = a.y;
     }
     return out;
+}
+
+/// Lay a run along a `<textPath>`'s shape, appending a place for each glyph.
+///
+/// §10.13. Each glyph is placed so that the **middle of its advance** sits on
+/// the path at the right distance, turned to the tangent there -- the middle
+/// rather than the start, because a glyph turned about its own left edge on a
+/// tight curve leans away from the line it is meant to sit on -- and moved off
+/// the curve along its normal by any baseline shift.
+///
+/// A glyph whose midpoint falls off either end of the path is not drawn, which
+/// is what the specification says to do and is why a string longer than its
+/// path simply stops.
+fn placeOnPath(
+    gpa: Allocator,
+    doc: *const document.Document,
+    out: *TextLayout,
+    run: shapes.Text,
+    on_path: shapes.OnPath,
+    font: *z2d.Font,
+    text_opts: z2d.text.ShowTextOptions,
+    text: []const u8,
+    bounds: []const usize,
+    shift: f64,
+    opts: Options,
+) Error!void {
+    var arc: Arc = .{};
+    defer arc.deinit(gpa);
+    try measurePath(gpa, doc, on_path.node, &arc, opts);
+    const start = switch (on_path.offset) {
+        .absolute => |v| v,
+        .fraction => |f| f * arc.total(),
+    };
+    const n = bounds.len - 1;
+    var along = start;
+    for (0..n) |i| {
+        const glyph = text[bounds[i]..bounds[i + 1]];
+        const step = try glyphStep(gpa, font, text, bounds, i, n, text_opts);
+        // The point that sits on the curve is the middle of the glyph
+        // itself -- its own width, not the step to the next, which carries
+        // the kerning with its neighbour and the spacing after it -- and the
+        // glyph is turned about it. That is resvg's placement, and it keeps a
+        // kerned pair from pushing a glyph off its own midpoint.
+        const width = try measureText(gpa, font, glyph, text_opts);
+        const advance = step + spacingAfter(run, glyph);
+        var place: TextLayout.GlyphPlace = .{
+            .x = 0,
+            .y = 0,
+            .advance = advance,
+            .trail = run.letter_spacing,
+            .start = bounds[i],
+            .end = bounds[i + 1],
+            .on_path = true,
+            .hidden = true,
+        };
+        if (arc.total() > 0) if (arc.at(along + width / 2)) |spot| {
+            // The glyph's origin: back half its width along the tangent, and
+            // off the curve by the shift, from the point on it.
+            const cos = @cos(spot.angle);
+            const sin = @sin(spot.angle);
+            place.x = spot.x + cos * (-width / 2) - sin * (-shift);
+            place.y = spot.y + sin * (-width / 2) + cos * (-shift);
+            place.rotate = spot.angle * 180.0 / std.math.pi;
+            place.hidden = false;
+        };
+        try out.glyphs.append(gpa, place);
+        along += advance;
+    }
 }
 
 /// Build a `<text>` run's glyph outlines into `p`, under `ctm`.
@@ -4248,12 +4345,6 @@ fn buildText(
     if (collapsed.len == 0) return;
     var font = try faceFor(shape, opts);
 
-    // §10.13: a run inside a `<textPath>` follows a shape rather than a
-    // line, which is a different placement for every glyph.
-    if (run.on_path) |on_path| {
-        try buildOnPath(gpa, p, &font, collapsed, run, on_path, size, pen, ctm, doc, build_opts, opts);
-        return;
-    }
     if (place.count == 0) return;
 
     const baseline = font.baselineOffset(size);
@@ -4283,6 +4374,7 @@ fn buildText(
         return;
     }
     for (glyphs) |g| {
+        if (g.hidden) continue;
         // Each glyph is turned about its own origin, which is where it sits
         // on the baseline rather than the corner of its ink, and stretched
         // along the line from there.
@@ -4314,87 +4406,6 @@ fn withinBudget(p: *const z2d.Path, adding: usize, opts: path.Options) Error!voi
     const after = std.math.add(usize, p.nodes.items.len, adding) catch
         std.math.maxInt(usize);
     if (after > ceiling) return error.PathTooComplex;
-}
-
-/// Lay a run along a `<textPath>`'s shape.
-///
-/// §10.13. Each glyph is placed so that the **middle of its advance** sits on
-/// the path at the right distance, turned to the tangent there -- the middle
-/// rather than the start, because a glyph turned about its own left edge on a
-/// tight curve leans away from the line it is meant to sit on.
-///
-/// A glyph whose midpoint falls off either end of the path is not drawn, which
-/// is what the specification says to do and is why a string longer than its
-/// path simply stops.
-fn buildOnPath(
-    gpa: Allocator,
-    p: *z2d.Path,
-    font: *z2d.Font,
-    utf8: []const u8,
-    run: shapes.Text,
-    on_path: shapes.OnPath,
-    size: f64,
-    pen: *Pen,
-    ctm: z2d.Transformation,
-    doc: *const document.Document,
-    build_opts: path.Options,
-    opts: Options,
-) Error!void {
-    var arc: Arc = .{};
-    defer arc.deinit(gpa);
-    try measurePath(gpa, doc, on_path.node, &arc, opts);
-    if (arc.total() <= 0) return;
-
-    const start = switch (on_path.offset) {
-        .absolute => |v| v,
-        .fraction => |f| f * arc.total(),
-    };
-
-    const text_opts: z2d.text.ShowTextOptions = .{ .size = size };
-    var bounds: std.ArrayListUnmanaged(usize) = .empty;
-    defer bounds.deinit(gpa);
-    try splitCodepoints(gpa, utf8, &bounds);
-    const count = bounds.items.len - 1;
-    if (count == 0) return;
-
-    const baseline = font.baselineOffset(size);
-    // Along a path, a shift moves the glyph off the curve along its normal.
-    const shift = baselineShift(run, font, size);
-    var along = start;
-    for (0..count) |i| {
-        const glyph = utf8[bounds.items[i]..bounds.items[i + 1]];
-        const step = try glyphStep(gpa, font, utf8, bounds.items, i, count, text_opts);
-        // The point that sits on the curve is the middle of the glyph
-        // itself -- its own width, not the step to the next, which carries
-        // the kerning with its neighbour and the spacing after it -- and the
-        // glyph is turned about it. That is resvg's placement, and it keeps a
-        // kerned pair from pushing a glyph off its own midpoint.
-        const width = try measureText(gpa, font, glyph, text_opts);
-        const advance = step + spacingAfter(run, glyph);
-        if (arc.at(along + width / 2)) |spot| {
-            const placement = ctm
-                .translate(spot.x, spot.y)
-                .rotate(spot.angle)
-                .translate(-width / 2, -shift);
-            var one = z2d.text.outline(
-                gpa,
-                font,
-                glyph,
-                0,
-                -baseline,
-                .{ .size = size, .transformation = placement },
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.BadFont,
-            };
-            defer one.deinit(gpa);
-            try withinBudget(p, one.nodes.items.len, build_opts);
-            try document.checkInRange(one.nodes.items);
-            try p.nodes.appendSlice(gpa, one.nodes.items);
-        }
-        along += advance;
-    }
-    _ = pen;
 }
 
 /// The shape a `<textPath>` names, flattened and measured.

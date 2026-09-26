@@ -144,24 +144,28 @@ pub fn append(path: *z2d.Path, alloc: std.mem.Allocator, p: Params) Error!void {
         const d2x = -rx * cos_phi * sin_b - ry * sin_phi * cos_b;
         const d2y = -rx * sin_phi * sin_b + ry * cos_phi * cos_b;
 
+        // The last cubic ends at the arc's endpoint up to rounding, but the
+        // command names that endpoint exactly and a subpath that closes back
+        // to it should not be a hair short: F.6.5's own note says to use the
+        // given values rather than the computed ones. So it ends *on* them.
+        //
+        // It used to get there by a line from the computed point, which was
+        // right to the eye and wrong to a marker: that line is a sliver a
+        // rounding error long pointing wherever the error pointed, and a
+        // marker at the arc's end took its direction from it.
+        const last = i + 1 == segments;
         try path.curveTo(
             alloc,
             p1x + alpha * d1x,
             p1y + alpha * d1y,
             p2x - alpha * d2x,
             p2y - alpha * d2y,
-            p2x,
-            p2y,
+            if (last) p.x2 else p2x,
+            if (last) p.y2 else p2y,
         );
 
         theta = theta_next;
     }
-
-    // The last cubic ends at the arc's endpoint up to rounding, but the
-    // command names that endpoint exactly and a subpath that closes back to it
-    // should not be a hair short. F.6.5's own note says to use the given
-    // values rather than the computed ones.
-    try path.lineTo(alloc, p.x2, p.y2);
 }
 
 /// The signed angle from `(ux, uy)` to `(vx, vy)`, as F.6.5.4 defines it.
@@ -231,7 +235,12 @@ test "a half-circle ends exactly where the command says" {
         .large_arc = false,
         .sweep = true,
     });
+    // Exactly, and by the last cubic itself: two quarter turns and nothing
+    // after them. A line onto the endpoint from where rounding left the
+    // cubic would be a sliver pointing wherever the rounding did, and a
+    // marker at the end of the arc would face that way.
+    try std.testing.expectEqual(@as(usize, 3), path.nodes.items.len);
     const last = path.nodes.items[path.nodes.items.len - 1];
-    try std.testing.expectApproxEqAbs(@as(f64, 20), last.line_to.point.x, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0), last.line_to.point.y, 1e-9);
+    try std.testing.expectEqual(@as(f64, 20), last.curve_to.p3.x);
+    try std.testing.expectEqual(@as(f64, 0), last.curve_to.p3.y);
 }

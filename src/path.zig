@@ -529,12 +529,12 @@ test "arc flags are single characters and are not separated" {
     // the flag as a number would take `011` and shift everything along.
     var path = try buildOne(testing.allocator, "M0 0a1 1 0 011 1z");
     defer path.deinit(testing.allocator);
-    // The arc ends with a `lineTo` onto the endpoint the command names, and
-    // `z` then appends a `close_path` and an implicit `move_to`, so the
-    // endpoint is three from the end.
+    // The arc's last cubic ends on the endpoint the command names, and `z`
+    // then appends a `close_path` and an implicit `move_to`, so the endpoint
+    // is three from the end.
     const endpoint = path.nodes.items[path.nodes.items.len - 3];
-    try testing.expectApproxEqAbs(@as(f64, 1), endpoint.line_to.point.x, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 1), endpoint.line_to.point.y, 1e-9);
+    try testing.expectEqual(@as(f64, 1), endpoint.curve_to.p3.x);
+    try testing.expectEqual(@as(f64, 1), endpoint.curve_to.p3.y);
 }
 
 test "data that does not begin with a moveto is refused" {

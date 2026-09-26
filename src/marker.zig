@@ -295,3 +295,19 @@ test "a lone moveto is a start and an end at once" {
     try testing.expectEqual(@as(usize, 1), v.items.len);
     try testing.expect(v.items[0].start and v.items[0].end);
 }
+
+test "a marker at the end of an arc faces along it, whatever the rounding" {
+    // A circle of arcs, placed where its points are not exact in floating
+    // point. Each arc used to end with a line onto its endpoint from where
+    // the cubic's rounding left it, and a marker there faced along that
+    // sliver instead. Chrome draws every one of these along the circle.
+    var v = try verticesOf("M28.3 20.1 A8.7 8.7 0 0 1 19.6 28.8 A8.7 8.7 0 0 1 10.9 20.1 A8.7 8.7 0 0 1 19.6 11.4 A8.7 8.7 0 0 1 28.3 20.1 Z");
+    defer v.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 6), v.items.len);
+    try expectVertex(v.items[1], 19.6, 28.8, 180);
+    try expectVertex(v.items[2], 10.9, 20.1, -90);
+    try expectVertex(v.items[3], 19.6, 11.4, 0);
+    // The last arc ends on the start, so the `Z` has no length and the
+    // vertex takes the arc's direction.
+    try expectVertex(v.items[4], 28.3, 20.1, 90);
+}

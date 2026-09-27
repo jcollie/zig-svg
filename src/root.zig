@@ -72,7 +72,7 @@ const std = @import("std");
 
 /// Reading an `<svg>` element far enough to draw what is in it.
 pub const document = @import("document.zig");
-/// The colour syntax a presentation attribute is written in.
+/// The color syntax a presentation attribute is written in.
 pub const color = @import("color.zig");
 /// The `transform` attribute, as one matrix.
 pub const transform = @import("transform.zig");
@@ -85,7 +85,7 @@ pub const pattern = @import("pattern.zig");
 pub const filter = @import("filter.zig");
 /// The pixel operations those primitives are made of.
 pub const image = @import("image.zig");
-/// The rest of them: the colour, compositing and neighbourhood operations.
+/// The rest of them: the color, compositing and neighborhood operations.
 pub const fe = @import("fe.zig");
 /// The pictures an `<image>` names: fetched from a `data:` URL or the
 /// caller, decoded by z2dimg, and kept for the length of a render.
@@ -130,7 +130,7 @@ pub const Shape = document.Shape;
 pub const Image = document.Image;
 /// What a drawable element contributes: a `d`, or a basic shape's numbers.
 pub const Geometry = shapes.Geometry;
-/// A colour, in straight alpha.
+/// A color, in straight alpha.
 pub const Color = color.Color;
 /// What a `fill` attribute can say.
 pub const Paint = color.Paint;

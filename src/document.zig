@@ -46,12 +46,12 @@
 //! inherited property. A `transform` on any element composes with its
 //! ancestors'.
 //!
-//! A shape that names no `fill` is painted in the colour the *caller* chose,
+//! A shape that names no `fill` is painted in the color the *caller* chose,
 //! not in SVG's initial black. That is a deliberate difference, and it is the
-//! whole reason a caller can draw a Material Design Icon in any colour: not
+//! whole reason a caller can draw a Material Design Icon in any color: not
 //! one of the 7,447 carries a `fill`, so under the letter of the specification
 //! the set could only ever be black. `fill="currentColor"`, which many other
-//! icon sets use instead, lands on the same caller's colour by the honest
+//! icon sets use instead, lands on the same caller's color by the honest
 //! route -- it is the initial value of the `color` property, and the caller
 //! chooses that too. A `stroke` works the other way round: naming none means
 //! *no stroke*, because SVG's initial `stroke` is `none` and a shape stroked
@@ -111,7 +111,7 @@ pub const Error = error{
     /// mean.
     NoSize,
     /// A `stroke-linecap`, `stroke-linejoin` or `stroke-miterlimit` this
-    /// reader does not recognise. Like `fill-rule`, these are XML attribute
+    /// reader does not recognize. Like `fill-rule`, these are XML attribute
     /// values rather than CSS keywords, so they are matched with regard to
     /// case: `stroke-linecap="ROUND"` is not `round`.
     BadStrokeStyle,
@@ -289,7 +289,7 @@ pub const PreserveAspectRatio = struct {
     pub const Align = enum { min, mid, max };
 
     /// The default, which is what a document that says nothing gets.
-    pub const meet_centred: PreserveAspectRatio = .{};
+    pub const meet_centered: PreserveAspectRatio = .{};
 
     /// The fraction of the leftover space that goes *before* the viewBox.
     fn fraction(a: Align) f64 {
@@ -346,7 +346,7 @@ pub const PreserveAspectRatio = struct {
 ///
 /// Null in each field means nothing has named it, so the caller's choice
 /// stands. That is what lets `Options.fill` be the default for a document that
-/// names no colour anywhere, which is every icon set worth drawing.
+/// names no color anywhere, which is every icon set worth drawing.
 pub const Inherited = struct {
     fill: ?color.Paint = null,
     fill_opacity: ?f64 = null,
@@ -358,14 +358,14 @@ pub const Inherited = struct {
     /// The `color` property, which is what a `fill` or `stroke` of
     /// `currentColor` resolves to.
     current_color: ?color.Color = null,
-    /// The used colour scheme where `color-scheme` is declared, which is
+    /// The used color scheme where `color-scheme` is declared, which is
     /// what a `light-dark()` chooses by here and below. See
     /// `color.usedScheme`.
     color_scheme: ?color.Scheme = null,
     /// A `color` that waits on `currentColor` -- `light-dark(currentColor,
-    /// white)` -- which is the parent's colour, and which no ancestor has
+    /// white)` -- which is the parent's color, and which no ancestor has
     /// named yet: the caller's, then, which only the renderer knows. One whose
-    /// parent does have a colour is resolved against it when inherited.
+    /// parent does have a color is resolved against it when inherited.
     current_deferred: ?color.Deferred = null,
 
     stroke: ?color.Paint = null,
@@ -446,8 +446,8 @@ pub const Inherited = struct {
                 (if (self.current_color) |c| d.resolve(c, child.color_scheme orelse self.color_scheme orelse .light) else null)
             else
                 self.current_color,
-            // Still waiting only when nothing above had a colour to give it.
-            // (One waiting under another waiting takes the caller's colour as
+            // Still waiting only when nothing above had a color to give it.
+            // (One waiting under another waiting takes the caller's color as
             // its own `currentColor`, rather than the one above's.)
             .current_deferred = if (child.current_color != null)
                 null
@@ -554,9 +554,9 @@ pub const Image = struct {
     blend: BlendMode = .normal,
     /// The `color` in force, which a `currentColor` in its filter resolves to.
     current_color: ?color.Color,
-    /// The used colour scheme, which a `light-dark()` in its filter chooses by.
+    /// The used color scheme, which a `light-dark()` in its filter chooses by.
     color_scheme: color.Scheme = .light,
-    /// A `color` still waiting on the caller's colour; see
+    /// A `color` still waiting on the caller's color; see
     /// `Inherited.current_deferred`.
     current_deferred: ?color.Deferred = null,
     /// False under `visibility: hidden`; see `Shape.visible`.
@@ -591,10 +591,10 @@ pub const Group = struct {
     /// inside its filter resolves to. Carried because a filter's own elements
     /// inherit nothing from the document -- they are in `<defs>`.
     current_color: ?color.Color,
-    /// The used colour scheme on the container, which a `light-dark()` in
+    /// The used color scheme on the container, which a `light-dark()` in
     /// its filter chooses by.
     color_scheme: color.Scheme = .light,
-    /// A `color` still waiting on the caller's colour; see
+    /// A `color` still waiting on the caller's color; see
     /// `Inherited.current_deferred`.
     current_deferred: ?color.Deferred = null,
     /// The user-space matrix in force on the container, which is the space the
@@ -652,7 +652,7 @@ const Refs = struct {
 /// One drawable element, with the paint and the transform that apply to it.
 /// The paint of the element that declared a text decoration, which is what
 /// the decoration is painted with -- SVG 1.1 §10.12: an underline declared on
-/// a `<text>` stays the `<text>`'s colour under a `<tspan>` of another.
+/// a `<text>` stays the `<text>`'s color under a `<tspan>` of another.
 pub const DecorationPaint = struct {
     fill: ?color.Paint,
     fill_opacity: ?f64,
@@ -674,7 +674,7 @@ pub const Decorations = struct {
 };
 
 /// The paints `context-fill` and `context-stroke` stand for. A null fill is
-/// the caller's colour, as an unset `fill` is; a null stroke is none.
+/// the caller's color, as an unset `fill` is; a null stroke is none.
 pub const Context = struct {
     fill: ?color.Paint = null,
     stroke: ?color.Paint = null,
@@ -685,7 +685,7 @@ pub const Context = struct {
 
     /// The context a shape or `<use>` with `inherited` makes for what is
     /// drawn in its name: its own paints, with a `currentColor` taken as its
-    /// own colour, and a `context-*` of its own as the context it is in.
+    /// own color, and a `context-*` of its own as the context it is in.
     pub fn of(inherited: Inherited) Context {
         return .{
             .fill = pin(inherited.fill, inherited),
@@ -740,16 +740,16 @@ pub const Shape = struct {
     /// Anything it borrows comes from the tree's arena.
     geometry: shapes.Geometry,
     /// What to paint it with, after inheritance. Null means nothing named a
-    /// `fill`, so the caller's colour stands.
+    /// `fill`, so the caller's color stands.
     fill: ?color.Paint,
     fill_opacity: ?f64,
     fill_rule: ?z2d.options.FillRule,
     clip_rule: ?z2d.options.FillRule,
     current_color: ?color.Color,
-    /// The used colour scheme, which a `light-dark()` in its filter chooses
+    /// The used color scheme, which a `light-dark()` in its filter chooses
     /// by.
     color_scheme: color.Scheme = .light,
-    /// A `color` still waiting on the caller's colour; see
+    /// A `color` still waiting on the caller's color; see
     /// `Inherited.current_deferred`.
     current_deferred: ?color.Deferred = null,
     stroke: ?color.Paint,
@@ -870,7 +870,7 @@ pub const Document = struct {
     /// What measures an element for `transform-box: fill-box`, installed by
     /// the rasterizer for as long as it is drawing. See `Measurer`.
     measurer: ?Measurer = null,
-    /// The colour scheme the reader prefers, which a `color-scheme` in the
+    /// The color scheme the reader prefers, which a `color-scheme` in the
     /// document may take up: see `color.usedScheme`.
     preferred_scheme: css.media.ColorScheme = .light,
     /// Whether a media query decided anything in reading its styles -- a
@@ -925,7 +925,7 @@ pub const Document = struct {
     ///
     /// A clip drops the `open_group` and `close_group` items it yields --
     /// §14.3 makes a clip the union of its shapes whatever they are nested in,
-    /// and there is nothing to composite inside an alpha mask. A mask honours
+    /// and there is nothing to composite inside an alpha mask. A mask honors
     /// them, because a `<g opacity="0.5">` inside one is half as opaque and so
     /// masks half as much.
     pub fn subtree(
@@ -1282,9 +1282,9 @@ pub const PathIterator = struct {
     /// The element `boxWalk` is measuring, whose own transform -- and, for
     /// a `<use>`, `x` and `y` -- the walk leaves out.
     measuring: ?ztree.NodeId = null,
-    /// The used colour scheme of the element whose attributes are being
+    /// The used color scheme of the element whose attributes are being
     /// read's parent, set beside `viewport.font_size` before each read: what
-    /// its colours are read in unless it declares a `color-scheme` of its own.
+    /// its colors are read in unless it declares a `color-scheme` of its own.
     scheme: color.Scheme = .light,
 
     /// Whitespace across the runs of one `<text>`: which element the runs
@@ -1834,7 +1834,7 @@ pub const PathIterator = struct {
         const par: PreserveAspectRatio = if (self.attr(node, "preserveAspectRatio")) |v|
             try PreserveAspectRatio.parse(v)
         else
-            .meet_centred;
+            .meet_centered;
         const vb: ?ViewBox = if (self.attr(node, "viewBox")) |v| try parseViewBox(v) else null;
         const place: z2d.Transformation = z2d.Transformation.identity.translate(x, y);
         const content = if (vb) |b| place.mul(viewBoxTransform(b, par, 0, 0, width, height)) else place;
@@ -2212,7 +2212,7 @@ pub const PathIterator = struct {
             .preserve_aspect_ratio = if (self.attr(node, "preserveAspectRatio")) |v|
                 try PreserveAspectRatio.parse(v)
             else
-                .meet_centred,
+                .meet_centered,
             .sampling = effective.image_rendering orelse .smooth,
             .visible = effective.visible orelse true,
             .opacity = try self.opacityOf(node),
@@ -2396,13 +2396,13 @@ pub const PathIterator = struct {
         const font_size = try self.optionalPresentationLength(node, "font-size", .other);
         var own = self.viewport;
         if (font_size) |size| own.font_size = size;
-        // And the scheme, which this element's own colours are read in.
+        // And the scheme, which this element's own colors are read in.
         const own_scheme: ?color.Scheme = if (self.presentation(node, "color-scheme")) |v|
             color.usedScheme(v, self.doc.preferred_scheme)
         else
             null;
         const scheme = own_scheme orelse self.scheme;
-        // `color`, which may wait on `currentColor` -- the parent's colour.
+        // `color`, which may wait on `currentColor` -- the parent's color.
         var current_color: ?color.Color = null;
         var current_deferred: ?color.Deferred = null;
         if (self.presentation(node, "color")) |v| {
@@ -2723,7 +2723,7 @@ fn isIgnorable(name: []const u8) bool {
         "symbol",           "marker",         "filter",
         // Never rendered, whatever is in them: a view is a way to look at the
         // picture, a script and a cursor are for a viewer that runs one, and
-        // a colour profile serves only `icc-color`, which is refused where it
+        // a color profile serves only `icc-color`, which is refused where it
         // is used. Passing over them is the picture, not a part of it
         // missing.
           "view",     "script",
@@ -2745,13 +2745,13 @@ fn localIs(tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) bo
 
 /// `nonzero` or `evenodd`, and nothing else.
 ///
-/// Matched with regard to case, unlike a colour name. The difference is real
-/// and it is not an inconsistency: a colour keyword is CSS, where keywords are
+/// Matched with regard to case, unlike a color name. The difference is real
+/// and it is not an inconsistency: a color keyword is CSS, where keywords are
 /// ASCII case-insensitive, while this is an XML attribute value, where they
 /// are not. resvg draws `fill-rule="EVENODD"` with the nonzero rule, which is
 /// the same reading.
 /// §10.9's `text-anchor`. Matched with regard to case, like the other
-/// presentation attributes that are not colours.
+/// presentation attributes that are not colors.
 fn parseTextAnchor(raw: []const u8) Error!TextAnchor {
     const t = std.mem.trim(u8, raw, " \t\r\n");
     if (std.mem.eql(u8, t, "start")) return .start;
@@ -2830,7 +2830,7 @@ fn parseVisibility(raw: []const u8) Error!bool {
 /// is the only difference any renderer draws: `optimizeQuality` and
 /// `high-quality` are what `auto` already does here, and `crisp-edges` asks
 /// for "an algorithm that preserves contrast" which in practice every
-/// implementation, resvg included, answers with nearest-neighbour.
+/// implementation, resvg included, answers with nearest-neighbor.
 pub fn parseImageRendering(raw: []const u8) Error!resample.Sampling {
     const t = std.mem.trim(u8, raw, " \t\r\n");
     const smooth = [_][]const u8{ "auto", "optimizeQuality", "smooth", "high-quality" };
@@ -2877,7 +2877,7 @@ fn parseRenderingHint(raw: []const u8, crisp: []const []const u8, smooth: []cons
     return error.BadRenderingHint;
 }
 
-/// `transform-origin`: where in `box` a transform is centred, in the same
+/// `transform-origin`: where in `box` a transform is centered, in the same
 /// user space as `box`.
 ///
 /// CSS Transforms 1 §5's grammar: one position, which leaves the other at
@@ -3151,7 +3151,7 @@ pub const MarkerSpec = struct {
     /// `userSpaceOnUse` does not.
     stroke_width_units: bool = true,
     view_box: ?ViewBox = null,
-    preserve_aspect_ratio: PreserveAspectRatio = .meet_centred,
+    preserve_aspect_ratio: PreserveAspectRatio = .meet_centered,
     /// Whether the viewport clips, which it does unless `overflow` is
     /// visible or auto.
     clips: bool = true,
@@ -3188,7 +3188,7 @@ pub const ReadOptions = struct {
     /// presentation attribute -- `fill="blue"` loses to `path { fill: red }`
     /// -- because an attribute has less weight than any stylesheet at all,
     /// which is §6.4's rule and what makes this useful: it is how a caller
-    /// recolours or outlines a picture without editing it.
+    /// recolors or outlines a picture without editing it.
     ///
     /// Copied into the document, so they need not outlive the call.
     stylesheets: []const []const u8 = &.{},
@@ -3250,7 +3250,7 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
         .view_box = null,
         .width = 0,
         .height = 0,
-        .preserve_aspect_ratio = .meet_centred,
+        .preserve_aspect_ratio = .meet_centered,
         .shape_count = 0,
         .root = .{},
         .stylesheet = .{},
@@ -3338,7 +3338,7 @@ fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []cons
         try sources.append(gpa, text);
     }
     if (sources.items.len == 0) return;
-    // `.svg2`: as strict as SVG 1.1's CSS -- what it cannot honour is
+    // `.svg2`: as strict as SVG 1.1's CSS -- what it cannot honor is
     // refused, not dropped -- with the structural and logical
     // pseudo-classes, the later attribute tests, namespaces, and `@media`,
     // answered in `env`. A state pseudo-class, which a still picture could
@@ -3711,7 +3711,7 @@ test "the plain href wins, and a missing size is auto" {
     try testing.expectEqual(@as(?f64, null), im.width);
     try testing.expectEqual(@as(?f64, null), im.height);
     try testing.expectEqual(resample.Sampling.smooth, im.sampling);
-    try testing.expectEqual(PreserveAspectRatio.meet_centred, im.preserve_aspect_ratio);
+    try testing.expectEqual(PreserveAspectRatio.meet_centered, im.preserve_aspect_ratio);
 }
 
 test "an image that draws nothing is passed over rather than refused" {
@@ -3804,7 +3804,7 @@ test "the viewBox is scaled into the box asked for" {
 test "a box of a different shape letterboxes rather than distorting" {
     var doc = try read(testing.allocator, icon);
     defer doc.deinit();
-    // 48 wide by 24 tall: the scale is 1, and the drawing is centred.
+    // 48 wide by 24 tall: the scale is 1, and the drawing is centered.
     const t = doc.transformFor(0, 0, 48, 24);
     try testing.expectApproxEqAbs(@as(f64, 1), t.ax, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1), t.dy, 1e-12);

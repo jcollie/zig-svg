@@ -53,7 +53,7 @@
 //!
 //! resvg ignores a malformed `transform` entirely and draws the shape
 //! untransformed -- `bogus(1)`, `translate(`, and `rotate(45,1)` all come out
-//! as the identity. This refuses them, for the same reason it refuses a colour
+//! as the identity. This refuses them, for the same reason it refuses a color
 //! it cannot read: a shape drawn in the wrong place looks deliberate. An empty
 //! list is *not* malformed -- the grammar allows zero transforms -- so
 //! `transform=""` is the identity here as well.
@@ -307,7 +307,7 @@ fn cssOne(src: []const u8, name: css.tokenizer.Span, arguments: []const u8, box:
         return one("scale", &.{ 1, try cssScale(args[0]) });
     }
     if (is(src, name, "rotate")) {
-        // No centre, unlike the attribute's: that is what `transform-origin`
+        // No center, unlike the attribute's: that is what `transform-origin`
         // is for.
         if (n != 1) return error.BadTransform;
         return one("rotate", &.{try cssAngle(args[0])});

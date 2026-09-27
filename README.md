@@ -59,7 +59,7 @@ that. `objectBoundingBox`, the default, makes them fractions of the shape's own
 bounding box, which is why a gradient on a wide shape comes out stretched: the
 space itself is stretched.
 
-All three `spreadMethod` values are drawn. `pad` holds the end colours
+All three `spreadMethod` values are drawn. `pad` holds the end colors
 outwards, `repeat` starts the gradient over, and `reflect` turns it around so
 that tiles meet without a seam — three visibly different pictures, which is why
 a fourth value is refused rather than taken as the default. The extend modes
@@ -68,7 +68,7 @@ linear and radial and one with a focal point, match resvg exactly rather than
 merely within tolerance.
 
 `<pattern>` is a picture drawn once per cell of a lattice and then cut to the
-shape. It is not a z2d pattern — z2d paints from a colour, a gradient or a
+shape. It is not a z2d pattern — z2d paints from a color, a gradient or a
 dither, and none of those is a picture — so it goes through the layer machinery
 `<mask>` uses instead, and the tile's contents are drawn by the same code that
 draws the document. A gradient inside a tile therefore works, and so does a
@@ -76,7 +76,7 @@ group, a clip, or another pattern.
 
 Three properties of §13.3 decide that shape. `overflow` on a `<pattern>` is
 `hidden`, so content running past a tile's edge is cut rather than appearing in
-the neighbour — which means a tile needs a clip, and drawing one tile and
+the neighbor — which means a tile needs a clip, and drawing one tile and
 stamping it is not enough. `patternTransform`, and any rotation on the shape
 itself, turn the lattice, so an axis-aligned stamp could not place the cells
 anyway. And `patternUnits` and `patternContentUnits` default to *opposite*
@@ -86,7 +86,7 @@ matrix puts the contents through it as well, and a `<rect width="4">` in a tile
 a quarter the width of a 32-unit shape comes out 128 units across.
 
 The clip is built only for a tile the contents actually leave, and that is not
-an optimisation. Clipping content that was never going to overflow makes the
+an optimization. Clipping content that was never going to overflow makes the
 clip's edge and the content's edge the same edge, anti-aliased twice, and
 multiplying one coverage by the other squares it: a half-covered pixel along
 the tile boundary comes out a quarter covered. For the usual tile whose content
@@ -115,7 +115,7 @@ that is not drawn.
 
 Drawing each cell rather than stamping one has a consequence worth naming: on a
 densely patterned shape under a rotation, this and resvg genuinely differ.
-resvg rasterises the tile into a pixmap and tiles that pixmap through the
+resvg rasterizes the tile into a pixmap and tiles that pixmap through the
 matrix, so its edges are resampled; these are drawn analytically at each cell,
 so they are *sharper*. The difference is a pixel's worth of alpha along every
 edge, in both directions, and it is large enough on a fine rotated lattice to
@@ -223,14 +223,14 @@ reading one for the other cuts the wrong hole.
 `mask` uses that same layer, and differs from a clip in one thing: the
 `<mask>`'s content is drawn as an ordinary picture and then each pixel's
 **luminance** becomes its alpha. A clip asks where its shapes are, a mask asks
-how bright they are — so white masks nothing away, mid-grey halves what is
+how bright they are — so white masks nothing away, mid-gray halves what is
 under it, and a gradient from black to white is a fade. Because the content is
 drawn by the same code that draws the document, a mask is as expressive as the
 picture: a gradient inside one gets its bounding box, a `<g opacity="0.5">`
 inside one masks half as much, and a clip inside one gets cut.
 
 Two things make that luminance pass exact rather than approximate. The surface
-holds **premultiplied** colour, and luminance is linear, so the luminance of
+holds **premultiplied** color, and luminance is linear, so the luminance of
 the premultiplied channels is already the luminance times the alpha — which is
 the product §14.4 asks for, with no demultiply to round through. And the
 coefficients go on the bytes **as stored**: SVG 1.1's `color-interpolation-filters`
@@ -286,7 +286,7 @@ what the filter produced rather than to what it read.
 element is **refused**, because a chain with a link missing is not the picture
 the document asked for.
 
-The two colour primitives work on colour with the alpha divided out, as §15.10
+The two color primitives work on color with the alpha divided out, as §15.10
 and §15.11 define them, so a matrix with a constant in its alpha row can light
 up pixels that were transparent — anywhere in the primitive's subregion, not
 only where its input drew. `saturate` above one oversaturates, as Filter
@@ -299,17 +299,17 @@ an unknown one are refused, where resvg quietly draws the identity.
 resvg does not know and draws as `over`. `feBlend` has every mode of
 Compositing and Blending Level 1. The four non-separable ones — `hue`,
 `saturation`, `color` and `luminosity` — follow that specification's
-ClipColor, which pulls a colour pushed below black back towards its
+ClipColor, which pulls a color pushed below black back towards its
 luminance; resvg's tiny-skia tests the wrong channel there and clamps it to
 black instead, which its fixture measures at up to fifty levels. An unknown
 operator or mode is refused rather than drawn as the default.
 
-`feMorphology`'s window is centred and `2r+1` pixels wide, the radius rounded
-to whole pixels, as Skia's is; resvg's is `2⌈r⌉` wide and a pixel off centre,
+`feMorphology`'s window is centered and `2r+1` pixels wide, the radius rounded
+to whole pixels, as Skia's is; resvg's is `2⌈r⌉` wide and a pixel off center,
 which is a recorded divergence. A radius of zero or less passes the input
 through, as Filter Effects 1 says, where resvg makes it one. `feTile`
 replicates its input's subregion across the whole filter region unless it
-names a subregion of its own; resvg forgets the colour space of a tile, so the
+names a subregion of its own; resvg forgets the color space of a tile, so the
 linearRGB case is a recorded divergence and the sRGB one agrees.
 
 `feConvolveMatrix` has all three edge modes, `preserveAlpha`, and a bias scaled
@@ -340,16 +340,16 @@ surface, with §15.14's normals at every edge and corner, and light it with a
 distant, point or spot light; they agree with resvg to a level or so. Light
 positions go through the matrix in force and a height is scaled by the
 matrix's diagonal over the square root of two, as Filter Effects 1 says.
-`lighting-color` is taken into the filter's colour space as `flood-color` is;
-resvg converts a flood's colour but not a light's, which is a recorded
-divergence for a coloured light in linearRGB. A lighting primitive with no
+`lighting-color` is taken into the filter's color space as `flood-color` is;
+resvg converts a flood's color but not a light's, which is a recorded
+divergence for a colored light in linearRGB. A lighting primitive with no
 light source, a negative constant or a `specularExponent` outside 1 to 128 is
 refused.
 
 `feDropShadow` is run as the chain Filter Effects 1 defines it by — the
-input's alpha blurred, offset and flooded with the shadow's colour, and the
+input's alpha blurred, offset and flooded with the shadow's color, and the
 input merged over it — and agrees with that chain written out. resvg takes an
-sRGB shadow's colour through a conversion from linearRGB, which it never was,
+sRGB shadow's color through a conversion from linearRGB, which it never was,
 and so draws it pale; that is a recorded divergence.
 
 `feImage` draws a picture, fetched and decoded as an `<image>`'s is — the
@@ -369,7 +369,7 @@ filter its definition gives, in sRGB, over the element's bounding box widened
 by a tenth each way, or by a half for the two that spread: a function has no
 region of its own to say, and resvg makes the same choice. A list that does
 not parse is refused, where resvg drops the whole property; resvg also cannot
-read a functional colour such as `rgba()` inside `drop-shadow()`, which this
+read a functional color such as `rgba()` inside `drop-shadow()`, which this
 can. At most `filter.max_functions` (16) are allowed in one list.
 
 **A filter runs on the canvas, not in user space.** A `stdDeviation` in user
@@ -386,7 +386,7 @@ of the numbers. `color-interpolation-filters: sRGB` switches it off, per
 primitive. Getting this wrong is worth about seventy levels in the middle of
 every gradient a filter touches. Note that it is *not* used for the luminance
 of a `<mask>`, where this follows resvg in leaving the bytes alone — the two
-neighbouring decisions genuinely go opposite ways, and each has a fixture.
+neighboring decisions genuinely go opposite ways, and each has a fixture.
 
 **A filter naming nothing draws nothing.** §15.7.1 makes a `filter` pointing at
 a missing id, at an element that is not a `<filter>`, or at a filter with no
@@ -404,7 +404,7 @@ same name — `fill="red" style="fill:blue"` is blue. It matters more than its
 size suggests: every drawing program writes it, so Inkscape, Illustrator and
 Figma documents use `style` where a hand-written one would use attributes, and
 a renderer that skips it renders a large part of the world's SVG in the wrong
-colours. That is what it did here until it was tested, and it did it *silently*
+colors. That is what it did here until it was tested, and it did it *silently*
 — which is the failure this library is meant not to have.
 
 Values go to the same parsers the attributes use, so `style="fill:wobble"` is
@@ -442,7 +442,7 @@ are read as though they were `<style>` elements placed before everything in
 the document, so the document's own rules win a tie of specificity; but a rule
 of any kind outweighs a presentation attribute, so a caller's
 `path { fill: red }` beats a document's `fill="blue"`. That is how a picture is
-recoloured or outlined without editing it:
+recolored or outlined without editing it:
 
 ```zig
 try svg.draw(gpa, &surface, source, box, .{
@@ -454,8 +454,8 @@ A `stroke-width` there is in the document's user units, like any other, so
 drawing a 24-unit icon at 72 pixels makes a width of 1 three pixels wide.
 
 Stylesheets are read under zig-css's `.svg2` profile: as strict as SVG 1.1's
-CSS — what cannot be honoured is refused, never dropped — with the selectors
-and `@media` a still picture can honour. The structural and logical
+CSS — what cannot be honored is refused, never dropped — with the selectors
+and `@media` a still picture can honor. The structural and logical
 pseudo-classes, the later attribute tests and namespace selectors are all
 static facts about the document. `@media` is asked about the size the picture
 is drawn at and the caller's preferences, so a document using it is read again
@@ -475,7 +475,7 @@ refuse — every gradient fixture had put them in `<defs>`, so the oracle never
 saw it.
 
 `fill` and `stroke` default differently, and deliberately. A shape naming no
-`fill` gets the caller's colour; a shape naming no `stroke` is **not stroked**,
+`fill` gets the caller's color; a shape naming no `stroke` is **not stroked**,
 because SVG's initial `stroke` is `none` and a shape stroked without asking
 would put lines in a picture the document does not have.
 
@@ -521,7 +521,7 @@ project.
 ## What it draws
 
 One `<svg>` carrying a `viewBox`, and any number of shapes inside it — `<path>`
-and the five basic shapes — each filled and stroked in its own colours, under
+and the five basic shapes — each filled and stroked in its own colors, under
 its own transform, painted in document order. That is every one of the 7,447
 [Material Design Icons](https://pictogrammers.com/library/mdi/), most other
 icon sets, a good deal of hand-written and exported SVG, and still a long way
@@ -547,8 +547,8 @@ short of the specification.
 | `transform` | all six functions, on `<svg>`, `<g>`, any shape, and a `<clipPath>`; and as the CSS property in `style` or a stylesheet, which beats the attribute — CSS Transforms 1's syntax, strictly (units on lengths and angles, commas between arguments, `translateX`, `scaleY`, `skew` and the rest, percentage translations of the reference box, `none`); a 3D function is refused (`UnsupportedTransform`) |
 | `transform-origin` | yes, attribute or CSS — keywords, lengths, percentages of the reference box, and SVG's initial `0 0` |
 | `transform-box` | `view-box`, the initial value, and `fill-box` (or `content-box`) on anything — a group, a `<use>` and text are measured by the rasterizer, which lays text out, as their ink; `stroke-box` and `border-box` are refused (`UnsupportedTransformBox`) |
-| `fill` | named colours, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor`; `url(#id)` with a fallback (`none`, `currentColor` or a colour) painted when the reference is missing or is no gradient or pattern, as Chrome does — resvg paints nothing for the second; with no fallback such a reference is refused |
-| CSS Color 4 and 5 | everywhere a colour is written — `fill`, `stroke`, `color`, `stop-color`, `flood-color`, `lighting-color`, `drop-shadow()` — `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in every predefined space, and `color-mix()`, read by [zig-css](https://git.jcollie.dev/jeff/zig-css); a colour sRGB cannot show is gamut-mapped into it as Color 4 §14.2 says, not clipped. `light-dark()` too, chosen by the used colour scheme as CSS Color Adjust 1 has it — light unless a `color-scheme` in `style` or a stylesheet says the element supports dark and the caller's `Options.color_scheme` prefers it, as Chrome draws an SVG `<img>` — in `fill`, `stroke`, `color`, stop colours and filter colours alike. A `color-mix()` with `currentcolor` in it, or a `light-dark()` or relative colour (`rgb(from currentColor r g 255)`) that waits on it, is worked out once the element's `color` is known — in `fill`, `stroke`, a stop colour, and `color` itself, where `currentcolor` is the parent's — as Chrome draws it; in `flood-color`, `lighting-color` and `drop-shadow()`, which are read before that colour is known, it is refused (`UnsupportedColorMix`, `UnsupportedDeferredColor`) |
+| `fill` | named colors, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor`; `url(#id)` with a fallback (`none`, `currentColor` or a color) painted when the reference is missing or is no gradient or pattern, as Chrome does — resvg paints nothing for the second; with no fallback such a reference is refused |
+| CSS Color 4 and 5 | everywhere a color is written — `fill`, `stroke`, `color`, `stop-color`, `flood-color`, `lighting-color`, `drop-shadow()` — `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in every predefined space, and `color-mix()`, read by [zig-css](https://git.jcollie.dev/jeff/zig-css); a color sRGB cannot show is gamut-mapped into it as Color 4 §14.2 says, not clipped. `light-dark()` too, chosen by the used color scheme as CSS Color Adjust 1 has it — light unless a `color-scheme` in `style` or a stylesheet says the element supports dark and the caller's `Options.color_scheme` prefers it, as Chrome draws an SVG `<img>` — in `fill`, `stroke`, `color`, stop colors and filter colors alike. A `color-mix()` with `currentcolor` in it, or a `light-dark()` or relative color (`rgb(from currentColor r g 255)`) that waits on it, is worked out once the element's `color` is known — in `fill`, `stroke`, a stop color, and `color` itself, where `currentcolor` is the parent's — as Chrome draws it; in `flood-color`, `lighting-color` and `drop-shadow()`, which are read before that color is known, it is refused (`UnsupportedColorMix`, `UnsupportedDeferredColor`) |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
@@ -614,19 +614,19 @@ short of the specification.
 | An SVG inside an `<image>` or an `feImage` | yes — drawn as vectors at the size it says it is, that size fitted into the rectangle by the `<image>`'s `preserveAspectRatio`, and cut to it, as resvg does; it takes `data:` URLs for pictures of its own and never the caller's resolver, the caller's stylesheets do not reach into it, and it counts as a level of nesting |
 | Pictures decoded | to `Limits.max_images` (256) and `Limits.max_image_pixels` (2²⁴, reductions included) |
 
-A shape that names no `fill` is painted in the colour the **caller** chose, not
+A shape that names no `fill` is painted in the color the **caller** chose, not
 in SVG's initial black. That is a deliberate difference and it is the whole
-reason an icon can be drawn in any colour: not one of the 7,447 Material Design
+reason an icon can be drawn in any color: not one of the 7,447 Material Design
 Icons carries a `fill`, so under the letter of the specification the set could
 only ever be black. `fill="currentColor"`, which many other icon sets use
-instead, reaches the same colour by the honest route — it is the initial value
+instead, reaches the same color by the honest route — it is the initial value
 of the `color` property, and the caller chooses that too. A document that
-*does* name a colour is drawn in the colour it names.
+*does* name a color is drawn in the color it names.
 
 An element it cannot draw is **refused**, not skipped, and so is an attribute
 value it cannot read. A renderer that skips what it does not understand
 produces a picture quietly missing a piece, and one that falls back to black on
-`fill="notacolour"` produces a picture that looks finished and is not — both
+`fill="notacolor"` produces a picture that looks finished and is not — both
 are the failure nobody notices, where `error.UnsupportedElement` and
 `error.BadColor` are the failure somebody does. resvg and every browser default
 instead; see [resvg as the oracle](#resvg-as-the-oracle) for where the two
@@ -659,7 +659,7 @@ var surface = try svg.render(gpa, source, .{
 
 What the bytes are is read from the bytes. The media type a `data:` URL claims
 is not what chooses the decoder — z2dimg reads the signature, as a browser
-does, and a PNG labelled `image/jpeg` is drawn as the PNG it is. The one claim
+does, and a PNG labeled `image/jpeg` is drawn as the PNG it is. The one claim
 believed is `image/svg+xml`, because a document inside a document is a render
 of its own rather than a decode; a picture that begins with markup is taken for
 one too, since no bitmap format begins with `<`. Such a picture is read once
@@ -675,7 +675,7 @@ the picture as paint — a `z2d.SurfacePattern` — so that its edge gets the sa
 anti-aliased coverage any shape's does. The pattern samples with Mitchell and
 Netravali's cubic, B = C = 1/3, which is what Skia calls high-quality sampling
 and so what resvg draws pictures with; the two agree to a level. It works on
-premultiplied pixels, so transparency lends no colour to its neighbours, and a
+premultiplied pixels, so transparency lends no color to its neighbors, and a
 picture drawn at its own size, however it is moved, is copied rather than
 filtered. A picture drawn at less than half its size is halved first, as many
 times as it takes, so that the filter never skips a pixel.
@@ -691,7 +691,7 @@ so no half-drawn picture escapes it; `draw` onto a surface the caller owns may
 leave the elements before the `<image>` painted. Each picture is decoded once
 per render and kept however many times a `<use>` or a pattern tile draws it.
 
-No colour management: an ICC profile or a PNG `gAMA` is not applied and the
+No color management: an ICC profile or a PNG `gAMA` is not applied and the
 pixels are taken as sRGB, which is what resvg does. EXIF orientation is not
 applied, and an animation — GIF, APNG or WebP — is drawn as its first frame.
 
@@ -871,7 +871,7 @@ in place of seccomp; the design came from [z2dimg](https://git.jcollie.dev/jeff/
 whose decoders are sandboxed the same way. Capsicum is not a system call
 filter. It takes away every global namespace at once when a process calls
 `cap_enter`, so that no path can be opened, no address reached and no other
-process signalled, and it limits each descriptor the process still holds to
+process signaled, and it limits each descriptor the process still holds to
 the rights it was given. The child arrives at `cap_enter` holding exactly this:
 
 | descriptor | rights |
@@ -956,17 +956,17 @@ the corpus measures, so a regression moves a number somebody can see rather
 than flipping a boolean. A fixture this library refuses produces no PNG and is
 reported as *not implemented*, which is how the feature list stays honest.
 
-Colour is the exception that *is* exact. `fill-named-table.svg` paints all 147
-CSS colour keywords resvg knows as a grid aligned to whole pixels, so there is
+Color is the exception that *is* exact. `fill-named-table.svg` paints all 147
+CSS color keywords resvg knows as a grid aligned to whole pixels, so there is
 no antialiasing anywhere in it, and the two renderers agree on every pixel:
 `mean 0.000  worst 0`.
 
 One selector is deliberate too: the general sibling combinator, `~`, selects
-here and does not in resvg. Like the colours below, nothing in the corpus uses
+here and does not in resvg. Like the colors below, nothing in the corpus uses
 it, because a fixture that did would be measuring resvg's gap rather than this
 code.
 
-Four differences in colour are deliberate, and `src/color.zig` says why for each. This
+Four differences in color are deliberate, and `src/color.zig` says why for each. This
 library **refuses** a value it cannot read where resvg falls back to the
 initial one; and it accepts three things CSS Color 4 defines that resvg 0.48.1
 paints black — `rebeccapurple`, the slash alpha separator `rgb(255 0 0 / 0.5)`,
@@ -990,12 +990,12 @@ Of the rest of CSS Color 4, resvg reads only the legacy comma `hsl()`, which
 `color()`, `color-mix()` — resvg and Inkscape both paint black, so they are
 checked number by number instead, in `src/color.zig`, against
 [ColorAide](https://github.com/facelessuser/coloraide): every value within a
-level, gamut mapping included. Chrome agrees on every colour sRGB can show,
+level, gamut mapping included. Chrome agrees on every color sRGB can show,
 and clips the ones it cannot where Color 4 maps them. One more departure
 follows from reading the specification exactly: an `hsl()` saturation past
-100% is kept, as Color 4 says, and the colour it makes is lighter than white,
+100% is kept, as Color 4 says, and the color it makes is lighter than white,
 which the mapping draws as white — ColorAide agrees, where Chrome and resvg
-clamp the saturation and paint the saturated colour.
+clamp the saturation and paint the saturated color.
 
 Some fixtures are held to their own tolerances, named in `DIVERGENCES` at the
 top of `tools/check_oracle.py` with the reason beside each and printed as
@@ -1144,7 +1144,7 @@ a sixteenth of the pixels takes 29 ms rather than 64, so the cost follows the
 area painted, and going from 16 cells to 16384 of them moves 19 ms to 64. The per-cell draw was already
 sizing each cell's scratch surfaces to *that cell's* device footprint, so its
 total work scales with the area painted rather than with area times tiles —
-there was nothing left to win. And sampling is nearest-neighbour, so the
+there was nothing left to win. And sampling is nearest-neighbor, so the
 rotated fixtures went from 0.224 and 0.237 to 1.356 and 0.401, which is aliasing
 where the per-cell draw is analytic. Worse pictures for the same time is not a
 trade, so the per-cell draw stayed.
@@ -1202,7 +1202,7 @@ All are fetched by the Zig package manager. Nix builds fetch them through
 $ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
 ```
 
-## Licence
+## License
 
 MIT. The project follows the [REUSE](https://reuse.software/) standard and
 passes `reuse lint`.
@@ -1214,7 +1214,7 @@ Kept in the Zotero collection **zig-svg**.
 - World Wide Web Consortium (W3C). (2011, August). *Scalable Vector Graphics
   (SVG) 1.1 (Second Edition)* (W3C Recommendation).
   <https://www.w3.org/TR/SVG11/> — §8.3 is the path data grammar implemented
-  in `src/path.zig`, and appendix F.6 the endpoint-to-centre arc conversion in
+  in `src/path.zig`, and appendix F.6 the endpoint-to-center arc conversion in
   `src/arc.zig`.
 - World Wide Web Consortium (W3C). (2018, October). *Scalable Vector Graphics
   (SVG) 2* (W3C Candidate Recommendation). <https://www.w3.org/TR/SVG2/> —
@@ -1222,11 +1222,11 @@ Kept in the Zotero collection **zig-svg**.
   measured in.
 - World Wide Web Consortium (W3C). (2026). *CSS Color Module Level 4* (W3C
   Candidate Recommendation Draft). <https://www.w3.org/TR/css-color-4/> — every
-  colour function, and §14.2's gamut mapping into sRGB.
+  color function, and §14.2's gamut mapping into sRGB.
 - World Wide Web Consortium (W3C). (2026). *CSS Color Module Level 5* (W3C
   Working Draft). <https://www.w3.org/TR/css-color-5/> — `color-mix()`.
 - Muse, I. *ColorAide*. <https://github.com/facelessuser/coloraide> — the
-  independent implementation of those two the modern colours are checked
+  independent implementation of those two the modern colors are checked
   against, since neither oracle reads them.
 - World Wide Web Consortium (W3C). (2019, February). *CSS Transforms Module
   Level 1* (W3C Candidate Recommendation).

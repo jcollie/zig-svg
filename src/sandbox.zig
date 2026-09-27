@@ -146,7 +146,7 @@
 //!
 //! seccomp is an allowlist of system calls. Capsicum is not a filter at all:
 //! `cap_enter` takes away every global namespace, so that no path can be
-//! opened, no address reached and no other process signalled, and each
+//! opened, no address reached and no other process signaled, and each
 //! descriptor the child still holds is limited to the rights it was given ---
 //! `CAP_WRITE` on the reply pipe, nothing on the standard streams under
 //! `strict`. A call either one refuses kills the child, and the parent reports
@@ -1257,7 +1257,7 @@ test "every error this library defines has a wire spelling of its own" {
     // The failure this catches is silent: an error with no case in
     // `wireFromError` falls through to `raster_failed`, and the caller of a
     // sandboxed render is told "z2d refused this" for what was really a
-    // malformed colour. Adding an error to the library without adding it here
+    // malformed color. Adding an error to the library without adding it here
     // is exactly the kind of thing nobody notices.
     //
     // Two whole sets are exempt rather than named one by one, so that this

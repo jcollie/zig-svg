@@ -42,7 +42,7 @@
 //! region is an axis-aligned rectangle of the canvas rather than a rotated
 //! one.
 //!
-//! ## Colour
+//! ## Color
 //!
 //! Filters run in **linearRGB** by default, which is §15.3's doing and is
 //! almost always a surprise: blurring the boundary between white and black
@@ -188,7 +188,7 @@ pub const Kind = union(enum) {
     },
     /// §15.21.
     offset: struct { in: Input, dx: f64, dy: f64 },
-    /// §15.16. Reads nothing: it fills its subregion with one colour.
+    /// §15.16. Reads nothing: it fills its subregion with one color.
     flood: struct {
         /// Null where the document wrote `currentColor`, which is resolved
         /// against the filtered element rather than against the filter.
@@ -216,7 +216,7 @@ pub const Kind = union(enum) {
     /// `primitiveUnits`. Zero or less in either passes the input through, as
     /// Filter Effects 1 has it.
     morphology: struct { in: Input, dilate: bool, radius_x: f64, radius_y: f64 },
-    /// §15.13: a weighted sum over an `order_x` by `order_y` neighbourhood.
+    /// §15.13: a weighted sum over an `order_x` by `order_y` neighborhood.
     convolve_matrix: ConvolveMatrix,
     /// §15.15: each pixel of `in` fetched from where `in2` says, `scale`
     /// times a channel's distance from a half, in `primitiveUnits`. The
@@ -666,14 +666,14 @@ fn cssLength(t: []const u8, viewport: length.Viewport) Error!f64 {
     return v;
 }
 
-/// `drop-shadow()`: two or three lengths -- offset, then blur -- and a colour
+/// `drop-shadow()`: two or three lengths -- offset, then blur -- and a color
 /// before or after them, `currentColor` when there is none.
 fn dropShadowFunction(args: []const u8, viewport: length.Viewport, scheme: color.Scheme) Error!@FieldType(Kind, "drop_shadow") {
     var lengths: [3]f64 = .{ 0, 0, 0 };
     var n: usize = 0;
     var shade: ?color.Color = null;
     var colored = false;
-    // Set once a colour has followed some lengths: any more lengths after
+    // Set once a color has followed some lengths: any more lengths after
     // that would sit either side of it.
     var closed = false;
     var i: usize = 0;
@@ -690,7 +690,7 @@ fn dropShadowFunction(args: []const u8, viewport: length.Viewport, scheme: color
         const tok = args[start..i];
         const c = tok[0];
         if (std.ascii.isDigit(c) or c == '-' or c == '+' or c == '.') {
-            // Lengths are one run: a colour cannot sit between them.
+            // Lengths are one run: a color cannot sit between them.
             if (n == 3 or closed) return error.BadFilterFunction;
             lengths[n] = try cssLength(tok, viewport);
             n += 1;
@@ -702,7 +702,7 @@ fn dropShadowFunction(args: []const u8, viewport: length.Viewport, scheme: color
                 null
             else
                 color.parseColorIn(tok, scheme) catch |err| switch (err) {
-                    // A colour this reads but cannot mix is not a malformed
+                    // A color this reads but cannot mix is not a malformed
                     // function, and saying so would send the reader looking
                     // for the wrong mistake.
                     error.UnsupportedColorMix => return err,
@@ -1325,7 +1325,7 @@ fn floodColor(
     const raw = css.property(sheet, tree, node, "flood-color") orelse return color.Color.black;
     const t = std.mem.trim(u8, raw, " \t\r\n");
     // Resolved against the filtered element rather than against the filter,
-    // which has no colour of its own.
+    // which has no color of its own.
     if (std.mem.eql(u8, t, "currentColor")) return null;
     return try color.parseColorIn(t, color.schemeAt(sheet, tree, node, preferred));
 }
@@ -1422,7 +1422,7 @@ fn primitivesOf(comptime body: []const u8) !Filter {
     return readTest("<svg viewBox=\"0 0 8 8\"><filter id=\"f\">" ++ body ++ "</filter><rect width=\"8\" height=\"8\"/></svg>");
 }
 
-test "every colour matrix type is read into the matrix it means" {
+test "every color matrix type is read into the matrix it means" {
     var f = try primitivesOf("<feColorMatrix/>" ++
         "<feColorMatrix type=\"saturate\" values=\"0\"/>" ++
         "<feColorMatrix type=\"hueRotate\" values=\"90\"/>" ++
@@ -1431,16 +1431,16 @@ test "every colour matrix type is read into the matrix it means" {
     defer f.deinit(testing.allocator);
     try testing.expectEqual(identity_matrix, f.primitives[0].kind.color_matrix.matrix);
     // Saturation nothing is the luminance in every channel.
-    const grey = f.primitives[1].kind.color_matrix.matrix;
-    try testing.expectApproxEqAbs(@as(f64, 0.213), grey[5], 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.715), grey[11], 1e-12);
+    const gray = f.primitives[1].kind.color_matrix.matrix;
+    try testing.expectApproxEqAbs(@as(f64, 0.213), gray[5], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.715), gray[11], 1e-12);
     // A quarter turn: §15.10's coefficients at cos 0 and sin 1.
     try testing.expectApproxEqAbs(@as(f64, 0), f.primitives[2].kind.color_matrix.matrix[0], 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.2125), f.primitives[3].kind.color_matrix.matrix[15], 1e-12);
     try testing.expectEqual(@as(f64, 20), f.primitives[4].kind.color_matrix.matrix[19]);
 }
 
-test "a colour matrix with the wrong values is refused" {
+test "a color matrix with the wrong values is refused" {
     for ([_][]const u8{
         "<feColorMatrix values=\"1 0 0\"/>",
         "<feColorMatrix type=\"saturate\" values=\"-0.5\"/>",
@@ -1729,7 +1729,7 @@ test "a filter list reads each function into the filter it abbreviates" {
     try testing.expect(fs[6].isEmpty());
 }
 
-test "a drop shadow's colour goes either side of its lengths, but not between them" {
+test "a drop shadow's color goes either side of its lengths, but not between them" {
     const before = try functionsOf("drop-shadow(rgba(0, 0, 0, 0.5) 2px 3px)");
     defer freeFunctions(before);
     try testing.expectEqual(@as(f64, 0.5), before[0].primitives[0].kind.drop_shadow.color.?.alpha);

@@ -279,7 +279,7 @@ test "a closed subpath's start faces between its closing segment and its first" 
     try testing.expect(v.items[3].end);
 }
 
-test "a zero-length segment takes its neighbour's direction" {
+test "a zero-length segment takes its neighbor's direction" {
     var v = try verticesOf("M0 0 L10 0 L10 0 L10 10");
     defer v.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 4), v.items.len);

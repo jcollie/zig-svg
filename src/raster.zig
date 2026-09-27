@@ -184,16 +184,16 @@ pub const Options = struct {
     width: ?u32 = null,
     height: ?u32 = null,
 
-    /// What to paint a shape that names no colour of its own, and what
+    /// What to paint a shape that names no color of its own, and what
     /// `fill="currentColor"` resolves to.
     ///
     /// SVG's initial `fill` is black, and so is this -- but a shape whose
-    /// document says nothing is painted in *this* colour rather than in black,
+    /// document says nothing is painted in *this* color rather than in black,
     /// which is a deliberate difference. Not one of the 7,447 Material Design
     /// Icons carries a `fill`, so under the letter of the specification the
     /// set could only ever be drawn black; this is what lets a caller draw one
-    /// in any colour they like. A document that does name a colour is drawn in
-    /// the colour it names.
+    /// in any color they like. A document that does name a color is drawn in
+    /// the color it names.
     ///
     /// An `rgba` or `argb` pixel must be premultiplied, which z2d checks and
     /// refuses.
@@ -219,7 +219,7 @@ pub const Options = struct {
     fill_rule: z2d.options.FillRule = .non_zero,
 
     /// What `stroke="currentColor"` resolves to when nothing named a `color`,
-    /// which is the same colour a fill would use.
+    /// which is the same color a fill would use.
     ///
     /// There is deliberately no "default stroke": SVG's initial `stroke` is
     /// `none`, so a shape whose document says nothing about stroking is not
@@ -252,12 +252,12 @@ pub const Options = struct {
     languages: []const []const u8 = document.ReadOptions.default_languages,
 
     /// Stylesheets from the caller, applied before the document's own. See
-    /// `document.ReadOptions.stylesheets`: this is how a picture is recoloured
+    /// `document.ReadOptions.stylesheets`: this is how a picture is recolored
     /// or outlined without editing it, since a stylesheet outweighs any
     /// presentation attribute the document wrote.
     stylesheets: []const []const u8 = &.{},
 
-    /// Whether the picture is drawn for a dark colour scheme or a light one,
+    /// Whether the picture is drawn for a dark color scheme or a light one,
     /// and for a reader who asked for less motion: what the document's media
     /// queries are asked, alongside the size it is drawn at.
     color_scheme: css.media.ColorScheme = .light,
@@ -1008,7 +1008,7 @@ fn drawItems(
 }
 
 /// One text decoration across the run `span` laid out: a band as thick as
-/// the face's underline, centred where the face puts it -- its underline
+/// the face's underline, centered where the face puts it -- its underline
 /// position, its ascent for an overline, its strikeout position for a line
 /// through -- as resvg draws each. Filled and stroked in the paint of the
 /// element that declared it, in the run's own `paint-order`.
@@ -1030,7 +1030,7 @@ fn paintDecoration(
     if (!(size > 0)) return;
     const font = try faceFor(shape, opts);
     const m = metricsOf(&font, size);
-    const centre = switch (kind) {
+    const center = switch (kind) {
         .underline => m.underline_position,
         .overline => m.ascent,
         .line_through => m.strikeout_position,
@@ -1039,7 +1039,7 @@ fn paintDecoration(
     var band = shape;
     band.geometry = .{ .rect = .{
         .x = span.run_x0,
-        .y = span.run_baseline - centre - t / 2,
+        .y = span.run_baseline - center - t / 2,
         .width = span.run_x1 - span.run_x0,
         .height = t,
         .rx = null,
@@ -1058,7 +1058,7 @@ fn paintDecoration(
             var frame = z2d.Transformation.identity.translate(g.x, g.y);
             if (g.rotate != 0) frame = frame.rotate(g.rotate * std.math.pi / 180.0);
             if (g.scale != 1) frame = frame.scale(g.scale, 1);
-            const top = -centre - t / 2;
+            const top = -center - t / 2;
             const corners = [4][2]f64{ .{ 0, top }, .{ g.advance / g.scale, top }, .{ g.advance / g.scale, top + t }, .{ 0, top + t } };
             for (corners, 0..) |c, i| {
                 const x = frame.ax * c[0] + frame.by * c[1] + frame.tx;
@@ -1343,7 +1343,7 @@ fn paintMarkers(
     const stroke_width = shape.stroke_width orelse opts.stroke_width;
     // SVG 2: a marker's `context-fill` and `context-stroke` are the paints
     // of the shape it is drawn on, a `currentColor` there being the shape's
-    // own colour.
+    // own color.
     const pin = struct {
         fn f(given: ?color.Paint, current: ?color.Color, scheme: color.Scheme) ?color.Paint {
             const paint = given orelse return null;
@@ -1983,7 +1983,7 @@ const Chain = struct {
     source: z2d.Surface,
     source_space: filter.ColorSpace,
     /// `SourceAlpha`, built the first time something asks for it. Black has the
-    /// same value in either colour space, so this one never needs converting.
+    /// same value in either color space, so this one never needs converting.
     source_alpha: ?z2d.Surface,
     results: []?z2d.Surface,
     boxes: []image.PixelBox,
@@ -2121,7 +2121,7 @@ const Chain = struct {
     /// already there.
     ///
     /// The conversion is in place, which is how resvg does it and is why a
-    /// chain that alternates colour spaces loses a little precision each time:
+    /// chain that alternates color spaces loses a little precision each time:
     /// eight bits of linear light is a coarse thing to keep a picture in.
     fn resolve(self: *Chain, reader: usize, in: filter.Input, want: filter.ColorSpace) Error!Ref {
         // A named input nothing produced is an error rather than a silent
@@ -2305,7 +2305,7 @@ const Chain = struct {
                 var out = try in.sfc.clone(self.gpa);
                 errdefer out.deinit(self.gpa);
                 // Whole pixels either side, rounded: the window is 2r+1
-                // wide and centred, as Skia's is.
+                // wide and centered, as Skia's is.
                 const rx = self.lengthX(m.radius_x);
                 const ry = self.lengthY(m.radius_y);
                 if (rx > 0 and ry > 0) {
@@ -2329,7 +2329,7 @@ const Chain = struct {
             },
             .displacement_map => |d| {
                 // Filter Effects 1 converts only `in2` into the primitive's
-                // colour space and leaves `in` as it is. Both are converted
+                // color space and leaves `in` as it is. Both are converted
                 // here, which comes to the same picture: a displacement moves
                 // pixels and does not mix them, so it commutes with a
                 // conversion done pixel by pixel.
@@ -2378,7 +2378,7 @@ const Chain = struct {
             .drop_shadow => |d| {
                 // Filter Effects 1 defines it as the chain it abbreviates:
                 // blur the input's alpha, offset it, flood it with the
-                // shadow's colour through that alpha, and merge the input
+                // shadow's color through that alpha, and merge the input
                 // over the top. So it is run as that chain.
                 const in = try self.resolve(i, d.in, space);
                 var shadow = try in.sfc.clone(self.gpa);
@@ -2549,7 +2549,7 @@ fn roundToPixel(v: f64) i32 {
     return @intFromFloat(@round(std.math.clamp(v, -limit, limit)));
 }
 
-/// A colour's channels, as fractions, in the space a primitive runs in; its
+/// A color's channels, as fractions, in the space a primitive runs in; its
 /// alpha is left behind. `lighting-color`'s, which §15.14 converts as it
 /// does `flood-color`.
 fn colorIn(c: color.Color, space: filter.ColorSpace) [3]f32 {
@@ -2580,7 +2580,7 @@ fn floodPixel(c: color.Color, opacity: f64, space: filter.ColorSpace) z2d.pixel.
     );
 }
 
-/// What a shape is painted with: one colour, or a gradient to be built.
+/// What a shape is painted with: one color, or a gradient to be built.
 const Paint = union(enum) {
     pixel: z2d.Pixel,
     /// The id of a paint server, and the alpha to fade it by. The gradient
@@ -2591,7 +2591,7 @@ const Paint = union(enum) {
 
 /// What one shape's `fill` comes to, or null when it is not painted at all.
 ///
-/// Three alphas multiply together: the colour's own, from `#rrggbbaa` or
+/// Three alphas multiply together: the color's own, from `#rrggbbaa` or
 /// `rgba()`; `fill-opacity`; and `opacity`. For a shape that has a fill and
 /// nothing else, multiplying `opacity` in like this is exactly what
 /// compositing the shape as its own layer would produce -- which is why
@@ -2602,7 +2602,7 @@ fn resolveFill(shape: document.Shape, opts: Options) ?Paint {
     if (alpha <= 0) return null;
 
     // A shape that named no `fill` is treated as though it had named
-    // `currentColor`, which lands on the caller's colour by the same route --
+    // `currentColor`, which lands on the caller's color by the same route --
     // `color`'s initial value is the caller's choice. The two spellings are
     // the same picture, and the icon sets in the world use one or the other.
     const named: ?color.Color = switch (shape.fill orelse .current) {
@@ -2620,7 +2620,7 @@ fn resolveFill(shape: document.Shape, opts: Options) ?Paint {
     return .{ .pixel = pixel };
 }
 
-/// A parsed colour as a premultiplied pixel, faded by `alpha`.
+/// A parsed color as a premultiplied pixel, faded by `alpha`.
 fn fadeColor(c: color.Color, alpha: f64) ?z2d.Pixel {
     const a = c.alpha * alpha;
     if (a <= 0) return null;
@@ -2633,7 +2633,7 @@ fn fadeColor(c: color.Color, alpha: f64) ?z2d.Pixel {
 }
 
 /// The line style a stroke is drawn with, which is the same whether it is
-/// painted in a colour or with a gradient.
+/// painted in a color or with a gradient.
 fn strokeStyle(shape: document.Shape, width: f64, paint: Paint) Error!Stroke {
     return .{
         .paint = paint,
@@ -3064,11 +3064,11 @@ fn buildClip(
 /// opacity and all -- and then each pixel's *luminance* becomes its alpha.
 /// That is the whole difference from a clip: a clip asks where its shapes are,
 /// a mask asks how bright they are, so a white shape masks nothing away and a
-/// grey one halves what is under it. `mask-type="alpha"` asks how opaque they
-/// are instead, and then the colour does not matter.
+/// gray one halves what is under it. `mask-type="alpha"` asks how opaque they
+/// are instead, and then the color does not matter.
 ///
 /// Two accidents make the luminance pass exact rather than approximate. The
-/// surface holds premultiplied colour, and luminance is linear, so the
+/// surface holds premultiplied color, and luminance is linear, so the
 /// luminance of the premultiplied channels is already the luminance times the
 /// alpha -- which is the product §14.4 asks for, with no demultiply to round
 /// through. And the coefficients are applied to the bytes as stored: resvg
@@ -3116,8 +3116,8 @@ fn buildMask(
         return out;
     }
 
-    // The mask's content is drawn into a colour surface, because luminance
-    // needs colour; the alpha surface above is what it is turned into.
+    // The mask's content is drawn into a color surface, because luminance
+    // needs color; the alpha surface above is what it is turned into.
     var canvas = try z2d.Surface.init(.image_surface_rgba, gpa, width, height);
     defer canvas.deinit(gpa);
 
@@ -3248,7 +3248,7 @@ const MaskType = enum {
     /// The default, and the one §14.4 defines.
     luminance,
     /// SVG 2's `mask-type: alpha`, which takes the content's alpha and ignores
-    /// its colour. resvg implements it, so this does too -- and refuses a
+    /// its color. resvg implements it, so this does too -- and refuses a
     /// spelling it does not know rather than falling back to luminance, which
     /// would draw a mask the document did not ask for.
     ///
@@ -3362,9 +3362,9 @@ fn mappedBounds(m: z2d.Transformation, box: Box) Box {
 /// mask the caller has already painted. Three properties force that shape:
 ///
 /// * `overflow` on a `<pattern>` is `hidden`, so content running past a tile's
-///   edge is cut off rather than appearing in the neighbour. A pattern of
+///   edge is cut off rather than appearing in the neighbor. A pattern of
 ///   overlapping circles is a completely different picture without it, and
-///   resvg honours it -- so every tile needs a clip, and drawing one tile and
+///   resvg honors it -- so every tile needs a clip, and drawing one tile and
 ///   stamping it is not enough.
 /// * `patternTransform`, and any rotation on the shape itself, turn the
 ///   lattice. Stamping an axis-aligned tile cannot place a rotated one, so the
@@ -3575,7 +3575,7 @@ fn paintTiled(
             }
 
             if (cut) |*c| ink.composite(c, .dst_in, 0, 0, precision);
-            // `plus`, not `src_over`. Neighbouring cells share an edge, and
+            // `plus`, not `src_over`. Neighboring cells share an edge, and
             // the anti-aliased clip gives each of them part of the pixels
             // along it. Painting one over the other leaves about three
             // quarters coverage where there should be one -- a seam along
@@ -3586,7 +3586,7 @@ fn paintTiled(
     }
 
     // `fill-opacity` and `opacity` apply to the finished lattice, not to each
-    // tile: fading them one at a time would show the seams where neighbours
+    // tile: fading them one at a time would show the seams where neighbors
     // overlap.
     if (tiled.alpha < 1.0) {
         const faded: z2d.Pixel = .{ .alpha8 = .{ .a = alphaByte(tiled.alpha) } };
@@ -4307,7 +4307,7 @@ fn placeOnPath(
         const step = try glyphStep(gpa, font, text, bounds, i, n, text_opts);
         // The point that sits on the curve is the middle of the glyph
         // itself -- its own width, not the step to the next, which carries
-        // the kerning with its neighbour and the spacing after it -- and the
+        // the kerning with its neighbor and the spacing after it -- and the
         // glyph is turned about it. That is resvg's placement, and it keeps a
         // kerned pair from pushing a glyph off its own midpoint.
         const width = try measureText(gpa, font, glyph, text_opts);
@@ -4828,7 +4828,7 @@ fn alphaByte(opacity: f64) u8 {
 
 /// Turn a resolved paint into something z2d can draw with.
 ///
-/// A colour is a pattern on its own. A reference has to be found, read, and
+/// A color is a pattern on its own. A reference has to be found, read, and
 /// placed: a gradient's numbers are in a space of their own, and the matrix
 /// that says where that space is depends on the shape being painted.
 /// Where a shape's paint server is laid out: its own box and space, or, for
@@ -4883,7 +4883,7 @@ fn makeSource(
     )) orelse return error.UnsupportedPaintServer;
 
     // A gradient with no stops paints nothing, which is what resvg draws and
-    // is not an error: the gradient exists, it just has no colours in it.
+    // is not an error: the gradient exists, it just has no colors in it.
     if (spec.stop_count == 0) return .nothing;
 
     // Where the gradient's own space sits: the shape's transform, then the
@@ -4945,7 +4945,7 @@ fn makeSource(
         // interpolate an SVG gradient's stops straight and keep premultiplied
         // for CSS gradients alone, the SVG working group left it that way in
         // 2016 (w3c/svgwg#180), and resvg agrees. The two differ only where a
-        // stop is translucent -- there a translucent stop's colour reaches
+        // stop is translucent -- there a translucent stop's color reaches
         // across towards the opaque one, where premultiplied it would not.
         .alpha = .straight,
     });
@@ -4954,7 +4954,7 @@ fn makeSource(
     for (spec.slice()) |stop| {
         const a = stop.value.alpha * ref.alpha;
         // `.rgba`, for the reason above: it is the space the bytes are
-        // already in, so this hands z2d the colour the document wrote.
+        // already in, so this hands z2d the color the document wrote.
         // `.srgba` would decode them and paint mediumseagreen as 11,117,43.
         try g.addStop(gpa, @floatCast(stop.offset), .{ .rgba = .{
             @as(f32, @floatFromInt(stop.value.r)) / 255.0,
@@ -4977,7 +4977,7 @@ fn makeSource(
 }
 
 /// What `currentColor` is on an element: its `color`, or one that was waiting
-/// on the caller's colour resolved against it -- or null, when neither is and
+/// on the caller's color resolved against it -- or null, when neither is and
 /// the caller's pixel itself is what is painted.
 fn currentOf(named: ?color.Color, waiting: ?color.Deferred, scheme: color.Scheme, opts: Options) ?color.Color {
     if (named) |c| return c;
@@ -4985,7 +4985,7 @@ fn currentOf(named: ?color.Color, waiting: ?color.Deferred, scheme: color.Scheme
     return d.resolve(callerColor(opts), scheme);
 }
 
-/// The caller's own fill as a colour, for a `stop-color="currentColor"` in a
+/// The caller's own fill as a color, for a `stop-color="currentColor"` in a
 /// document that names no `color` of its own.
 fn callerColor(opts: Options) color.Color {
     const straight = z2d.pixel.RGBA.fromPixel(opts.fill).demultiply();
@@ -5244,7 +5244,7 @@ fn uniformScale(t: z2d.Transformation) ?f64 {
 ///
 /// SVG's initial `stroke` is `none`, so a shape whose document says nothing
 /// about stroking is not stroked. That is the opposite of `fill`, where saying
-/// nothing means the caller's colour -- and deliberately so: an icon with no
+/// nothing means the caller's color -- and deliberately so: an icon with no
 /// `fill` is the normal case, while a shape stroked without asking would put
 /// lines in a picture the document does not have.
 fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
@@ -5507,7 +5507,7 @@ fn square(comptime attrs: []const u8) []const u8 {
     return "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" " ++ attrs ++ "/></svg>";
 }
 
-test "a shape is painted the colour its document names" {
+test "a shape is painted the color its document names" {
     const gpa = testing.allocator;
     for ([_][]const u8{
         square("fill=\"red\""),
@@ -5523,8 +5523,8 @@ test "a shape is painted the colour its document names" {
     }
 }
 
-test "a shape that names no colour is painted the caller's" {
-    // The whole reason a Material Design Icon can be drawn in any colour: not
+test "a shape that names no color is painted the caller's" {
+    // The whole reason a Material Design Icon can be drawn in any color: not
     // one of the 7,447 carries a `fill`.
     const gpa = testing.allocator;
     const px = try middleOf(gpa, square(""), .{
@@ -5534,7 +5534,7 @@ test "a shape that names no colour is painted the caller's" {
     try testing.expectEqual(@as(u8, 0), px.r);
 }
 
-test "currentColor is the caller's colour, or the color property when there is one" {
+test "currentColor is the caller's color, or the color property when there is one" {
     const gpa = testing.allocator;
     const callers: Options = .{ .fill = .{ .rgba = .{ .r = 0, .g = 0, .b = 255, .a = 255 } } };
 
@@ -5587,7 +5587,7 @@ test "fill and fill-opacity are inherited from the root, and overridden by the s
 
 test "the three alphas multiply together" {
     const gpa = testing.allocator;
-    // The colour's own alpha, then fill-opacity, then opacity.
+    // The color's own alpha, then fill-opacity, then opacity.
     const px = try middleOf(gpa, square("fill=\"#ff000080\" fill-opacity=\"0.5\" opacity=\"0.5\""), .{});
     // 0.5 * 0.5 * 0.5 = 0.125, which is 32 of 255.
     try testing.expectApproxEqAbs(@as(f64, 32), @as(f64, @floatFromInt(px.a)), 1.5);
@@ -5607,7 +5607,7 @@ test "a shape that would paint nothing is skipped" {
     }
 }
 
-test "shapes in one document can be different colours" {
+test "shapes in one document can be different colors" {
     const gpa = testing.allocator;
     const src =
         \\<svg viewBox="0 0 4 2"><path d="M0 0H2V2H0Z" fill="red"/><path d="M2 0H4V2H2Z" fill="blue"/></svg>
@@ -5642,7 +5642,7 @@ test "fill-rule is read from the document, and is case-sensitive" {
 
 test "a value that cannot be read is refused rather than defaulted" {
     const gpa = testing.allocator;
-    try testing.expectError(error.BadColor, render(gpa, square("fill=\"notacolour\""), .{}));
+    try testing.expectError(error.BadColor, render(gpa, square("fill=\"notacolor\""), .{}));
     try testing.expectError(error.BadColor, render(gpa, square("fill=\"#12345\""), .{}));
     try testing.expectError(error.BadOpacity, render(gpa, square("opacity=\"half\""), .{}));
     try testing.expectError(error.BadOpacity, render(gpa, square("fill-opacity=\"\""), .{}));
@@ -5897,7 +5897,7 @@ test "a drop shadow is an offset flood cut to the blurred alpha, merged under th
     try testing.expectEqual(@as(u8, 255), px(&surface, 18, 18).r);
     try testing.expectEqual(@as(u8, 255), px(&surface, 18, 18).a);
     // Below and right of it, black with nothing red in it: the shadow came
-    // from `SourceAlpha`, which throws the colour away.
+    // from `SourceAlpha`, which throws the color away.
     const shadow = px(&surface, 28, 28);
     try testing.expect(shadow.a > 128);
     try testing.expectEqual(@as(u8, 0), shadow.r);
@@ -5997,11 +5997,11 @@ test "a pattern draws its tile once per cell, and refuses an absurd lattice" {
 
 test "a mask turns its content's luminance into coverage" {
     const gpa = testing.allocator;
-    // White masks nothing away, mid-grey halves what is under it, and black
-    // masks everything. The greys are the whole difference between a mask and
+    // White masks nothing away, mid-gray halves what is under it, and black
+    // masks everything. The grays are the whole difference between a mask and
     // a clip, which only ever answers "covered" or "not".
     //
-    // Mid-grey coming out at 128 rather than at 55 is also the evidence that
+    // Mid-gray coming out at 128 rather than at 55 is also the evidence that
     // the coefficients go on the bytes as stored: linearizing first would more
     // than halve it. resvg draws 128, and so does this.
     for ([_]struct { src: []const u8, alpha: u8 }{
@@ -6053,7 +6053,7 @@ test "a mask's region clips it, and a mask that names the wrong thing is refused
     ));
 }
 
-test "mask-type=alpha takes the content's opacity and not its colour" {
+test "mask-type=alpha takes the content's opacity and not its color" {
     const gpa = testing.allocator;
     // Red and green have wildly different luminances and the same alpha, so a
     // mask that cannot tell them apart is reading alpha.
@@ -6325,7 +6325,7 @@ test "a transform that overflows to infinity is refused" {
     ));
 }
 
-test "a similarity transform is recognised, and a warped one is not" {
+test "a similarity transform is recognized, and a warped one is not" {
     try testing.expect(uniformScale(.identity).? == 1.0);
     try testing.expectApproxEqAbs(@as(f64, 3), uniformScale(try transform.parse("scale(3)")).?, 1e-12);
     // Rotation and translation do not change the scale.
@@ -6388,7 +6388,7 @@ test "a dash array longer than the ceiling is refused" {
 
 test "a shape with no stroke named is not stroked" {
     const gpa = testing.allocator;
-    // SVG's initial `stroke` is `none`, so unlike `fill` the caller's colour
+    // SVG's initial `stroke` is `none`, so unlike `fill` the caller's color
     // is *not* the default here -- a shape stroked without asking would put
     // lines in a picture the document does not have.
     var surface = try render(gpa, square(""), .{ .width = 20, .height = 20 });
@@ -6487,7 +6487,7 @@ test "an entity reference in an attribute value is resolved" {
 
 test "a reference is resolved in every kind of attribute value" {
     const gpa = testing.allocator;
-    // A colour, a number, a length, a transform, a `points` list and a dash
+    // A color, a number, a length, a transform, a `points` list and a dash
     // array -- the parsed ones through the reader's buffer and the borrowed
     // ones where they are drawn.
     const cases = [_][]const u8{
@@ -6702,7 +6702,7 @@ test "a font property is inherited through a container" {
 test "a text property the reader cannot read is refused" {
     const gpa = testing.allocator;
     for ([_]struct { attrs: []const u8, want: anyerror }{
-        .{ .attrs = " text-anchor=\"centre\"", .want = error.BadTextAnchor },
+        .{ .attrs = " text-anchor=\"center\"", .want = error.BadTextAnchor },
         .{ .attrs = " font-weight=\"heavy\"", .want = error.BadFontWeight },
         .{ .attrs = " font-weight=\"0\"", .want = error.BadFontWeight },
         .{ .attrs = " font-style=\"slanted\"", .want = error.BadFontStyle },
@@ -6930,7 +6930,7 @@ test "smooth sampling blends across the middle and holds at the edges" {
     const gpa = testing.allocator;
     var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++ "\" width=\"8\" height=\"8\"/>", 8, 8, .{});
     defer sfc.deinit(gpa);
-    // The corners are past the outermost pixel centres, where there is
+    // The corners are past the outermost pixel centers, where there is
     // nothing further to blend with.
     try testing.expectEqual(opaque_red, rgbaAt(&sfc, 0, 0));
     try testing.expectEqual(opaque_green, rgbaAt(&sfc, 7, 0));
@@ -6942,7 +6942,7 @@ test "smooth sampling blends across the middle and holds at the edges" {
 
 test "an image is fitted into its rectangle by preserveAspectRatio" {
     const gpa = testing.allocator;
-    // `meet`, centred: the square picture is eight wide in a sixteen-wide
+    // `meet`, centered: the square picture is eight wide in a sixteen-wide
     // rectangle, so four columns are left on each side.
     {
         var sfc = try renderImage(gpa, "<image href=\"" ++ quad_png ++
@@ -7383,7 +7383,7 @@ test "word spacing goes after word separators, letter spacing after everything" 
     try testing.expectEqual(@as(f64, 1), spacingAfter(run, "\t"));
 }
 
-test "a caller's stylesheet recolours and outlines a picture without editing it" {
+test "a caller's stylesheet recolors and outlines a picture without editing it" {
     // A square in the middle of a 24-unit box, with nothing said about paint.
     const plain =
         \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 6H18V18H6Z"/></svg>
@@ -7399,7 +7399,7 @@ test "a caller's stylesheet recolours and outlines a picture without editing it"
     // The inside is the sheet's fill rather than the caller's default.
     try testing.expectEqual(@as(u8, 255), surface.getPixel(24, 24).?.rgb.g);
     // The edge, at 12 pixels, is under a stroke two units -- four pixels --
-    // wide, so a pixel just inside it is the stroke's colour.
+    // wide, so a pixel just inside it is the stroke's color.
     const edge = surface.getPixel(13, 24).?.rgb;
     try testing.expectEqual(@as(u8, 255), edge.b);
     try testing.expectEqual(@as(u8, 0), edge.g);
@@ -7475,7 +7475,7 @@ test "a gradient under a transform that collapses the plane draws nothing, and f
     try testing.expectEqual(@as(u8, 0), sfc.getPixel(4, 4).?.rgba.a);
 }
 
-test "CSS Color 4 reaches every property a colour is written in" {
+test "CSS Color 4 reaches every property a color is written in" {
     const gpa = testing.allocator;
     var sfc = try render(gpa, "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 1\">" ++
         "<linearGradient id=\"g\"><stop stop-color=\"lab(50% 40 -20)\"/><stop offset=\"1\" stop-color=\"lab(50% 40 -20)\"/></linearGradient>" ++
@@ -7485,7 +7485,7 @@ test "CSS Color 4 reaches every property a colour is written in" {
         "<rect x=\"2\" width=\"1\" height=\"1\" fill=\"url(#g)\"/>" ++
         "<rect x=\"3\" width=\"1\" height=\"1\" filter=\"url(#f)\"/></svg>", .{ .width = 4, .height = 1 });
     defer sfc.deinit(gpa);
-    // The values from the colour tests; the flood goes through linearRGB and
+    // The values from the color tests; the flood goes through linearRGB and
     // back, which is where a level can go.
     const want = [4][3]u8{ .{ 76, 184, 106 }, .{ 64, 191, 191 }, .{ 171, 90, 154 }, .{ 51, 102, 153 } };
     for (want, 0..) |rgb, x| {
@@ -7723,7 +7723,7 @@ test "a style element's media query is asked about the size it is drawn at, and 
 test "the structural and logical pseudo-classes, and @media, draw as Chrome draws them" {
     // A square per selector: structural, logical, attribute and namespaced
     // ones, `:empty`, and `@media` blocks asked about the drawn size and the
-    // colour scheme, nested among them. Each colour is what Chrome 140 draws
+    // color scheme, nested among them. Each color is what Chrome 140 draws
     // for the same document as an `<img>` at that size and in that scheme.
     const gpa = testing.allocator;
     const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:s=\"http://www.w3.org/2000/svg\" width=\"160\" height=\"40\" viewBox=\"0 0 16 4\"><style>\n@namespace s url(http://www.w3.org/2000/svg);\nrect { fill: gray }\ng > rect:first-child { fill: red }\ng > rect:nth-child(3) { fill: blue }\ng > rect:last-child { fill: green }\ng > rect:nth-child(2 of .a) { fill: orange }\nrect:not(.a):nth-of-type(5) { fill: purple }\nrect:is(.b, .c) { fill: teal }\nrect:where(.d) { fill: navy }\nrect[data-k^=pre] { fill: gold }\nrect[data-k$=post] { fill: pink }\nrect[data-k*=mid] { fill: brown }\nrect[data-k=\"CASE\" i] { fill: lime }\n:root > s|g > s|rect.e { fill: olive }\ncircle:empty { fill: maroon }\n@media (max-width: 200px) { rect.f { fill: black } }\n@media (min-width: 201px) { rect.f { fill: white } }\n@media (prefers-color-scheme: dark) { rect.g { fill: cyan } }\n@media print { rect.g { fill: red } }\n@media screen { @media (max-width: 200px) { rect.h { fill: coral } } }\n</style><g><rect x=\"0\" width=\"1\" height=\"4\"/><rect x=\"1\" width=\"1\" height=\"4\" class=\"a\"/><rect x=\"2\" width=\"1\" height=\"4\"/><rect x=\"3\" width=\"1\" height=\"4\" class=\"a\"/><rect x=\"4\" width=\"1\" height=\"4\"/><rect x=\"5\" width=\"1\" height=\"4\" class=\"b\"/><rect x=\"6\" width=\"1\" height=\"4\" class=\"d\"/><rect x=\"7\" width=\"1\" height=\"4\" data-k=\"prefix\"/><rect x=\"8\" width=\"1\" height=\"4\" data-k=\"the-post\"/><rect x=\"9\" width=\"1\" height=\"4\" data-k=\"amidst\"/><rect x=\"10\" width=\"1\" height=\"4\" data-k=\"case\"/><rect x=\"11\" width=\"1\" height=\"4\" class=\"e\"/><rect x=\"12\" width=\"1\" height=\"4\" class=\"f\"/><rect x=\"13\" width=\"1\" height=\"4\" class=\"g\"/><rect x=\"14\" width=\"1\" height=\"4\" class=\"h\"/><circle cx=\"15.5\" cy=\"2\" r=\"0.5\"/></g></svg>";
@@ -7759,12 +7759,12 @@ test "the structural and logical pseudo-classes, and @media, draw as Chrome draw
     }
 }
 
-test "light-dark follows the used colour scheme, as Chrome draws it" {
+test "light-dark follows the used color scheme, as Chrome draws it" {
     // CSS Color Adjust 1: with no `color-scheme` a document is light whatever
     // the reader prefers; `light dark` follows the reader, `dark` and `only
     // light` do not; the attribute is no presentation attribute. And it
     // reaches `currentColor`, a gradient's stops and an `feFlood`, each by the
-    // scheme where it is written. Every colour is Chrome 140's for the same
+    // scheme where it is written. Every color is Chrome 140's for the same
     // document as an `<img>`, in a light and a dark reader.
     const gpa = testing.allocator;
     const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"20\" viewBox=\"0 0 10 2\"><defs><linearGradient id=\"g\" style=\"color-scheme: light dark\"><stop stop-color=\"light-dark(red, blue)\"/><stop offset=\"1\" stop-color=\"light-dark(red, blue)\"/></linearGradient><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\" style=\"color-scheme: light dark\"><feFlood flood-color=\"light-dark(gold, purple)\"/></filter></defs><rect x=\"0\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/><g style=\"color-scheme: light dark\"><rect x=\"1\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: dark\"><rect x=\"2\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: only light\"><rect x=\"3\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g color-scheme=\"light dark\"><rect x=\"4\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: light dark; color: light-dark(green, orange)\"><rect x=\"5\" width=\"1\" height=\"2\" fill=\"currentColor\"/></g><rect x=\"6\" width=\"1\" height=\"2\" fill=\"url(#g)\"/><rect x=\"7\" width=\"1\" height=\"2\" filter=\"url(#f)\"/><rect x=\"9\" width=\"1\" height=\"2\" style=\"color-scheme: dark\" fill=\"light-dark(black, white)\"/></svg>";
@@ -7786,11 +7786,11 @@ test "light-dark follows the used colour scheme, as Chrome draws it" {
     }
 }
 
-test "a colour that waits on currentColor comes to the element's colour, as Chrome draws it" {
-    // `light-dark(currentColor, …)` and a relative colour made from
+test "a color that waits on currentColor comes to the element's color, as Chrome draws it" {
+    // `light-dark(currentColor, …)` and a relative color made from
     // `currentColor`, in a fill, a stroke, and in `color` itself -- where
-    // `currentColor` is the parent's colour, or the caller's where nothing
-    // above names one, as Chrome's initial black is here. Every colour is
+    // `currentColor` is the parent's color, or the caller's where nothing
+    // above names one, as Chrome's initial black is here. Every color is
     // Chrome 140's for the same document as an `<img>`, light and dark.
     const gpa = testing.allocator;
     const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"20\" viewBox=\"0 0 6 2\" style=\"color-scheme: light dark\"><rect x=\"0\" width=\"1\" height=\"2\" color=\"teal\" fill=\"light-dark(currentColor, blue)\"/><g color=\"red\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: light-dark(currentColor, white)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" style=\"color: light-dark(currentColor, orange)\" fill=\"currentColor\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"rgb(10, 20, 30)\" fill=\"rgb(from currentColor r g 255)\"/><rect x=\"4.25\" y=\"0.25\" width=\"0.5\" height=\"1.5\" color=\"purple\" fill=\"none\" stroke-width=\"0.5\" stroke=\"light-dark(currentColor, lime)\"/><g color=\"navy\"><g style=\"color: light-dark(currentColor, gold)\"><rect x=\"5\" width=\"1\" height=\"2\" fill=\"light-dark(currentColor, pink)\"/></g></g></svg>";
@@ -7817,10 +7817,10 @@ test "a colour that waits on currentColor comes to the element's colour, as Chro
     }
 }
 
-test "a color-mix with currentColor in it mixes the element's colour, as Chrome draws it" {
+test "a color-mix with currentColor in it mixes the element's color, as Chrome draws it" {
     // As a fill, as `color` itself (mixing the parent's), in a stop (the
-    // gradient's colour), and around a `light-dark()` that waits too. Each
-    // colour is Chrome 140's for the same document as an `<img>`.
+    // gradient's color), and around a `light-dark()` that waits too. Each
+    // color is Chrome 140's for the same document as an `<img>`.
     const gpa = testing.allocator;
     const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 4 2\"><linearGradient id=\"g\" color=\"lime\"><stop stop-color=\"color-mix(in srgb, currentColor, black)\"/></linearGradient><rect x=\"0\" width=\"1\" height=\"2\" color=\"blue\" fill=\"color-mix(in srgb, currentColor, red)\"/><g color=\"white\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: color-mix(in srgb, currentColor 25%, black)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" fill=\"url(#g)\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"teal\" fill=\"color-mix(in srgb, light-dark(currentColor, red), white)\"/></svg>";
     var sfc = try render(gpa, src, .{ .width = 40, .height = 20 });

@@ -95,7 +95,7 @@ jobs:
         uses: https://code.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build API docs
-        # `--system` hands Zig the dependency set Nix realised, and forbids
+        # `--system` hands Zig the dependency set Nix realized, and forbids
         # fetching outright, so a dependency missing from it is a build error
         # naming the package rather than a silent reach for the network. The
         # `zig-deps` output exists for this job: it is the same `linkFarm` the

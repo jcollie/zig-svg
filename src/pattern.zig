@@ -31,9 +31,9 @@
 //! ## What the tile clips
 //!
 //! `overflow` on a `<pattern>` is `hidden`, so content that runs past the
-//! tile's edge is cut off rather than showing up in the neighbour. That is not
+//! tile's edge is cut off rather than showing up in the neighbor. That is not
 //! a detail: a pattern of overlapping circles looks completely different if it
-//! is not honoured, and resvg honours it. The renderer therefore has to clip
+//! is not honored, and resvg honors it. The renderer therefore has to clip
 //! every tile it draws, which is why it draws them one at a time rather than
 //! drawing one and stamping it.
 
@@ -85,7 +85,7 @@ pub const Pattern = struct {
     transform: z2d.Transformation = .identity,
     /// A `viewBox` on the pattern, which replaces `content_units`.
     view_box: ?document.ViewBox = null,
-    preserve_aspect_ratio: document.PreserveAspectRatio = .meet_centred,
+    preserve_aspect_ratio: document.PreserveAspectRatio = .meet_centered,
 
     /// Whether the pattern has a tile with any extent. §13.3 makes a zero
     /// `width` or `height` disable the element, which paints nothing.

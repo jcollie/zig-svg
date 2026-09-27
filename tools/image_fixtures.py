@@ -34,7 +34,7 @@ def data_url(image, fmt, media, **save):
     return f"data:{media};base64," + base64.b64encode(out.getvalue()).decode("ascii")
 
 
-def colourful(width, height, alpha=True):
+def colorful(width, height, alpha=True):
     """Hue across, fading down, with a white diagonal to show edges."""
     im = Image.new("RGBA", (width, height))
     for y in range(height):
@@ -61,9 +61,9 @@ def rings(size):
 
 def main(out_dir):
     out = pathlib.Path(out_dir)
-    p16 = colourful(16, 16)
-    rgb16 = colourful(16, 16, alpha=False).convert("RGB")
-    wide = colourful(16, 8)
+    p16 = colorful(16, 16)
+    rgb16 = colorful(16, 16, alpha=False).convert("RGB")
+    wide = colorful(16, 8)
 
     png = data_url(p16, "PNG", "image/png", optimize=True)
     wide_png = data_url(wide, "PNG", "image/png", optimize=True)

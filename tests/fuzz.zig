@@ -425,7 +425,7 @@ fn renderTarget(input: []const u8) anyerror!void {
 
 /// One elliptical arc, from parameters chosen directly rather than parsed.
 ///
-/// The endpoint-to-centre conversion has a square root, two divisions and an
+/// The endpoint-to-center conversion has a square root, two divisions and an
 /// `acos` in it, every one of which has an input that answers NaN, and the
 /// degenerate cases -- coincident endpoints, a zero radius, radii too small to
 /// reach -- are each handled by a different clause of appendix F.6.
@@ -589,7 +589,7 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-opacity=\"50%\" opacity=\"0.25\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-rule=\"evenodd\"/></svg>",
     // And the shapes of them that have to be refused rather than defaulted.
-    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"notacolour\"/></svg>",
+    "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"notacolor\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill=\"#12345\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" opacity=\"half\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><path d=\"M0 0H8V8H0Z\" fill-rule=\"EVENODD\"/></svg>",
@@ -932,7 +932,7 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\" style=\"fill:wobble\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" style=\"font-size:4;text-anchor:middle\">a</text></svg>",
     // Text properties that are not values at all.
-    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" text-anchor=\"centre\">hi</text></svg>",
+    "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" text-anchor=\"center\">hi</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-weight=\"heavy\">hi</text></svg>",
     "<svg viewBox=\"0 0 8 8\"><text x=\"1\" y=\"6\" font-style=\"slanted\">hi</text></svg>",
     // Still refused: a filter, and units that are neither of the two.
@@ -976,7 +976,7 @@ const document_corpus = [_][]const u8{
     // and one reaching its own content through inheritance.
     "<svg viewBox=\"0 0 8 8\"><marker id=\"m\" viewBox=\"0 0 2 2\" refX=\"1\" refY=\"1\" orient=\"auto-start-reverse\" preserveAspectRatio=\"xMinYMin slice\"><circle cx=\"1\" cy=\"1\" r=\"1\"/></marker><path d=\"M1 1 L4 1 A2 2 0 0 1 4 5 Q1 5 1 3 Z\" stroke=\"red\" style=\"marker: url(#m)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><g style=\"marker: url(#m)\"><marker id=\"m\" markerUnits=\"userSpaceOnUse\" orient=\"0.1turn\" overflow=\"visible\"><path d=\"M0 0 L2 2\" stroke=\"blue\"/></marker><polyline points=\"1 1 4 4 7 1\"/><line x2=\"8\" y2=\"8\" marker-mid=\"none\"/></g></svg>",
-    // The colour primitives: a matrix that lights up transparent pixels, and
+    // The color primitives: a matrix that lights up transparent pixels, and
     // every transfer function.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feColorMatrix type=\"hueRotate\" values=\"30\"/><feColorMatrix values=\"0 1 0 0 0 0 0 1 0 0 1 0 0 0 0 0 0 0 1 0.5\"/></filter><rect width=\"4\" height=\"4\" fill=\"red\" fill-opacity=\"0.5\" filter=\"url(#f)\"/></svg>",
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feComponentTransfer><feFuncR type=\"table\" tableValues=\"1 0 1\"/><feFuncG type=\"discrete\" tableValues=\"0 1\"/><feFuncB type=\"gamma\" exponent=\"2\"/><feFuncA type=\"linear\" intercept=\"0.5\"/></feComponentTransfer></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"teal\" filter=\"url(#f)\"/></svg>",
@@ -984,7 +984,7 @@ const document_corpus = [_][]const u8{
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feOffset dx=\"1\" result=\"o\"/><feComposite in=\"SourceGraphic\" in2=\"o\" operator=\"arithmetic\" k1=\"1\" k2=\"0.5\" k3=\"0.5\" k4=\"-0.2\"/><feBlend in2=\"SourceAlpha\" mode=\"luminosity\"/></filter><rect width=\"4\" height=\"4\" fill=\"orange\" filter=\"url(#f)\"/></svg>",
     // Morphology on the alpha, then tiled from a subregion.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"1 0.5\"/><feOffset x=\"1\" y=\"1\" width=\"2\" height=\"3\"/><feTile/><feMorphology radius=\"0.3\"/></filter><circle cx=\"3\" cy=\"3\" r=\"2\" fill=\"purple\" filter=\"url(#f)\"/></svg>",
-    // Convolution with an off-centre target, each edge mode in turn.
+    // Convolution with an off-center target, each edge mode in turn.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feConvolveMatrix order=\"3 2\" kernelMatrix=\"1 -1 0 2 0 -2\" targetY=\"1\" bias=\"0.3\" edgeMode=\"wrap\"/><feConvolveMatrix kernelMatrix=\"1 1 1 1 1 1 1 1 1\" edgeMode=\"none\" preserveAlpha=\"true\"/></filter><circle cx=\"4\" cy=\"4\" r=\"3\" fill=\"coral\" filter=\"url(#f)\"/></svg>",
     // Displacement by a translucent map, reading each channel.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feFlood flood-color=\"rgba(200,20,90,0.5)\" result=\"m\"/><feDisplacementMap in=\"SourceGraphic\" in2=\"m\" scale=\"3\" xChannelSelector=\"B\" yChannelSelector=\"A\"/><feDisplacementMap in2=\"SourceAlpha\" scale=\"-40\"/></filter><rect x=\"1\" y=\"1\" width=\"5\" height=\"5\" fill=\"navy\" filter=\"url(#f)\"/></svg>",
@@ -993,7 +993,7 @@ const document_corpus = [_][]const u8{
     // Every light, on the alpha of a shape, one of them in bounding-box
     // units, and a highlight composited back over it.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\" primitiveUnits=\"objectBoundingBox\"><feDiffuseLighting in=\"SourceAlpha\" surfaceScale=\"3\" lighting-color=\"currentColor\"><fePointLight x=\"0.2\" y=\"0.1\" z=\"0.5\"/></feDiffuseLighting></filter><filter id=\"g\"><feSpecularLighting in=\"SourceAlpha\" specularExponent=\"128\" result=\"s\"><feSpotLight x=\"1\" y=\"1\" z=\"9\" pointsAtX=\"4\" pointsAtY=\"4\" limitingConeAngle=\"-20\" specularExponent=\"-1\"/></feSpecularLighting><feComposite in=\"SourceGraphic\" in2=\"s\" operator=\"arithmetic\" k2=\"1\" k3=\"1\"/><feDiffuseLighting><feDistantLight azimuth=\"1e30\" elevation=\"-90\"/></feDiffuseLighting></filter><circle cx=\"3\" cy=\"3\" r=\"2\" color=\"red\" filter=\"url(#f)\"/><rect x=\"4\" y=\"4\" width=\"3\" height=\"3\" filter=\"url(#g)\"/></svg>",
-    // A drop shadow on its own defaults, and one of the current colour.
+    // A drop shadow on its own defaults, and one of the current color.
     "<svg viewBox=\"0 0 8 8\"><filter id=\"f\"><feDropShadow/><feDropShadow in=\"SourceAlpha\" dx=\"-1e9\" stdDeviation=\"0 1\" flood-color=\"currentColor\" flood-opacity=\"0.3\"/></filter><rect width=\"4\" height=\"4\" color=\"blue\" filter=\"url(#f)\"/></svg>",
     // feImage of an element in bounding-box units, of a missing one, of the
     // element filtering itself, and of a picture.
@@ -1019,8 +1019,8 @@ const document_corpus = [_][]const u8{
     // Non-scaling strokes under a skew and a stretch, dashed, with a gradient,
     // a pattern, markers, text, and inside a mask and a pattern cell.
     "<svg viewBox=\"0 0 8 8\" width=\"16\" height=\"16\"><linearGradient id=\"g\"><stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/></linearGradient><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><path d=\"M0 0 L2 2\" stroke=\"black\" vector-effect=\"non-scaling-stroke\"/></pattern><marker id=\"m\"><circle r=\"1\" stroke=\"green\" vector-effect=\"non-scaling-stroke\"/></marker><mask id=\"k\"><rect width=\"8\" height=\"8\" stroke=\"white\" stroke-width=\"3\" transform=\"scale(0.5 2)\" vector-effect=\"non-scaling-stroke\"/></mask><g transform=\"skewX(30) scale(3 0.5)\" mask=\"url(#k)\"><path d=\"M1 1 L2 6 L0.5 7\" stroke=\"url(#g)\" stroke-dasharray=\"1 0.5\" style=\"marker: url(#m); vector-effect: non-scaling-stroke\"/><rect width=\"2\" height=\"2\" fill=\"none\" stroke=\"url(#p)\" stroke-width=\"4\" vector-effect=\"non-scaling-stroke\"/></g><text x=\"1\" y=\"7\" font-size=\"3\" stroke=\"red\" transform=\"scale(2 0.5)\" vector-effect=\"non-scaling-stroke\">a<tspan>b</tspan></text></svg>",
-    // Every CSS Color 4 function, in each place a colour is written, and a
-    // colour-mix nested in another.
+    // Every CSS Color 4 function, in each place a color is written, and a
+    // color-mix nested in another.
     "<svg viewBox=\"0 0 8 8\" style=\"color: oklch(60% 0.2 30 / 0.8)\"><linearGradient id=\"g\"><stop stop-color=\"lab(50% 40 -20)\"/><stop offset=\"1\" stop-color=\"color(display-p3 1 0 0 / 50%)\"/></linearGradient><filter id=\"f\"><feFlood flood-color=\"hwb(200 10% 20%)\"/><feDiffuseLighting lighting-color=\"lch(60% 50 30)\"><feDistantLight/></feDiffuseLighting></filter><rect width=\"4\" height=\"4\" fill=\"hsl(0.5turn 50% none)\" stroke=\"currentColor\"/><rect x=\"4\" width=\"4\" height=\"4\" fill=\"url(#g)\" filter=\"url(#f)\"/><circle cx=\"4\" cy=\"6\" r=\"2\" fill=\"color-mix(in oklch longer hue, color-mix(in srgb, red, oklab(0.6 0.1 -0.1)) 30%, color(xyz-d50 0.2 0.3 0.4))\" style=\"filter: drop-shadow(1px 1px hsl(120deg 100% 25%))\"/></svg>",
     // CSS transforms from style and a sheet, origins in every form, fill-box
     // on a group, a use, text and inside a measured group, and none.
@@ -1046,10 +1046,10 @@ const document_corpus = [_][]const u8{
     // The static pseudo-classes, attribute tests, namespaces and @media,
     // nested, and a state pseudo-class to be refused.
     "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:s=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><style>@namespace s url(http://www.w3.org/2000/svg); s|g > rect:nth-child(2n+1 of .a):not(:is(.b, :where(.c))) { fill: red } rect[k^=a i]:last-of-type { fill: blue } :root circle:empty { fill: green } @media screen and (max-width: 20px) { @media (prefers-color-scheme: dark) { rect { stroke: teal } } } rect:hover { fill: gold }</style><g><rect class=\"a\" width=\"2\" height=\"2\" k=\"Abc\"/><rect class=\"a b\" x=\"2\" width=\"2\" height=\"2\"/><rect class=\"a\" x=\"4\" width=\"2\" height=\"2\"/><circle cx=\"6\" cy=\"6\" r=\"1\"/></g></svg>",
-    // light-dark() by color-scheme in every place a colour is read, and one
+    // light-dark() by color-scheme in every place a color is read, and one
     // waiting on currentColor.
     "<svg viewBox=\"0 0 8 8\" style=\"color-scheme: light dark\"><linearGradient id=\"g\"><stop stop-color=\"light-dark(red, oklch(50% 0.2 200))\"/></linearGradient><filter id=\"f\" style=\"color-scheme: dark\"><feFlood flood-color=\"light-dark(gold, purple)\"/></filter><g style=\"color: light-dark(green, orange); color-scheme: only light\"><rect width=\"4\" height=\"4\" fill=\"url(#g) light-dark(red, blue)\" stroke=\"currentColor\" filter=\"url(#f) drop-shadow(1px 1px light-dark(teal, maroon))\"/></g><circle cx=\"6\" cy=\"6\" r=\"1\" fill=\"light-dark(currentColor, blue)\"/></svg>",
-    // Colours waiting on currentColor, nested through `color` itself, in a
+    // Colors waiting on currentColor, nested through `color` itself, in a
     // stop inheriting through its gradient, a marker, a pattern and a mask.
     "<svg viewBox=\"0 0 8 8\" style=\"color-scheme: light dark\"><defs color=\"color-mix(in oklch, currentColor, red)\"><linearGradient id=\"g\" style=\"color: light-dark(currentColor, rgb(from currentColor b g r))\"><stop stop-color=\"color-mix(in srgb, currentColor 30%, transparent)\"/><stop offset=\"1\" stop-color=\"currentColor\"/></linearGradient><marker id=\"m\" markerWidth=\"2\" markerHeight=\"2\"><rect width=\"2\" height=\"2\" fill=\"light-dark(currentColor, gold)\"/></marker><pattern id=\"p\" width=\"2\" height=\"2\" patternUnits=\"userSpaceOnUse\"><rect width=\"1\" height=\"1\" fill=\"rgb(from currentColor calc(r / 2) g b / 0.5)\"/></pattern><mask id=\"k\"><rect width=\"8\" height=\"8\" fill=\"color-mix(in hsl, currentColor, white)\"/></mask></defs><g style=\"color: color-mix(in srgb, light-dark(currentColor, teal), currentColor)\"><path d=\"M1 1 L7 7\" stroke=\"url(#g) color-mix(in lab, currentColor, blue)\" marker-end=\"url(#m)\" mask=\"url(#k)\"/><rect width=\"4\" height=\"4\" fill=\"url(#p)\" stroke=\"light-dark(currentColor, currentColor)\"/></g></svg>",
 };

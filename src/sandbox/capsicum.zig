@@ -10,7 +10,7 @@
 //! that descriptor was limited to. A process in *capability mode* --- entered
 //! with `cap_enter(2)`, and never left --- has lost every global namespace at
 //! once: no path can be opened, no address connected to, no other process
-//! signalled, no `sysctl` read beyond a short list of harmless ones.
+//! signaled, no `sysctl` read beyond a short list of harmless ones.
 //!
 //! So where the seccomp filter permits four calls and kills on the fifth,
 //! capability mode permits a couple of hundred calls and makes all of them

@@ -11,10 +11,10 @@
 //!
 //! ## Premultiplied or not
 //!
-//! §15 says per primitive which it means. The colour operations --
-//! `feColorMatrix`, `feComponentTransfer` -- are defined on colour that is
+//! §15 says per primitive which it means. The color operations --
+//! `feColorMatrix`, `feComponentTransfer` -- are defined on color that is
 //! *not* premultiplied, because a matrix that adds a constant to alpha would
-//! otherwise have nothing to multiply the colour by. So they divide the alpha
+//! otherwise have nothing to multiply the color by. So they divide the alpha
 //! out, work in floating point on values in `[0, 1]`, clamp, and multiply it
 //! back in, rounding to nearest as z2d does rather than truncating.
 
@@ -180,7 +180,7 @@ fn fractions(px: RGBA) [4]f32 {
     };
 }
 
-/// Back to bytes, with the colour held to no more than the alpha so that the
+/// Back to bytes, with the color held to no more than the alpha so that the
 /// pixel stays a premultiplied one.
 fn fromFractions(c: [4]f32) RGBA {
     const a = std.math.clamp(c[3], 0, 1);
@@ -223,7 +223,7 @@ fn compositePixel(args: CompositeArgs, pa: RGBA, pb: RGBA) RGBA {
         .lighter => .{ 1, 1 },
         .arithmetic => {
             // Every channel, alpha included, by the same polynomial, clamped;
-            // then the colour held under the alpha.
+            // then the color held under the alpha.
             const k = args.k;
             var c: [4]f32 = undefined;
             for (0..4) |i| c[i] = k[0] * a[i] * b[i] + k[1] * a[i] + k[2] * b[i] + k[3];
@@ -263,7 +263,7 @@ fn blendPixel(mode: filter.BlendMode, ps: RGBA, pb: RGBA) RGBA {
     return fromFractions(c);
 }
 
-/// B(Cb, Cs): the blended colour, straight, for each mode.
+/// B(Cb, Cs): the blended color, straight, for each mode.
 fn blendColor(mode: filter.BlendMode, cb: [3]f32, cs: [3]f32) [3]f32 {
     switch (mode) {
         .hue => return setLum(setSat(cs, sat(cb)), lum(cb)),
@@ -312,14 +312,14 @@ fn lum(c: [3]f32) f32 {
     return 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
 }
 
-/// ClipColor, Compositing and Blending §5.9: a colour SetLum pushed out of
+/// ClipColor, Compositing and Blending §5.9: a color SetLum pushed out of
 /// range is drawn back towards its luminance, not clamped.
 ///
 /// resvg's tiny-skia 0.11.4 tests the *largest* channel where this tests the
 /// smallest (`highp.rs`, `clip_color`), so it never pulls a negative channel
 /// back and clamps it to nought instead. That is the whole of the difference
 /// `filter-blend-nonseparable` measures, at up to fifty levels where a hue or
-/// colour blend lands below black.
+/// color blend lands below black.
 fn clipColor(c: [3]f32) [3]f32 {
     const l = lum(c);
     const n = @min(c[0], @min(c[1], c[2]));
@@ -385,7 +385,7 @@ pub fn tile(out: *z2d.Surface, in: *z2d.Surface, tile_box: image.PixelBox, box: 
 
 /// `feMorphology`, §15.18: every channel of `out` the least (erode) or the
 /// greatest (dilate) of that channel of `in` over the `2rx+1` by `2ry+1`
-/// rectangle centred on it. Pixels past the edge of the surface take no
+/// rectangle centered on it. Pixels past the edge of the surface take no
 /// part, rather than counting as transparent: an erosion does not eat in
 /// from the edge of the canvas.
 ///
@@ -435,7 +435,7 @@ const Lines = struct {
     }
 
     /// `n` pixels `stride` apart from `from`, each replaced in `to` by the
-    /// extreme over the `2r+1` of them centred on it.
+    /// extreme over the `2r+1` of them centered on it.
     fn run(self: Lines, from: []const RGBA, from_stride: usize, to: []RGBA, to_stride: usize, n: usize, r: usize) void {
         if (r == 0) {
             if (from.ptr != to.ptr) for (0..n) |i| {
@@ -482,7 +482,7 @@ const Lines = struct {
 /// `bounds` is the image the primitive is given -- the filter region -- and
 /// `edge` says what lies past it: the nearest pixel on the edge, the pixel
 /// from the far side, or transparent black. With `preserve_alpha` the
-/// colour is convolved with the alpha divided out and the alpha is kept;
+/// color is convolved with the alpha divided out and the alpha is kept;
 /// without it, every channel is convolved as it is, premultiplied.
 pub fn convolve(
     out: *z2d.Surface,
@@ -554,7 +554,7 @@ fn edgeOf(mode: filter.EdgeMode, v: i32, lo: i32, hi: i32) ?i32 {
 
 /// `feDisplacementMap`, §15.15: every pixel of `box` in `out` fetched from
 /// `in` at an offset of `scale` times how far a channel of `map` is from a
-/// half -- the map's colour with its alpha divided out, as the specification
+/// half -- the map's color with its alpha divided out, as the specification
 /// says. `scale` is in canvas pixels, per axis. A fetch from outside
 /// `bounds`, the image the primitive is given, is transparent black.
 ///
@@ -615,7 +615,7 @@ pub const NoiseSpace = struct {
 /// frequencies are nudged so that the noise tiles across the primitive's
 /// subregion, in user space as §15.23 says.
 ///
-/// The noise is straight colour in the primitive's colour space, and is
+/// The noise is straight color in the primitive's color space, and is
 /// multiplied by its own alpha on the way into the surface.
 pub fn turbulence(out: *z2d.Surface, box: image.PixelBox, t: filter.Turbulence, space: NoiseSpace) void {
     const clipped = box.intersect(image.extent(out));
@@ -811,7 +811,7 @@ pub const Lighting = struct {
     /// `diffuseConstant` or `specularConstant`.
     constant: f64,
     exponent: f64,
-    /// `lighting-color` in the primitive's colour space.
+    /// `lighting-color` in the primitive's color space.
     color: [3]f32,
     light: Light,
 };
@@ -822,14 +822,14 @@ pub const Lighting = struct {
 /// The surface normal is §15.14's Sobel operator, with its own kernels where
 /// the image stops -- at the edges and corners of `bounds`, the image the
 /// primitive is given. Those kernels all come to one rule: each difference
-/// is taken across whichever of the two neighbours exist, weighted 1-2-1 down
+/// is taken across whichever of the two neighbors exist, weighted 1-2-1 down
 /// whichever rows exist, and scaled by two over the product of the weights
 /// and the distance. That gives the specification's `1/4`, `1/3`, `1/2` and
 /// `2/3` exactly, without eight functions to say so.
 ///
 /// Every pixel is its corner, as resvg has it. A diffuse result is opaque;
 /// a specular one takes the greatest of its channels as its alpha, and its
-/// colour as already premultiplied by it, as Skia and resvg both do.
+/// color as already premultiplied by it, as Skia and resvg both do.
 pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, box: image.PixelBox, l: Lighting) void {
     const b = bounds.intersect(image.extent(in));
     const clipped = box.intersect(b);
@@ -888,7 +888,7 @@ pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, 
             const fy = if (dy > 0) 2 / (wy * dy) else 0;
             const normal = normalize(.{ -l.surface_scale * fx * nx, -l.surface_scale * fy * ny, 1 }) orelse .{ 0, 0, 1 };
 
-            // The light's direction, and its colour here.
+            // The light's direction, and its color here.
             const z = l.surface_scale * alphaAt(src, w, x, y);
             const fxp: f64 = @floatFromInt(x);
             const fyp: f64 = @floatFromInt(y);
@@ -903,7 +903,7 @@ pub fn light(out: *z2d.Surface, in: *const z2d.Surface, bounds: image.PixelBox, 
                 const along = if (spot_axis) |s| -dot(dir, s) else 0;
                 const inside = along > 0 and (sp.cone == null or along >= @cos(std.math.degreesToRadians(sp.cone.?)));
                 const k = if (inside) std.math.pow(f64, along, sp.exponent) else 0;
-                // Rounded to a byte, as resvg rounds the spot light's colour.
+                // Rounded to a byte, as resvg rounds the spot light's color.
                 for (&light_color) |*t| t.* = @round(std.math.clamp(t.* * k, 0, 1) * 255) / 255;
             }
 
@@ -943,7 +943,7 @@ fn unitOr(v: [3]f64) [3]f64 {
     return normalize(v) orelse v;
 }
 
-/// Every pixel of `box` in `sfc` replaced by `px`, a premultiplied colour,
+/// Every pixel of `box` in `sfc` replaced by `px`, a premultiplied color,
 /// scaled by that pixel's alpha: an `feFlood` composited `in` an alpha mask,
 /// in one pass.
 pub fn tint(sfc: *z2d.Surface, box: image.PixelBox, px: RGBA) void {
@@ -968,7 +968,7 @@ fn surfaceOf(px: RGBA) !z2d.Surface {
     return sfc;
 }
 
-test "a colour matrix works on colour with the alpha divided out" {
+test "a color matrix works on color with the alpha divided out" {
     // Half-transparent red; the matrix swaps red and green and adds a quarter
     // to alpha.
     var sfc = try surfaceOf(.{ .r = 128, .g = 0, .b = 0, .a = 128 });
@@ -1053,8 +1053,8 @@ test "each Porter-Duff operator keeps what §15.12 says it keeps" {
     }
 }
 
-test "arithmetic clamps, and keeps the colour under the alpha" {
-    // Opaque red with opaque black: `k1*i1*i2` is nothing in the colour
+test "arithmetic clamps, and keeps the color under the alpha" {
+    // Opaque red with opaque black: `k1*i1*i2` is nothing in the color
     // channels and everything in alpha, so taking half of it back leaves red
     // at full strength over an alpha of a half -- which is held to a half.
     var a, var b, var out = try pairOf(.{ .r = 255, .g = 0, .b = 0, .a = 255 }, .{ .r = 0, .g = 0, .b = 0, .a = 255 });
@@ -1068,7 +1068,7 @@ test "arithmetic clamps, and keeps the colour under the alpha" {
     try testing.expectEqual(RGBA{ .r = 255, .g = 128, .b = 128, .a = 255 }, out.image_surface_rgba.buf[0]);
 }
 
-test "blending an opaque source over an opaque backdrop is the mode's colour" {
+test "blending an opaque source over an opaque backdrop is the mode's color" {
     const s: RGBA = .{ .r = 255, .g = 128, .b = 0, .a = 255 };
     const bd: RGBA = .{ .r = 128, .g = 128, .b = 128, .a = 255 };
     const cases = [_]struct { filter.BlendMode, RGBA }{
@@ -1078,8 +1078,8 @@ test "blending an opaque source over an opaque backdrop is the mode's colour" {
         .{ .darken, .{ .r = 128, .g = 128, .b = 0, .a = 255 } },
         .{ .lighten, .{ .r = 255, .g = 128, .b = 128, .a = 255 } },
         .{ .difference, .{ .r = 127, .g = 0, .b = 128, .a = 255 } },
-        // A grey backdrop has no saturation, so its hue is the source's at
-        // none: grey, at the backdrop's luminance.
+        // A gray backdrop has no saturation, so its hue is the source's at
+        // none: gray, at the backdrop's luminance.
         .{ .saturation, bd },
     };
     for (cases) |case| {
@@ -1128,7 +1128,7 @@ test "a tile repeats the input's subregion, lined up with where it was" {
     try testing.expectEqualSlices(u8, &.{ 1, 2, 1, 2, 1, 2 }, &reds);
 }
 
-test "morphology takes the extreme over a centred window, the edge taking no part" {
+test "morphology takes the extreme over a centered window, the edge taking no part" {
     const gpa = testing.allocator;
     var in = try z2d.Surface.init(.image_surface_rgba, gpa, 9, 1);
     defer in.deinit(gpa);
@@ -1198,7 +1198,7 @@ fn rowKernel(order_x: u32, edge: filter.EdgeMode) filter.ConvolveMatrix {
 
 test "the kernel is turned through a half turn" {
     // [1 0 0] reads the pixel to the *right*: the kernel's first entry
-    // weighs the last of the neighbourhood.
+    // weighs the last of the neighborhood.
     const got = try convolveOne(&.{ 1, 0, 0 }, rowKernel(3, .duplicate), &opaque_grey);
     defer testing.allocator.free(got);
     try testing.expectEqual(@as(u8, 100), got[0].r);
@@ -1211,7 +1211,7 @@ test "each edge mode says what lies past the edge" {
     const cases = [_]struct { filter.EdgeMode, u8, u8 }{
         .{ .duplicate, 200, 255 },
         .{ .wrap, 0, 255 },
-        // Transparent black: the colour and the alpha both fall away.
+        // Transparent black: the color and the alpha both fall away.
         .{ .none, 0, 0 },
     };
     for (cases) |case| {
@@ -1231,7 +1231,7 @@ test "the divisor divides, the bias adds, and preserveAlpha keeps the alpha" {
 
     // Half-transparent white under a kernel that takes half: without
     // preserveAlpha the alpha halves too; with it the alpha is kept and the
-    // colour, straight, is halved.
+    // color, straight, is halved.
     const half = [_]RGBA{.{ .r = 128, .g = 128, .b = 128, .a = 128 }} ** 3;
     c.divisor = 2;
     c.kernel = .{ .first = 0, .count = 3 };
@@ -1371,7 +1371,7 @@ test "a spot light is dark outside its cone" {
     try testing.expectEqual(@as(u8, 0), got[14].r);
 }
 
-test "a tint is the colour at the mask's strength" {
+test "a tint is the color at the mask's strength" {
     var sfc = try surfaceOf(.{ .r = 0, .g = 0, .b = 0, .a = 128 });
     defer sfc.deinit(testing.allocator);
     tint(&sfc, image.extent(&sfc), .{ .r = 255, .g = 0, .b = 128, .a = 255 });

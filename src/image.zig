@@ -14,15 +14,15 @@
 //!
 //! Every buffer in a filter chain is premultiplied, which is not what the
 //! specification's prose assumes and is what every implementation does. A blur
-//! of straight alpha smears the colour of transparent pixels into their
-//! neighbours -- a black halo around anything drawn on transparency, because
-//! the colour behind a zero alpha is usually black and still counts towards
+//! of straight alpha smears the color of transparent pixels into their
+//! neighbors -- a black halo around anything drawn on transparency, because
+//! the color behind a zero alpha is usually black and still counts towards
 //! the average. Premultiplied, a transparent pixel contributes nothing to
-//! either the colour or the alpha, which is the answer that looks right.
+//! either the color or the alpha, which is the answer that looks right.
 //!
-//! The one operation that has to leave premultiplied form is the colour space
-//! conversion, because a transfer curve applied to `colour × alpha` is not the
-//! curve applied to the colour.
+//! The one operation that has to leave premultiplied form is the color space
+//! conversion, because a transfer curve applied to `color × alpha` is not the
+//! curve applied to the color.
 //!
 //! ## Eight bits of linear light
 //!
@@ -116,7 +116,7 @@ pub fn alphaOnly(sfc: *z2d.Surface) void {
     }
 }
 
-/// Fill `box` with one premultiplied colour, leaving the rest transparent.
+/// Fill `box` with one premultiplied color, leaving the rest transparent.
 /// §15.16's `feFlood`.
 pub fn flood(sfc: *z2d.Surface, px: z2d.pixel.RGBA, box: PixelBox) void {
     const w = sfc.getWidth();
@@ -158,7 +158,7 @@ pub fn offset(dst: *z2d.Surface, src: *z2d.Surface, dx: i32, dy: i32) void {
     }
 }
 
-// -- colour space ------------------------------------------------------------
+// -- color space ------------------------------------------------------------
 
 /// sRGB's transfer curve, on bytes. IEC 61966-2-1, and the piecewise linear
 /// segment near black matters: without it the darkest few levels go to zero.
@@ -187,12 +187,12 @@ fn linearToSrgbTable() [256]u8 {
 const to_linear = srgbToLinearTable();
 const to_srgb = linearToSrgbTable();
 
-/// Apply a byte-to-byte curve to the colour channels of a premultiplied
+/// Apply a byte-to-byte curve to the color channels of a premultiplied
 /// surface, leaving alpha alone.
 ///
-/// The curve belongs to the *colour*, so each pixel is divided by its alpha
+/// The curve belongs to the *color*, so each pixel is divided by its alpha
 /// before the table and multiplied back afterwards. A fully transparent pixel
-/// has no colour to convert and is left as it is.
+/// has no color to convert and is left as it is.
 fn mapColors(sfc: *z2d.Surface, table: *const [256]u8) void {
     for (pixels(sfc)) |*px| {
         if (px.a == 0) {
@@ -233,7 +233,7 @@ pub fn toSrgb(sfc: *z2d.Surface) void {
     mapColors(sfc, &to_srgb);
 }
 
-/// One sRGB channel in linearRGB, for a colour that is named rather than
+/// One sRGB channel in linearRGB, for a color that is named rather than
 /// sampled -- an `feFlood`'s, which never passes through a surface.
 pub fn linearize(v: u8) u8 {
     return to_linear[v];
@@ -310,7 +310,7 @@ pub fn gaussianBlur(
     }
 }
 
-/// The most taps a kernel may have either side of its centre. A blur wider
+/// The most taps a kernel may have either side of its center. A blur wider
 /// than this is a `stdDeviation` nothing sensible wrote, and the cost of a
 /// direct convolution is linear in it.
 const max_half = 1 << 12;
@@ -454,11 +454,11 @@ test "a blur runs on each axis independently" {
     try testing.expectEqual(@as(u8, 0), at(&sfc, 8, 6).a);
 }
 
-test "the colour space round trip leaves alpha alone and is applied unpremultiplied" {
+test "the color space round trip leaves alpha alone and is applied unpremultiplied" {
     const gpa = testing.allocator;
     var sfc = try surfaceOf(gpa, 2, 1);
     defer sfc.deinit(gpa);
-    // Opaque mid grey, and the same grey at half alpha -- premultiplied, so
+    // Opaque mid gray, and the same gray at half alpha -- premultiplied, so
     // its stored value is half as big.
     sfc.image_surface_rgba.buf[0] = .{ .r = 128, .g = 128, .b = 128, .a = 255 };
     sfc.image_surface_rgba.buf[1] = .{ .r = 64, .g = 64, .b = 64, .a = 128 };
@@ -469,7 +469,7 @@ test "the colour space round trip leaves alpha alone and is applied unpremultipl
     // sRGB 128 is a little over a fifth of the light, not a half. This is the
     // whole reason a filter looks wrong when the space is skipped.
     try testing.expectEqual(@as(u8, 55), at(&sfc, 0, 0).r);
-    // The same colour at half alpha converts to the same colour, which is
+    // The same color at half alpha converts to the same color, which is
     // only true because the curve is applied to the unpremultiplied value.
     try testing.expectApproxEqAbs(@as(f64, 55.0 / 2.0), @as(f64, @floatFromInt(at(&sfc, 1, 0).r)), 1.5);
 
@@ -477,7 +477,7 @@ test "the colour space round trip leaves alpha alone and is applied unpremultipl
     try testing.expectEqual(@as(u8, 128), at(&sfc, 0, 0).r);
 }
 
-test "a transparent pixel has no colour to convert" {
+test "a transparent pixel has no color to convert" {
     const gpa = testing.allocator;
     var sfc = try surfaceOf(gpa, 1, 1);
     defer sfc.deinit(gpa);
@@ -537,7 +537,7 @@ test "a flood fills its subregion and nothing else" {
     try testing.expectEqual(@as(u8, 0), at(&sfc, 0, 0).a);
 }
 
-test "SourceAlpha keeps the shape and throws the colour away" {
+test "SourceAlpha keeps the shape and throws the color away" {
     const gpa = testing.allocator;
     var sfc = try surfaceOf(gpa, 2, 1);
     defer sfc.deinit(gpa);

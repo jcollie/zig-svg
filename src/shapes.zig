@@ -228,7 +228,7 @@ pub const Text = struct {
     text_length: ?f64,
 };
 
-/// Append `geometry` to `p`, honouring `p.transformation`.
+/// Append `geometry` to `p`, honoring `p.transformation`.
 ///
 /// Every subpath is closed, so the result can be handed straight to
 /// `z2d.painter.fill`.
@@ -385,8 +385,8 @@ fn buildLine(p: *z2d.Path, alloc: std.mem.Allocator, l: Line, opts: path.Options
 /// error while resvg, and every browser, draw the pairs they got.
 ///
 /// Drawing them is the right answer here even though this library refuses a
-/// colour it cannot read, and the difference is which failure is quiet. A
-/// wrong colour is a picture that looks finished and is not; a truncated
+/// color it cannot read, and the difference is which failure is quiet. A
+/// wrong color is a picture that looks finished and is not; a truncated
 /// points list is the same picture every other renderer produces. A trailing
 /// comma or a stray space is the commonest way for a generated document to
 /// have one, and refusing would mean no picture at all where everyone else

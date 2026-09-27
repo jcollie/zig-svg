@@ -158,11 +158,11 @@ DIVERGENCES = {
     # `color-interpolation-filters="sRGB"`, `filter-tile`, agrees to a
     # fraction of a level. Measured at 15.386 and 27.083%.
     "filter-tile-linear": (16.0, 0.28, "resvg labels a tile sRGB whatever its input was, and never converts it back"),
-    # `feMorphology`. §15.18's window is centred on the pixel, `2r+1` wide,
+    # `feMorphology`. §15.18's window is centered on the pixel, `2r+1` wide,
     # as Skia's is. resvg's is `2*ceil(r)` wide and reaches one pixel further
     # left and up than right and down, so everything it erodes or dilates is
     # a pixel out along two of its four edges. Measured at 1.881 and 1.900%.
-    "filter-morphology": (2.2, 0.022, "resvg's window is 2*ceil(r) wide and off centre by a pixel"),
+    "filter-morphology": (2.2, 0.022, "resvg's window is 2*ceil(r) wide and off center by a pixel"),
     # `feDisplacementMap` with a `scale` other than one. §15.15 fetches from
     # `scale * (C - 0.5)` away; resvg multiplies by `scale` twice -- once in
     # `scale_coordinates` and again in `displacement_map::apply` -- so it
@@ -179,11 +179,11 @@ DIVERGENCES = {
     # moves with every pixel. The same noise unstitched, `filter-turbulence`,
     # agrees to a few levels. Measured at 15.500 and 26.615%.
     "filter-turbulence-stitch": (16.5, 0.28, "resvg stitches a tile measured in pixels from the current pixel"),
-    # A coloured `lighting-color` in linearRGB. §15.14 takes it into the
-    # filter's colour space as `flood-color` is taken, and resvg converts a
-    # flood's colour but not a light's, so its light is the sRGB bytes read
-    # as linear and comes out washed pale: the same colour lit straight
-    # overhead beside the same colour flooded draws (229,168,122) and
+    # A colored `lighting-color` in linearRGB. §15.14 takes it into the
+    # filter's color space as `flood-color` is taken, and resvg converts a
+    # flood's color but not a light's, so its light is the sRGB bytes read
+    # as linear and comes out washed pale: the same color lit straight
+    # overhead beside the same color flooded draws (229,168,122) and
     # (200,100,50) in resvg, and (200,100,50) twice here. Every light in
     # `filter-lighting` that is not white runs in sRGB and agrees. Measured
     # at 28.500 and 50.000%.
@@ -197,12 +197,12 @@ DIVERGENCES = {
     # entry above. All of the difference is in the shadows' faint tails.
     # Measured at 0.689 and 0.040%.
     "filter-drop-shadow-primitive": (0.9, 0.001, "blur kernel, in a shadow"),
-    # And in sRGB, resvg takes a drop shadow's colour through
-    # `into_srgb` -- a conversion from linearRGB -- when the colour was
+    # And in sRGB, resvg takes a drop shadow's color through
+    # `into_srgb` -- a conversion from linearRGB -- when the color was
     # sRGB all along, so crimson's shadow is drawn (239,79,133), which is
     # crimson converted from linear, rather than (220,20,60). In linearRGB,
     # its default, it converts the right way. Measured at 2.570 and 5.263%.
-    "filter-drop-shadow-srgb": (2.8, 0.055, "resvg converts an sRGB shadow colour as if it were linear"),
+    "filter-drop-shadow-srgb": (2.8, 0.055, "resvg converts an sRGB shadow color as if it were linear"),
     # `feImage` naming an element. Filter Effects 1 draws it "according to
     # the behavior of the use element", in the filtered element's user
     # space, and the subregion only cuts it: a circle at (16,16) under a
@@ -213,15 +213,15 @@ DIVERGENCES = {
     # 12.109 and 7.963%.
     "filter-image-element-offset": (13.0, 0.085, "resvg draws an feImage element from the subregion's corner, not user space"),
     # The CSS filter functions that blur: `blur()` and `drop-shadow()`. Every
-    # colour and every offset agrees; what differs is the blur kernel, as in
+    # color and every offset agrees; what differs is the blur kernel, as in
     # the entries above, a level or four across the whole of a large blurred
     # area rather than along an edge. (The shadows are black on purpose: a
-    # coloured `drop-shadow()` meets the sRGB conversion recorded for
+    # colored `drop-shadow()` meets the sRGB conversion recorded for
     # `filter-drop-shadow-srgb`, since functions always run in sRGB.)
     # Measured at 1.396 and 0.549%.
     "filter-functions-spread": (1.6, 0.006, "blur kernel, in blur() and drop-shadow()"),
     # Text on a `<textPath>`. Every glyph is where resvg puts it to within
-    # half a pixel, the two agreeing on the whole run's centre of ink to a
+    # half a pixel, the two agreeing on the whole run's center of ink to a
     # hundredth, but no closer: resvg finds each glyph's point on the path with
     # kurbo's `inv_arclen` at an accuracy of half a user unit over the canvas
     # scale (`collect_normals`, text/layout.rs), a quarter of a unit here,
@@ -238,7 +238,7 @@ DIVERGENCES = {
     # A text decoration under `paint-order: stroke`. This paints a decoration
     # in its text's order, stroke and then fill; resvg paints every
     # decoration fill then stroke whatever the order says, so under a stroke
-    # wider than the band its underline is solid stroke colour where this one
+    # wider than the band its underline is solid stroke color where this one
     # shows the fill down its middle. SVG 2 leaves the question open. Part of
     # the measurement is the glyphs' own 1.5-unit stroke, where the two
     # strokers already differ at the joins by about 0.7 on their own.
@@ -335,7 +335,7 @@ def render_inkscape(inkscape, svg_path, png_path, width, height, env):
     """Render one fixture with Inkscape, at exactly the size we rendered it.
 
     Inkscape's `-w` and `-h` together are the size produced, not a box to fit,
-    and the page keeps its transparency unless the document gives it a colour.
+    and the page keeps its transparency unless the document gives it a color.
     Text is set in the test font, through `env`; see `inkscape_fonts`.
     """
     if env is None and "<text" in svg_path.read_text(encoding="utf-8"):
@@ -396,7 +396,7 @@ def compare(ours_path, theirs_path):
         raise ValueError(f"{ours.size} against {theirs.size}")
 
     # Composited onto white before comparing. A transparent pixel carries no
-    # colour, so two renderers can write different RGB under alpha zero and be
+    # color, so two renderers can write different RGB under alpha zero and be
     # identically correct; compositing makes the comparison about what a person
     # would see rather than about what is in the buffer.
     a = Image.alpha_composite(Image.new("RGBA", ours.size, (255, 255, 255, 255)), ours)

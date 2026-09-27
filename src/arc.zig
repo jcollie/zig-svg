@@ -4,12 +4,12 @@
 //! SVG's elliptical arc command as cubic Béziers.
 //!
 //! `A` gives the arc by where it ends -- two radii, a rotation, two flags and
-//! an endpoint -- and says nothing about where its centre is. Drawing it means
-//! recovering that centre, which is SVG 1.1 appendix F.6.5, and then sweeping
+//! an endpoint -- and says nothing about where its center is. Drawing it means
+//! recovering that center, which is SVG 1.1 appendix F.6.5, and then sweeping
 //! from one angle to another.
 //!
 //! z2d has `Path.arc`, and it is not usable for this. It is circular, it takes
-//! a centre and two angles rather than an endpoint, and it draws a connecting
+//! a center and two angles rather than an endpoint, and it draws a connecting
 //! line from the current point before it starts. The ellipse recipe in its own
 //! documentation -- translate, scale, arc, restore -- cannot be used either,
 //! because the scale would have to go on `Path.transformation`, which is
@@ -78,7 +78,7 @@ pub fn append(path: *z2d.Path, alloc: std.mem.Allocator, p: Params) Error!void {
         ry *= s;
     }
 
-    // F.6.5.2: the centre, in the ellipse's frame.
+    // F.6.5.2: the center, in the ellipse's frame.
     const rx2 = rx * rx;
     const ry2 = ry * ry;
     const x1p2 = x1p * x1p;
@@ -132,7 +132,7 @@ pub fn append(path: *z2d.Path, alloc: std.mem.Allocator, p: Params) Error!void {
         const cos_b = @cos(theta_next);
         const sin_b = @sin(theta_next);
 
-        // The point on the unrotated, unit-centred ellipse and its derivative,
+        // The point on the unrotated, unit-centered ellipse and its derivative,
         // both mapped back out through the rotation.
         const p1x = cx + rx * cos_phi * cos_a - ry * sin_phi * sin_a;
         const p1y = cy + rx * sin_phi * cos_a + ry * cos_phi * sin_a;

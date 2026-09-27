@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
 
     // The loop that drives those targets without Zig's own fuzzer, which this
     // toolchain cannot usefully run: `tools/fuzz.zig` says why, and the short
-    // version is that the coverage table comes back empty. Optimised, because
+    // version is that the coverage table comes back empty. Optimized, because
     // a fuzzer's whole job is how many inputs it gets through, and ReleaseSafe
     // keeps every check that makes a failure a failure.
     //
@@ -219,7 +219,7 @@ fn libraryModules(
     const uri = b.dependency("uri", .{ .target = target, .optimize = optimize }).module("uri");
 
     // One module. The reader, the path grammar, the rasterizer and the sandbox
-    // live together because Zig only analyses what is referenced: a program
+    // live together because Zig only analyzes what is referenced: a program
     // that draws an icon and never mentions the sandbox does not compile the
     // sandbox, so splitting them would cost a dependency edge to save nothing.
     const options: std.Build.Module.CreateOptions = .{

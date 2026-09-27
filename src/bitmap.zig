@@ -24,7 +24,7 @@
 //!
 //! The media type a `data:` URL claims is not consulted to choose a decoder.
 //! z2dimg reads the signature, which is what a browser does too, and a PNG
-//! labelled `image/jpeg` is drawn as the PNG it is. The one claim that is
+//! labeled `image/jpeg` is drawn as the PNG it is. The one claim that is
 //! believed is `image/svg+xml`, because a document inside a document is a
 //! render of its own rather than a decode: `Fetched.isSvg` says which it is,
 //! and the renderer draws an SVG itself rather than asking this to decode
@@ -32,7 +32,7 @@
 //!
 //! ## What is ignored
 //!
-//! No colour management: an ICC profile or a PNG `gAMA` is not applied, and
+//! No color management: an ICC profile or a PNG `gAMA` is not applied, and
 //! the pixels are taken as sRGB, which is what resvg does. EXIF orientation is
 //! not applied either. An animated GIF, APNG or WebP is drawn as its first
 //! frame, which is what SVG 1.1 says a static renderer does.

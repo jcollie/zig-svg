@@ -19,7 +19,7 @@
 //!   not when the path is filled. `Path.transformation` therefore has to carry
 //!   the viewBox-to-pixels scale before the first `moveTo`, which is what
 //!   `document.buildPathIn` does.
-//! * **z2d's own `arc` is circular**, takes a centre and two angles rather
+//! * **z2d's own `arc` is circular**, takes a center and two angles rather
 //!   than SVG's endpoint parameterization, and draws a connecting line from
 //!   the current point if there is one. None of that is what `A` means, so
 //!   arcs go through `arc.zig` and come back as cubics.
@@ -98,7 +98,7 @@ pub const Options = struct {
 
 /// Parse `d` and append it to `path`.
 ///
-/// `path.transformation` is honoured, so set the viewBox scale on it first.
+/// `path.transformation` is honored, so set the viewBox scale on it first.
 /// Every subpath is closed, so the result can be handed straight to
 /// `z2d.painter.fill`.
 pub fn build(

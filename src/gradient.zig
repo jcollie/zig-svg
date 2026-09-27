@@ -30,7 +30,7 @@
 //! wrote them.
 //!
 //! ## `spreadMethod`
-//! All three of §13.2.2's values are drawn. `pad` holds the end colours
+//! All three of §13.2.2's values are drawn. `pad` holds the end colors
 //! outwards, `repeat` starts the gradient over, and `reflect` turns it around
 //! so that tiles meet without a seam. They are visibly different pictures, so
 //! a value that is none of the three is refused rather than being taken as the
@@ -70,7 +70,7 @@ pub const Error = error{
 /// The most `<stop>` elements one gradient may have.
 ///
 /// Held in the gradient by value rather than allocated, so it needs a ceiling;
-/// and a gradient with more colour stops than this has more than any eye can
+/// and a gradient with more color stops than this has more than any eye can
 /// separate. z2d takes the same buffer, so nothing is copied again on the way
 /// out.
 pub const max_stops = 64;
@@ -86,7 +86,7 @@ pub const Units = enum {
     object_bounding_box,
 };
 
-/// One colour stop, with its alpha already folded in from `stop-opacity`.
+/// One color stop, with its alpha already folded in from `stop-opacity`.
 pub const Stop = struct {
     offset: f64,
     value: color.Color,
@@ -100,7 +100,7 @@ pub const Kind = union(enum) {
         x2: f64 = 1,
         y2: f64 = 0,
     },
-    /// §13.2.3's defaults: a circle filling the object, lit from its centre.
+    /// §13.2.3's defaults: a circle filling the object, lit from its center.
     /// `fx` and `fy` default to `cx` and `cy`, which is what makes the focal
     /// point optional.
     radial: struct {
@@ -201,9 +201,9 @@ pub const max_ancestors = 66;
 /// What `currentColor` means on `node`: the `color` it inherits, worked out
 /// from the root down, where one that waits on `currentColor` itself -- a
 /// `light-dark()` or a `color-mix()` -- takes its parent's. `initial` is what
-/// it is where nothing above names one: the caller's colour, as for a shape.
+/// it is where nothing above names one: the caller's color, as for a shape.
 ///
-/// A stop's colour is its own, through the tree the gradient is written in,
+/// A stop's color is its own, through the tree the gradient is written in,
 /// and not that of whatever it paints -- which is what resvg and Chrome both
 /// draw, and what makes a gradient the same gradient wherever it is used.
 fn colorAt(
@@ -233,7 +233,7 @@ fn colorAt(
             .color => |c| c,
             .deferred => |d| d.resolve(current, scheme),
             .current => current,
-            // Not colours, and a `color` that is one of these was never valid.
+            // Not colors, and a `color` that is one of these was never valid.
             .none, .reference, .context_fill, .context_stroke => return error.BadColor,
         };
     }
@@ -324,7 +324,7 @@ fn applyOne(
                 // `currentColor` here is the `color` in force on the stop,
                 // like anywhere else: the one it inherits through the
                 // gradient's own ancestors, not the painted shape's. `none`
-                // is not a colour and a `url(...)` is not one either --
+                // is not a color and a `url(...)` is not one either --
                 // §13.2.4 has no use for a stop that is a paint server -- so
                 // both fall back to the initial black.
                 .current => try colorAt(sheet, tree, child, preferred, initial_color),
@@ -422,7 +422,7 @@ test "a linear gradient runs left to right unless told otherwise" {
     try testing.expectEqual(@as(u8, 255), g.slice()[1].value.b);
 }
 
-test "a radial gradient fills the object and takes its focus from its centre" {
+test "a radial gradient fills the object and takes its focus from its center" {
     const gpa = testing.allocator;
     var r = try readDoc(gpa, "<svg><radialGradient id=\"g\"><stop offset=\"0\"/></radialGradient>" ++
         "<radialGradient id=\"f\" fx=\"0.25\"><stop offset=\"0\"/></radialGradient></svg>");

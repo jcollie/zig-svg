@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
 // SPDX-License-Identifier: MIT
 
-//! The colour syntax an SVG presentation attribute is written in.
+//! The color syntax an SVG presentation attribute is written in.
 //!
-//! This is CSS colour, as SVG 1.1 §4.1 and CSS Color 3 define it, plus the
+//! This is CSS color, as SVG 1.1 §4.1 and CSS Color 3 define it, plus the
 //! four- and eight-digit hex forms and the space-separated `rgb()` that CSS
 //! Color 4 added and every renderer now takes:
 //!
@@ -17,10 +17,10 @@
 //!
 //! ## The rest of CSS Color 4
 //!
-//! Every other colour function is zig-css's to read -- `hsl()` and `hwb()`,
+//! Every other color function is zig-css's to read -- `hsl()` and `hwb()`,
 //! `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in each of its spaces,
 //! and CSS Color 5's `color-mix()` -- and it reads them exactly, keeping a
-//! colour in the space it was written in:
+//! color in the space it was written in:
 //!
 //! ```
 //! hsl(120deg 100% 25% / 50%)   hwb(200 10% 20%)   lab(50% 40 -20)
@@ -29,32 +29,32 @@
 //! ```
 //!
 //! What this draws on is eight bits of sRGB a channel, so each comes here as
-//! the sRGB colour it is shown as: one sRGB cannot show is brought into it by
+//! the sRGB color it is shown as: one sRGB cannot show is brought into it by
 //! Color 4 §14.2's gamut mapping, keeping its lightness and hue and giving up
 //! chroma, rather than clipped channel by channel. That is the step where
 //! renderers differ -- Chrome clips -- and the one worth knowing about: an
 //! `oklch()` far outside sRGB comes out less saturated here than there, and
-//! nearer the colour it was meant to be. Every value was checked against
+//! nearer the color it was meant to be. Every value was checked against
 //! coloraide, an independent implementation of the same specification.
 //!
 //! The mapping has one answer that surprises: an `hsl()` saturation past
-//! 100% is kept, as Color 4 says, and the colour it makes is lighter than
+//! 100% is kept, as Color 4 says, and the color it makes is lighter than
 //! sRGB's white, which the mapping answers with white. Chrome and resvg
-//! clamp the saturation first and paint the fully saturated colour.
+//! clamp the saturation first and paint the fully saturated color.
 //!
 //! A `color-mix()` with `currentcolor` in it, and a `light-dark()` or a
-//! relative colour that waits on `currentcolor`, cannot be worked out until
+//! relative color that waits on `currentcolor`, cannot be worked out until
 //! the element's `color` is known, which is after the value is read. As a
-//! paint -- `fill`, `stroke`, a stop colour, `color` itself -- it is kept as
-//! its text (`Paint.deferred`) and resolved once that colour is known. Where
-//! only a colour is read it is refused (`error.UnsupportedColorMix`,
+//! paint -- `fill`, `stroke`, a stop color, `color` itself -- it is kept as
+//! its text (`Paint.deferred`) and resolved once that color is known. Where
+//! only a color is read it is refused (`error.UnsupportedColorMix`,
 //! `error.UnsupportedDeferredColor`): mixing it with anything else would be
-//! a colour the document did not ask for.
+//! a color the document did not ask for.
 //!
 //! ## Two case rules, and they are different
 //!
-//! A colour **name** is matched without regard to case -- `RED`, `Red` and
-//! `red` are one colour -- because CSS keywords are ASCII case-insensitive.
+//! A color **name** is matched without regard to case -- `RED`, `Red` and
+//! `red` are one color -- because CSS keywords are ASCII case-insensitive.
 //! A **keyword elsewhere in SVG** is not: `fill-rule="EVENODD"` is not
 //! `evenodd`, because that is an XML attribute value and XML is case-sensitive.
 //! resvg draws both of those the same way and so does this. Getting the two
@@ -62,23 +62,23 @@
 //!
 //! ## Where this and resvg disagree, on purpose
 //!
-//! resvg is this project's oracle, and every colour here was checked against
+//! resvg is this project's oracle, and every color here was checked against
 //! it. Four differences survived that check, and each is deliberate.
 //!
-//! **A value this cannot read is refused.** `fill="notacolour"` is
+//! **A value this cannot read is refused.** `fill="notacolor"` is
 //! `error.BadColor`; resvg, and every browser, falls back to the initial value
-//! and paints the shape black. A shape painted the wrong colour is a picture
+//! and paints the shape black. A shape painted the wrong color is a picture
 //! that looks finished and is not, which is the failure nobody notices -- the
 //! same reason an element this library cannot draw is refused rather than
-//! skipped. A caller who wants resvg's behaviour can catch the error and go on
-//! with a colour of their own.
+//! skipped. A caller who wants resvg's behavior can catch the error and go on
+//! with a color of their own.
 //!
 //! The other three are places where this is the *more* permissive of the two,
 //! because CSS Color 4 and SVG 2 define them and resvg 0.48.1 has not caught
 //! up; it paints black for each. None of them appears in `tests/oracle`, since
 //! a fixture using one would be testing resvg's gap rather than this code.
 //!
-//! * `rebeccapurple`, the 148th colour keyword.
+//! * `rebeccapurple`, the 148th color keyword.
 //! * The slash alpha separator: `rgb(255 0 0 / 0.5)`.
 //! * A percentage alpha: `rgba(255, 0, 0, 50%)`.
 //!
@@ -102,13 +102,13 @@ pub const Error = error{
     /// before the element's `color` is known. A paint keeps it as
     /// `Paint.deferred` instead; see the note at the top.
     UnsupportedColorMix,
-    /// A `light-dark()`, or a relative colour made from one, that waits on
-    /// `currentcolor` as well as the scheme -- the element's colour is not
-    /// known where its colours are read.
+    /// A `light-dark()`, or a relative color made from one, that waits on
+    /// `currentcolor` as well as the scheme -- the element's color is not
+    /// known where its colors are read.
     UnsupportedDeferredColor,
 };
 
-/// A colour, in straight (not premultiplied) alpha.
+/// A color, in straight (not premultiplied) alpha.
 pub const Color = struct {
     r: u8,
     g: u8,
@@ -124,12 +124,12 @@ pub const Color = struct {
 /// What a `fill` attribute can say.
 pub const Paint = union(enum) {
     /// `fill="none"`: the shape is not painted. Different from a transparent
-    /// colour only in that nothing is computed for it.
+    /// color only in that nothing is computed for it.
     none,
     /// `fill="currentColor"`: whatever the `color` property holds, which is
     /// inherited and whose initial value the caller chooses.
     current,
-    /// A colour the document named.
+    /// A color the document named.
     color: Color,
     /// `fill="url(#g)"`: a paint server elsewhere in the document, named by
     /// the id this holds -- without the `#`, and borrowed from wherever the
@@ -141,20 +141,20 @@ pub const Paint = union(enum) {
     /// never sees one; where there is no context it paints nothing.
     context_fill,
     context_stroke,
-    /// A `light-dark()`, or a relative colour, that waits on `currentColor`
+    /// A `light-dark()`, or a relative color, that waits on `currentColor`
     /// as well as the scheme: resolved, like `current`, where the element's
-    /// colour is known. See `Deferred`.
+    /// color is known. See `Deferred`.
     deferred: Deferred,
 };
 
-/// A colour function that cannot be worked out until the element's colour
+/// A color function that cannot be worked out until the element's color
 /// is known -- `light-dark(currentColor, blue)`, `rgb(from currentColor r g
 /// 255)` -- kept as the text of the function, which was read and found good,
 /// and read again to resolve it. The text borrows from the tree's arena.
 pub const Deferred = struct {
     text: []const u8,
 
-    /// The colour it comes to, where `currentColor` is `current` and the
+    /// The color it comes to, where `currentColor` is `current` and the
     /// element's used scheme is `scheme`.
     pub fn resolve(self: Deferred, current: Color, scheme: Scheme) Color {
         const d: css.values.color.Deferred = .{ .text = self.text };
@@ -173,7 +173,7 @@ pub const Deferred = struct {
 /// Light or dark: what a `light-dark()` chooses between.
 pub const Scheme = css.values.color.Scheme;
 
-/// The used colour scheme, CSS Color Adjust 1 §2.1, from what `color-scheme`
+/// The used color scheme, CSS Color Adjust 1 §2.1, from what `color-scheme`
 /// lists: the one the reader prefers if it is listed, the first listed if not,
 /// and light when neither is -- which is what `normal`, the initial value,
 /// comes to, so that a document that says nothing about schemes is drawn light
@@ -198,7 +198,7 @@ pub fn usedScheme(text: []const u8, preferred: css.media.ColorScheme) Scheme {
     return first orelse .light;
 }
 
-/// The used colour scheme of `node`, from the nearest `color-scheme` on it or
+/// The used color scheme of `node`, from the nearest `color-scheme` on it or
 /// above it: for what is read outside the walk that carries it down, a
 /// gradient's stops and a filter's primitives. `color-scheme` has no
 /// attribute form, so only `style` and stylesheets answer.
@@ -211,7 +211,7 @@ pub fn schemeAt(sheet: *const css.Stylesheet, tree: *const ztree.Document, node:
     return .light;
 }
 
-/// What a colour is read in the scheme of, for what reads colours on behalf
+/// What a color is read in the scheme of, for what reads colors on behalf
 /// of an element: the reader's preference, which a `color-scheme` further
 /// down may take up, and the element's own used scheme.
 pub const SchemeContext = struct {
@@ -234,7 +234,7 @@ pub fn parsePaintIn(text: []const u8, scheme: Scheme) Error!Paint {
     if (parseReference(t)) |id| return .{ .reference = id };
     return .{
         .color = parseColorIn(t, scheme) catch |err| switch (err) {
-            // A paint can wait for the element's colour, as `currentColor` does.
+            // A paint can wait for the element's color, as `currentColor` does.
             error.UnsupportedDeferredColor, error.UnsupportedColorMix => return .{ .deferred = .{ .text = t } },
             else => return err,
         },
@@ -247,7 +247,7 @@ pub fn parsePaintIn(text: []const u8, scheme: Scheme) Error!Paint {
 pub const PaintWithFallback = struct {
     paint: Paint,
     /// Null when none was written, and only ever `none`, `current` or a
-    /// colour when one was.
+    /// color when one was.
     fallback: ?Paint = null,
 };
 
@@ -276,7 +276,7 @@ pub fn parsePaintWithFallbackIn(text: []const u8, scheme: Scheme) Error!PaintWit
 ///
 /// Only a fragment of this document. `url(other.svg#g)` names a file, and
 /// fetching one is what being sans-I/O rules out -- so it is not a reference
-/// this can resolve, and falls through to being refused as a colour, which is
+/// this can resolve, and falls through to being refused as a color, which is
 /// what it is not.
 fn parseReference(t: []const u8) ?[]const u8 {
     if (t.len < 7) return null; // `url(#x)` is the shortest there is
@@ -287,12 +287,12 @@ fn parseReference(t: []const u8) ?[]const u8 {
     return inner[1..];
 }
 
-/// Read a colour, which `none` and `currentColor` are not.
+/// Read a color, which `none` and `currentColor` are not.
 pub fn parseColor(text: []const u8) Error!Color {
     return parseColorIn(text, .light);
 }
 
-/// Read a colour in `scheme`, which is what a `light-dark()` in it chooses by.
+/// Read a color in `scheme`, which is what a `light-dark()` in it chooses by.
 pub fn parseColorIn(text: []const u8, scheme: Scheme) Error!Color {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return error.BadColor;
@@ -352,7 +352,7 @@ fn parseFunctional(text: []const u8, scheme: Scheme) Error!Color {
     const name = std.mem.trim(u8, text[0..open], " \t\r\n");
     const is_rgba = ascii.eqlIgnoreCase(name, "rgba");
     if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return parseColor4(text, scheme);
-    // A relative colour -- `rgb(from teal r g 255)` -- is Color 5's, and
+    // A relative color -- `rgb(from teal r g 255)` -- is Color 5's, and
     // zig-css's to read, like every other form but the plain one.
     {
         const args = std.mem.trimStart(u8, text[open + 1 .. text.len - 1], " \t\r\n");
@@ -380,7 +380,7 @@ fn parseFunctional(text: []const u8, scheme: Scheme) Error!Color {
     };
 }
 
-/// A colour function other than `rgb()`, read by zig-css and shown in sRGB.
+/// A color function other than `rgb()`, read by zig-css and shown in sRGB.
 ///
 /// `rgb()` stays this module's own. It is the form resvg checks, and a
 /// component out of range, a stray argument and a mixed separator are each
@@ -393,10 +393,10 @@ fn parseColor4(text: []const u8, scheme: Scheme) Error!Color {
         // Only a bare `currentcolor` is this, and that has no parentheses.
         .current => return error.BadColor,
         .mix => return error.UnsupportedColorMix,
-        // `light-dark()`, or a relative colour made from one: which colour
+        // `light-dark()`, or a relative color made from one: which color
         // it is waits on the scheme, which is known here. One that waits on
-        // `currentcolor` as well is refused, since the element's colour is
-        // not known where its colours are read.
+        // `currentcolor` as well is refused, since the element's color is
+        // not known where its colors are read.
         .deferred => |d| blk: {
             if (ascii.findIgnoreCase(text, "currentcolor") != null) return error.UnsupportedDeferredColor;
             break :blk d.resolveIn(.{ .current = css.values.color.Absolute.fromRgba(css.values.Rgba.black), .scheme = scheme });
@@ -445,7 +445,7 @@ pub fn parseOpacity(text: []const u8) Error!f64 {
     return std.math.clamp(value, 0.0, 1.0);
 }
 
-/// A CSS colour keyword, matched without regard to case.
+/// A CSS color keyword, matched without regard to case.
 fn parseName(text: []const u8) ?Color {
     // Long enough for `lightgoldenrodyellow`, which is the longest of them at
     // twenty characters. Anything longer is not a name, so it need not fit.
@@ -453,13 +453,13 @@ fn parseName(text: []const u8) ?Color {
     if (text.len > buf.len) return null;
     const lower = ascii.lowerString(buf[0..text.len], text);
 
-    // `transparent` is a keyword rather than a colour, and it is the one whose
+    // `transparent` is a keyword rather than a color, and it is the one whose
     // alpha is not 1.
     if (std.mem.eql(u8, lower, "transparent")) return .transparent;
     return named.get(lower);
 }
 
-/// The CSS colour keywords.
+/// The CSS color keywords.
 ///
 /// Cross-checked against resvg, which is this project's oracle: a document
 /// naming all 148 was rendered by resvg and every pixel compared against this
@@ -694,7 +694,7 @@ test "names are matched without regard to case" {
     try expectColor(.{ .r = 102, .g = 51, .b = 153 }, "rebeccapurple");
 }
 
-test "transparent is a colour whose alpha is zero" {
+test "transparent is a color whose alpha is zero" {
     try expectColor(.{ .r = 0, .g = 0, .b = 0, .alpha = 0 }, "transparent");
     try expectColor(.{ .r = 0, .g = 0, .b = 0, .alpha = 0 }, "TRANSPARENT");
 }
@@ -708,7 +708,7 @@ test "every name in the table round trips, and nothing else is a name" {
         try testing.expect(key.len <= 24);
     }
     try testing.expectEqual(@as(usize, 148), named.keys().len);
-    for ([_][]const u8{ "notacolour", "", "reddish", "lightgoldenrodyellowish" }) |t| {
+    for ([_][]const u8{ "notacolor", "", "reddish", "lightgoldenrodyellowish" }) |t| {
         try testing.expectError(error.BadColor, parseColor(t));
     }
 }
@@ -719,7 +719,7 @@ test "a url reference is read as one" {
     try testing.expectEqualStrings("q", (try parsePaint("URL(#q)")).reference);
     try testing.expectEqualStrings("q", (try parsePaint("url('#q')")).reference);
     // A reference to a file is not one this can resolve, so it is not a
-    // reference at all -- and it is not a colour either.
+    // reference at all -- and it is not a color either.
     try testing.expectError(error.BadColor, parsePaint("url(other.svg#g)"));
     try testing.expectError(error.BadColor, parsePaint("url(#)"));
 }
@@ -737,13 +737,13 @@ test "a reference may name a fallback, which is never another reference" {
     }
 }
 
-test "none and currentColor are not colours" {
+test "none and currentColor are not colors" {
     try testing.expectEqual(Paint.none, try parsePaint("none"));
     try testing.expectEqual(Paint.none, try parsePaint("NONE"));
     try testing.expectEqual(Paint.current, try parsePaint("currentColor"));
     try testing.expectEqual(Paint.current, try parsePaint("currentcolor"));
     try testing.expect((try parsePaint("red")) == .color);
-    try testing.expectError(error.BadColor, parsePaint("notacolour"));
+    try testing.expectError(error.BadColor, parsePaint("notacolor"));
 }
 
 test "opacity takes a number or a percentage and clamps it" {
@@ -798,7 +798,7 @@ test "the rest of CSS Color 4, as coloraide shows each in sRGB" {
         .{ .text = "oklch(90% 0.4 150)", .rgb = .{ 65, 255, 135 } },
         // Saturation past 100%. Color 4 clamps only a negative one, so this
         // is a green brighter than sRGB has, whose OkLCh lightness is past
-        // one -- and §14.2's mapping answers any such colour with white.
+        // one -- and §14.2's mapping answers any such color with white.
         // coloraide agrees. Chrome and resvg clamp the saturation first and
         // paint 0,255,0; nothing in tests/oracle writes one.
         .{ .text = "hsl(120, 150%, 50%)", .rgb = .{ 255, 255, 255 } },
@@ -825,7 +825,7 @@ test "light-dark chooses by the scheme, and is refused where it waits on current
     try testing.expectEqual(@as(u8, 0), dark.r);
     try testing.expectEqual(@as(u8, 255), (try parsePaintIn("light-dark(#fff, #000)", .light)).color.r);
     try testing.expectError(error.UnsupportedDeferredColor, parseColorIn("light-dark(currentColor, blue)", .dark));
-    // As a paint it waits for the element's colour, and comes to it.
+    // As a paint it waits for the element's color, and comes to it.
     const waiting = (try parsePaintIn("light-dark(currentColor, blue)", .light)).deferred;
     const teal: Color = .{ .r = 0, .g = 128, .b = 128 };
     try testing.expectEqual(teal, waiting.resolve(teal, .light));
@@ -838,7 +838,7 @@ test "light-dark chooses by the scheme, and is refused where it waits on current
     try testing.expectEqual(Scheme.light, usedScheme("only light", .dark));
 }
 
-test "a color-mix with currentcolor in it is refused as a colour and waits as a paint" {
+test "a color-mix with currentcolor in it is refused as a color and waits as a paint" {
     try testing.expectError(error.UnsupportedColorMix, parseColor("color-mix(in srgb, currentcolor, red)"));
     const p = try parsePaint("color-mix(in srgb, red, currentColor)");
     const got = p.deferred.resolve(.{ .r = 0, .g = 0, .b = 255, .alpha = 1 }, .light);

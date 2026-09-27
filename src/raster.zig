@@ -1126,7 +1126,7 @@ fn paintFill(
     // `painter.fill` would take it too, but this says so on purpose.
     if (p.nodes.items.len != 0) {
         const space = paintSpace(shape, shape.fill_origin, ctm, pass);
-        var built: Source = try makeSource(gpa, doc, shape, paint, space.ctm, space.subject, opts);
+        var built: Source = try makeSource(gpa, doc, paint, space.ctm, space.subject, opts);
         defer built.deinit(gpa);
         const fill_rule = shape.fill_rule orelse opts.fill_rule;
         switch (built) {
@@ -1224,7 +1224,7 @@ fn paintStroke(
         }
 
         const space = paintSpace(shape, shape.stroke_origin, ctm, pass);
-        var built: Source = try makeSource(gpa, doc, shape, nib.paint, space.ctm, space.subject, opts);
+        var built: Source = try makeSource(gpa, doc, nib.paint, space.ctm, space.subject, opts);
         defer built.deinit(gpa);
         const stroke_opts: z2d.painter.StrokeOptions = .{
             .line_width = nib.width,
@@ -4848,7 +4848,6 @@ fn paintSpace(shape: document.Shape, origin: ?document.PaintOrigin, ctm: z2d.Tra
 fn makeSource(
     gpa: Allocator,
     doc: *const document.Document,
-    shape: document.Shape,
     paint: Paint,
     ctm: z2d.Transformation,
     subject: Subject,
@@ -4877,7 +4876,9 @@ fn makeSource(
         &doc.stylesheet,
         node,
         doc.viewport(),
-        shape.current_color orelse callerColor(opts),
+        // A stop's `currentColor` is its own, through the gradient's
+        // ancestors; this is only what it is where none of them names one.
+        callerColor(opts),
         doc.preferred_scheme,
     )) orelse return error.UnsupportedPaintServer;
 
@@ -7817,10 +7818,11 @@ test "a colour that waits on currentColor comes to the element's colour, as Chro
 }
 
 test "a color-mix with currentColor in it mixes the element's colour, as Chrome draws it" {
-    // As a fill, as `color` itself (mixing the parent's), and around a `light-dark()` that waits too. Each
+    // As a fill, as `color` itself (mixing the parent's), in a stop (the
+    // gradient's colour), and around a `light-dark()` that waits too. Each
     // colour is Chrome 140's for the same document as an `<img>`.
     const gpa = testing.allocator;
-    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 4 2\"><rect x=\"0\" width=\"1\" height=\"2\" color=\"blue\" fill=\"color-mix(in srgb, currentColor, red)\"/><g color=\"white\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: color-mix(in srgb, currentColor 25%, black)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" color=\"lime\" fill=\"color-mix(in srgb, currentColor, black)\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"teal\" fill=\"color-mix(in srgb, light-dark(currentColor, red), white)\"/></svg>";
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 4 2\"><linearGradient id=\"g\" color=\"lime\"><stop stop-color=\"color-mix(in srgb, currentColor, black)\"/></linearGradient><rect x=\"0\" width=\"1\" height=\"2\" color=\"blue\" fill=\"color-mix(in srgb, currentColor, red)\"/><g color=\"white\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: color-mix(in srgb, currentColor 25%, black)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" fill=\"url(#g)\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"teal\" fill=\"color-mix(in srgb, light-dark(currentColor, red), white)\"/></svg>";
     var sfc = try render(gpa, src, .{ .width = 40, .height = 20 });
     defer sfc.deinit(gpa);
     const want = [_][3]u8{ .{ 128, 0, 128 }, .{ 64, 64, 64 }, .{ 0, 128, 0 }, .{ 128, 192, 192 } };

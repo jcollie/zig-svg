@@ -540,7 +540,7 @@ short of the specification.
 | Nested `<svg>` | yes — its own viewport: `x`, `y`, `width`, `height`, `viewBox`, `preserveAspectRatio`, percentages of it, and a clip unless `overflow` is visible |
 | `<symbol>` | yes, through a `<use>`, which sizes it — `viewBox`, `preserveAspectRatio` and `overflow` as a nested `<svg>` |
 | `opacity`, `clip-path`, `mask`, `filter` on a `<use>` | yes — on the group §5.6 draws it as, with its `x` and `y` |
-| `<linearGradient>`, `<radialGradient>` | yes, on `fill` and `stroke`, with `<stop>` and `href` inheritance; stops interpolated straight rather than premultiplied, as every SVG renderer does |
+| `<linearGradient>`, `<radialGradient>` | yes, on `fill` and `stroke`, with `<stop>` and `href` inheritance; stops interpolated straight rather than premultiplied, as every SVG renderer does; a stop's `currentColor` is the `color` it inherits through the gradient's own ancestors, not the painted shape's, as resvg and Chrome both draw |
 | `gradientUnits`, `gradientTransform` | yes — both unit systems |
 | `spreadMethod` | all three — `pad`, `reflect`, `repeat` |
 | A foreign namespace | passed over, not refused — an Inkscape file reads |

@@ -62,6 +62,9 @@ pub const Error = error{
     /// A chain of gradients each inheriting from the next, longer than
     /// `max_href_hops`.
     TooManyGradientHops,
+    /// A `<stop>` with more elements above it than `max_ancestors`, which
+    /// its `currentColor` would have to be worked out through.
+    TooDeeplyNested,
 } || color.Error || length.Error || transform.Error;
 
 /// The most `<stop>` elements one gradient may have.
@@ -136,7 +139,7 @@ pub fn read(
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
-    current_color: color.Color,
+    initial_color: color.Color,
     preferred: css.media.ColorScheme,
 ) Error!?Gradient {
     const name = tree.node(node).name.local;
@@ -170,7 +173,7 @@ pub fn read(
     var i = links;
     while (i > 0) {
         i -= 1;
-        try applyOne(tree, sheet, chain[i], viewport, current_color, preferred, &result);
+        try applyOne(tree, sheet, chain[i], viewport, initial_color, preferred, &result);
     }
     return result;
 }
@@ -191,13 +194,59 @@ fn inheritsFrom(
 
 const xlink_ns = "http://www.w3.org/1999/xlink";
 
+/// The most elements a `<stop>` may have above it: as deep as the document
+/// lets a container be, and the stop and its gradient besides.
+pub const max_ancestors = 66;
+
+/// What `currentColor` means on `node`: the `color` it inherits, worked out
+/// from the root down, where one that waits on `currentColor` itself -- a
+/// `light-dark()` or a `color-mix()` -- takes its parent's. `initial` is what
+/// it is where nothing above names one: the caller's colour, as for a shape.
+///
+/// A stop's colour is its own, through the tree the gradient is written in,
+/// and not that of whatever it paints -- which is what resvg and Chrome both
+/// draw, and what makes a gradient the same gradient wherever it is used.
+fn colorAt(
+    sheet: *const css.Stylesheet,
+    tree: *const ztree.Document,
+    node: ztree.NodeId,
+    preferred: css.media.ColorScheme,
+    initial: color.Color,
+) Error!color.Color {
+    var chain: [max_ancestors]ztree.NodeId = undefined;
+    var count: usize = 0;
+    var at: ?ztree.NodeId = node;
+    while (at) |n| : (at = tree.node(n).parent) {
+        if (tree.node(n).kind != .element) continue;
+        if (count == chain.len) return error.TooDeeplyNested;
+        chain[count] = n;
+        count += 1;
+    }
+    var current = initial;
+    var scheme: color.Scheme = .light;
+    while (count > 0) {
+        count -= 1;
+        const n = chain[count];
+        if (css.property(sheet, tree, n, "color-scheme")) |v| scheme = color.usedScheme(v, preferred);
+        const v = css.property(sheet, tree, n, "color") orelse continue;
+        current = switch (try color.parsePaintIn(v, scheme)) {
+            .color => |c| c,
+            .deferred => |d| d.resolve(current, scheme),
+            .current => current,
+            // Not colours, and a `color` that is one of these was never valid.
+            .none, .reference, .context_fill, .context_stroke => return error.BadColor,
+        };
+    }
+    return current;
+}
+
 /// Lay one gradient of the chain over what has been gathered so far.
 fn applyOne(
     tree: *const ztree.Document,
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
-    current_color: color.Color,
+    initial_color: color.Color,
     preferred: css.media.ColorScheme,
     out: *Gradient,
 ) Error!void {
@@ -268,12 +317,17 @@ fn applyOne(
         var value: color.Color = if (css.property(sheet, tree, child, "stop-color")) |c|
             switch (try color.parsePaintIn(c, color.schemeAt(sheet, tree, child, preferred))) {
                 .color => |named| named,
-                .deferred => |d| d.resolve(current_color, color.schemeAt(sheet, tree, child, preferred)),
-                // `currentColor` here is the `color` in force, like anywhere
-                // else. `none` is not a colour and a `url(...)` is not one
-                // either -- §13.2.4 has no use for a stop that is a paint
-                // server -- so both fall back to the initial black.
-                .current => current_color,
+                .deferred => |d| d.resolve(
+                    try colorAt(sheet, tree, child, preferred, initial_color),
+                    color.schemeAt(sheet, tree, child, preferred),
+                ),
+                // `currentColor` here is the `color` in force on the stop,
+                // like anywhere else: the one it inherits through the
+                // gradient's own ancestors, not the painted shape's. `none`
+                // is not a colour and a `url(...)` is not one either --
+                // §13.2.4 has no use for a stop that is a paint server -- so
+                // both fall back to the initial black.
+                .current => try colorAt(sheet, tree, child, preferred, initial_color),
                 .none, .reference, .context_fill, .context_stroke => color.Color.black,
             }
         else

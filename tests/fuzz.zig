@@ -168,7 +168,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "vector-effectnon-scaling-strokenon-scaling-sizenon-rotationfixed-position" ++
     "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/" ++
     "transform:transform-origintransform-boxfill-boxview-boxstroke-boxtranslateXscaleYskewrotate3dcenterleftrighttopbottom%pxemgradrad" ++
-    "data:image/svg+xml,%3Csvg%3E%3C/svg%3E%27%20xml:spacepreservemiter-clip";
+    "data:image/svg+xml,%3Csvg%3E%3C/svg%3E%27%20xml:spacepreservemiter-clip" ++
+    ":first-child:nth-child(2n+1 of .a):not(:is(:where(@media (min-width:1px)@namespace s url()s|^=$=*= i]";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -1041,6 +1042,9 @@ const document_corpus = [_][]const u8{
     // Style sheets in force by media query: size, scheme, print, and a query
     // nobody has heard of.
     "<svg viewBox=\"0 0 8 8\" width=\"64\" height=\"64\"><style media=\"(max-width: 100px), (prefers-color-scheme: dark)\">rect{fill:red}</style><style media=\"print\">rect{fill:green}</style><style media=\"(mumble: 3)\">rect{fill:blue}</style><style media=\"not all and (min-aspect-ratio: 2/1)\">circle{fill:teal}</style><rect width=\"4\" height=\"4\"/><circle cx=\"6\" cy=\"6\" r=\"2\"/></svg>",
+    // The static pseudo-classes, attribute tests, namespaces and @media,
+    // nested, and a state pseudo-class to be refused.
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:s=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><style>@namespace s url(http://www.w3.org/2000/svg); s|g > rect:nth-child(2n+1 of .a):not(:is(.b, :where(.c))) { fill: red } rect[k^=a i]:last-of-type { fill: blue } :root circle:empty { fill: green } @media screen and (max-width: 20px) { @media (prefers-color-scheme: dark) { rect { stroke: teal } } } rect:hover { fill: gold }</style><g><rect class=\"a\" width=\"2\" height=\"2\" k=\"Abc\"/><rect class=\"a b\" x=\"2\" width=\"2\" height=\"2\"/><rect class=\"a\" x=\"4\" width=\"2\" height=\"2\"/><circle cx=\"6\" cy=\"6\" r=\"1\"/></g></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

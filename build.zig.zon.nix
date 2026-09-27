@@ -220,11 +220,11 @@ copyFarm name
       };
     }
     {
-      name = "zig_css-0.0.0-d530kDKRJwDB7EZaehSIgLnSFJh1gdYYbRWOQnFJhqJC";
+      name = "zig_css-0.0.0-d530kDsBLQDjFegDonu7Tamcqi5i-6TJUzxQq2y8wEVs";
       path = fetchZigArtifact {
         name = "zig_css";
-        url = "git+https://git.jcollie.dev/jeff/zig-css.git#ea0b29d472067ced62bed544d837f98255f71021";
-        hash = "sha256-6kMsvAj72EmYP7YJHPPY7Q/QD1NocMuBRqUTn/h6ccY=";
+        url = "git+https://git.jcollie.dev/jeff/zig-css.git#5df4a3d9fc1efeae7b6fa248937cc94b598e5ffd";
+        hash = "sha256-LndC4qGBUBkR9v0ASkBxNrtXhl3N1EmSZ3w0m/xzpxg=";
         unpack = true;
       };
     }

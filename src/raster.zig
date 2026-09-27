@@ -7697,3 +7697,42 @@ test "a style element's media query is asked about the size it is drawn at, and 
         try testing.expectEqualSlices(u8, &c.circle, &.{ o.r, o.g, o.b });
     }
 }
+
+test "the structural and logical pseudo-classes, and @media, draw as Chrome draws them" {
+    // A square per selector: structural, logical, attribute and namespaced
+    // ones, `:empty`, and `@media` blocks asked about the drawn size and the
+    // colour scheme, nested among them. Each colour is what Chrome 140 draws
+    // for the same document as an `<img>` at that size and in that scheme.
+    const gpa = testing.allocator;
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:s=\"http://www.w3.org/2000/svg\" width=\"160\" height=\"40\" viewBox=\"0 0 16 4\"><style>\n@namespace s url(http://www.w3.org/2000/svg);\nrect { fill: gray }\ng > rect:first-child { fill: red }\ng > rect:nth-child(3) { fill: blue }\ng > rect:last-child { fill: green }\ng > rect:nth-child(2 of .a) { fill: orange }\nrect:not(.a):nth-of-type(5) { fill: purple }\nrect:is(.b, .c) { fill: teal }\nrect:where(.d) { fill: navy }\nrect[data-k^=pre] { fill: gold }\nrect[data-k$=post] { fill: pink }\nrect[data-k*=mid] { fill: brown }\nrect[data-k=\"CASE\" i] { fill: lime }\n:root > s|g > s|rect.e { fill: olive }\ncircle:empty { fill: maroon }\n@media (max-width: 200px) { rect.f { fill: black } }\n@media (min-width: 201px) { rect.f { fill: white } }\n@media (prefers-color-scheme: dark) { rect.g { fill: cyan } }\n@media print { rect.g { fill: red } }\n@media screen { @media (max-width: 200px) { rect.h { fill: coral } } }\n</style><g><rect x=\"0\" width=\"1\" height=\"4\"/><rect x=\"1\" width=\"1\" height=\"4\" class=\"a\"/><rect x=\"2\" width=\"1\" height=\"4\"/><rect x=\"3\" width=\"1\" height=\"4\" class=\"a\"/><rect x=\"4\" width=\"1\" height=\"4\"/><rect x=\"5\" width=\"1\" height=\"4\" class=\"b\"/><rect x=\"6\" width=\"1\" height=\"4\" class=\"d\"/><rect x=\"7\" width=\"1\" height=\"4\" data-k=\"prefix\"/><rect x=\"8\" width=\"1\" height=\"4\" data-k=\"the-post\"/><rect x=\"9\" width=\"1\" height=\"4\" data-k=\"amidst\"/><rect x=\"10\" width=\"1\" height=\"4\" data-k=\"case\"/><rect x=\"11\" width=\"1\" height=\"4\" class=\"e\"/><rect x=\"12\" width=\"1\" height=\"4\" class=\"f\"/><rect x=\"13\" width=\"1\" height=\"4\" class=\"g\"/><rect x=\"14\" width=\"1\" height=\"4\" class=\"h\"/><circle cx=\"15.5\" cy=\"2\" r=\"0.5\"/></g></svg>";
+    const Case = struct { size: u32, scheme: css.media.ColorScheme, colors: [16][3]u8 };
+    for ([_]Case{
+        .{ .size = 160, .scheme = .light, .colors = .{ .{ 255, 0, 0 }, .{ 128, 128, 128 }, .{ 0, 0, 255 }, .{ 255, 165, 0 }, .{ 128, 0, 128 }, .{ 0, 128, 128 }, .{ 0, 0, 128 }, .{ 255, 215, 0 }, .{ 255, 192, 203 }, .{ 165, 42, 42 }, .{ 0, 255, 0 }, .{ 128, 128, 0 }, .{ 0, 0, 0 }, .{ 128, 128, 128 }, .{ 255, 127, 80 }, .{ 128, 0, 0 } } },
+        .{ .size = 320, .scheme = .light, .colors = .{ .{ 255, 0, 0 }, .{ 128, 128, 128 }, .{ 0, 0, 255 }, .{ 255, 165, 0 }, .{ 128, 0, 128 }, .{ 0, 128, 128 }, .{ 0, 0, 128 }, .{ 255, 215, 0 }, .{ 255, 192, 203 }, .{ 165, 42, 42 }, .{ 0, 255, 0 }, .{ 128, 128, 0 }, .{ 255, 255, 255 }, .{ 128, 128, 128 }, .{ 128, 128, 128 }, .{ 128, 0, 0 } } },
+        .{ .size = 160, .scheme = .dark, .colors = .{ .{ 255, 0, 0 }, .{ 128, 128, 128 }, .{ 0, 0, 255 }, .{ 255, 165, 0 }, .{ 128, 0, 128 }, .{ 0, 128, 128 }, .{ 0, 0, 128 }, .{ 255, 215, 0 }, .{ 255, 192, 203 }, .{ 165, 42, 42 }, .{ 0, 255, 0 }, .{ 128, 128, 0 }, .{ 0, 0, 0 }, .{ 0, 255, 255 }, .{ 255, 127, 80 }, .{ 128, 0, 0 } } },
+    }) |c| {
+        var sfc = try render(gpa, src, .{ .width = c.size, .height = c.size / 4, .color_scheme = c.scheme });
+        defer sfc.deinit(gpa);
+        const k: i32 = @intCast(c.size / 16);
+        for (c.colors, 0..) |want, i| {
+            const px = sfc.getPixel(@as(i32, @intCast(i)) * k + @divFloor(k, 2), 2 * k).?.rgba;
+            testing.expectEqualSlices(u8, &want, &.{ px.r, px.g, px.b }) catch |err| {
+                std.debug.print("square {d} at {d} {t}\n", .{ i, c.size, c.scheme });
+                return err;
+            };
+        }
+    }
+    // What a still picture can never match is refused, not left unmatched.
+    for ([_][]const u8{ "rect:hover{fill:red}", "rect:has(+ rect){fill:red}", "@supports (fill: red) { rect { fill: red } }", "@layer a { rect { fill: red } }", "rect::before{fill:red}", "g { rect { fill: red } }" }) |sheet| {
+        var buf: [256]u8 = undefined;
+        const doc = try std.fmt.bufPrint(&buf, "<svg viewBox=\"0 0 1 1\"><style>{s}</style><rect width=\"1\" height=\"1\"/></svg>", .{sheet});
+        testing.expect(if (render(gpa, doc, .{ .width = 1, .height = 1 })) |s| blk: {
+            var sf = s;
+            sf.deinit(gpa);
+            break :blk false;
+        } else |_| true) catch |err| {
+            std.debug.print("{s}\n", .{sheet});
+            return err;
+        };
+    }
+}

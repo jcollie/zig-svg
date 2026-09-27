@@ -96,6 +96,10 @@ pub const Error = error{
     /// A `color-mix()` with `currentcolor` in it, which this cannot mix
     /// before the element's `color` is known.
     UnsupportedColorMix,
+    /// A `light-dark()`, or a relative colour made from something not known
+    /// until the colour scheme or `currentcolor` is, which a colour is read
+    /// without here.
+    UnsupportedDeferredColor,
 };
 
 /// A colour, in straight (not premultiplied) alpha.
@@ -279,6 +283,10 @@ fn parseColor4(text: []const u8) Error!Color {
         // Only a bare `currentcolor` is this, and that has no parentheses.
         .current => return error.BadColor,
         .mix => return error.UnsupportedColorMix,
+        // `light-dark()`, or a relative colour made from one or from
+        // `currentcolor`: which colour it is waits on the colour scheme, which
+        // a colour is read without here.
+        .deferred => return error.UnsupportedDeferredColor,
     };
     const rgba = absolute.toRgba();
     // `calc()` can write a NaN, and a NaN alpha would reach every blend.
@@ -694,6 +702,10 @@ test "the rest of CSS Color 4, as coloraide shows each in sRGB" {
         }
         try testing.expectApproxEqAbs(c.alpha, got.alpha, 1e-6);
     }
+}
+
+test "a colour that waits on the scheme is refused" {
+    try testing.expectError(error.UnsupportedDeferredColor, parseColor("light-dark(red, blue)"));
 }
 
 test "a color-mix with currentcolor in it is refused, and so is its paint" {

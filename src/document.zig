@@ -1854,9 +1854,10 @@ pub const PathIterator = struct {
             .clip_path = try self.referenceAttr(node, "clip-path"),
             .mask = try self.referenceAttr(node, "mask"),
             .filter = self.filterValue(node),
-            // Neither has an attribute form -- SVG 2 gives them none, and
-            // zig-css answers for them only from `style` or a stylesheet,
-            // which is also where resvg reads them. Neither is inherited.
+            // SVG 2 gives neither an attribute, and resvg reads them as
+            // attributes all the same -- so zig-css answers for them from an
+            // attribute too, as well as from `style` or a stylesheet. Neither
+            // is inherited.
             .blend = if (self.presentation(node, "mix-blend-mode")) |v|
                 BlendMode.parse(std.mem.trim(u8, v, " \t\r\n")) orelse return error.BadBlendMode
             else
@@ -3253,7 +3254,12 @@ fn readStylesheet(gpa: std.mem.Allocator, doc: *Document, caller: []const []cons
         try sources.append(gpa, text);
     }
     if (sources.items.len == 0) return;
-    doc.stylesheet = try css.parseWith(gpa, sources.items, .{ .media = env });
+    // `.svg2`: as strict as SVG 1.1's CSS -- what it cannot honour is
+    // refused, not dropped -- with the structural and logical
+    // pseudo-classes, the later attribute tests, namespaces, and `@media`,
+    // answered in `env`. A state pseudo-class, which a still picture could
+    // never match, is refused along with every other at-rule.
+    doc.stylesheet = try css.parseWith(gpa, sources.items, .{ .profile = .svg2, .media = env });
     for (doc.stylesheet.at_rules) |r| {
         if (std.ascii.eqlIgnoreCase(r.name, "media")) doc.media_dependent = true;
     }
@@ -4728,11 +4734,12 @@ test "mix-blend-mode and isolation come from style, and give a group its own lay
     const gpa = testing.allocator;
     var doc = try read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"mix-blend-mode: color-dodge\"><rect width=\"1\" height=\"1\"/></g>" ++
         "<g style=\"isolation: isolate\"><rect width=\"1\" height=\"1\" style=\"mix-blend-mode: multiply\"/></g>" ++
-        // SVG 2 gives neither an attribute, so this is no blend and no layer.
+        // SVG 2 gives neither an attribute; resvg reads one anyway, and so
+        // does this.
         "<g mix-blend-mode=\"screen\"><rect width=\"1\" height=\"1\"/></g></svg>");
     defer doc.deinit();
     var it = doc.paths();
-    var groups: [2]Group = undefined;
+    var groups: [3]Group = undefined;
     var ng: usize = 0;
     var shape_blend: [3]BlendMode = undefined;
     var ns: usize = 0;
@@ -4747,9 +4754,10 @@ test "mix-blend-mode and isolation come from style, and give a group its own lay
         },
         else => {},
     };
-    try testing.expectEqual(@as(usize, 2), ng);
+    try testing.expectEqual(@as(usize, 3), ng);
     try testing.expectEqual(BlendMode.color_dodge, groups[0].blend);
     try testing.expectEqual(BlendMode.normal, groups[1].blend);
+    try testing.expectEqual(BlendMode.screen, groups[2].blend);
     try testing.expectEqualSlices(BlendMode, &.{ .normal, .multiply, .normal }, shape_blend[0..ns]);
     try testing.expectError(error.BadBlendMode, read(gpa, "<svg viewBox=\"0 0 8 8\"><rect width=\"1\" height=\"1\" style=\"mix-blend-mode: plus-lighter\"/></svg>"));
     try testing.expectError(error.BadIsolation, read(gpa, "<svg viewBox=\"0 0 8 8\"><g style=\"isolation: alone\"><rect width=\"1\" height=\"1\"/></g></svg>"));

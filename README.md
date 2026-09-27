@@ -453,10 +453,20 @@ try svg.draw(gpa, &surface, source, box, .{
 A `stroke-width` there is in the document's user units, like any other, so
 drawing a 24-unit icon at 72 pixels makes a width of 1 three pixels wide.
 
-What is refused rather than skipped: at-rules, pseudo-classes, pseudo-elements,
-namespace selectors, and the CSS 3 attribute operators. `@import` could not be
-implemented here in any case — fetching a stylesheet is the I/O that being
-sans-I/O rules out, exactly as it rules out `<use xlink:href="other.svg#x">`.
+Stylesheets are read under zig-css's `.svg2` profile: as strict as SVG 1.1's
+CSS — what cannot be honoured is refused, never dropped — with the selectors
+and `@media` a still picture can honour. The structural and logical
+pseudo-classes, the later attribute tests and namespace selectors are all
+static facts about the document. `@media` is asked about the size the picture
+is drawn at and the caller's preferences, so a document using it is read again
+when it is drawn at other than its own size. What is refused rather than
+skipped: every other at-rule, pseudo-elements, nesting, and the state
+pseudo-classes — `:hover`, `:focus`, `:visited` and the rest — which a still
+picture could never match, so that a rule written for one is not quietly never
+applied. `@import` could not be implemented here in any case — fetching a
+stylesheet is the I/O that being sans-I/O rules out, exactly as it rules out
+`<use xlink:href="other.svg#x">`. resvg reads neither `@media` nor these
+pseudo-classes, so what they draw is pinned to Chrome's rendering in a test.
 
 A **definition** is never drawn where it stands. A `<linearGradient>` or a
 `<clipPath>` written straight into the document body rather than into `<defs>`
@@ -574,7 +584,7 @@ short of the specification.
 | `text-decoration` | `underline`, `overline`, `line-through`, each in the paint of the element that declared it, at the font's own underline and strikeout metrics; and across glyphs placed one by one — turned by `rotate`, or moved by positions of their own — and along a `<textPath>`, as a piece under each glyph that turns and moves with it, as resvg and Chrome draw it |
 | `dominant-baseline`, `alignment-baseline` | every SVG 1.1 keyword and CSS Inline 3's `text-top`/`text-bottom`, placed by resvg's distances from the font's ascent, descent and x-height; `dominant-baseline` inherits, as SVG 2 has it, where resvg reads it from the element alone |
 | `shape-rendering`, `text-rendering` | yes, inherited — `crispEdges` and `optimizeSpeed` draw a shape without anti-aliasing, `text-rendering: optimizeSpeed` its text and decorations (text ignores `shape-rendering`, as in resvg); clips and masks keep theirs |
-| `mix-blend-mode`, `isolation` | yes, from `style` or a stylesheet (SVG 2 gives them no attribute) — all sixteen modes, on groups, shapes, text and images, each blended onto what is beneath it in its parent layer; `isolate` gives a group its own |
+| `mix-blend-mode`, `isolation` | yes, from `style`, a stylesheet, or an attribute — SVG 2 gives them none, and resvg reads one anyway — all sixteen modes, on groups, shapes, text and images, each blended onto what is beneath it in its parent layer; `isolate` gives a group its own |
 | `context-fill`, `context-stroke` | yes — the paints of the shape a marker is drawn on, or of the `<use>` a shape is drawn through, a paint server keeping that element's coordinate system; nothing where there is no context, as resvg |
 | `writing-mode`, `direction`, `unicode-bidi` | horizontal left-to-right only; vertical, right-to-left or bidirectional text is refused (`UnsupportedTextDirection`) |
 | `filterUnits`, `primitiveUnits`, the filter region | yes — both unit systems, and §15.7.6 subregions |
@@ -592,9 +602,10 @@ short of the specification.
 | `em`, `ex` lengths | yes, against the `font-size` in force; refused when none is |
 | `style` | yes — §6.3's declaration block, which outranks the attributes |
 | `<style>` | yes — every one of them, as one sheet in document order; one whose `media` query does not hold is not in force, the query asked about the size the picture is drawn at and the caller's `Options.color_scheme` and `reduced_motion`, as Chrome asks it of an SVG `<img>` |
-| Selectors | `*`, type, `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`, `[attr\|=v]`; ` `, `>`, `+`, `~`; lists |
+| Selectors | `*`, type, `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`, `[attr\|=v]`, `^=`, `$=`, `*=` and the `i` flag; ` `, `>`, `+`, `~`; lists; namespace selectors with `@namespace`; the structural pseudo-classes (`:root`, `:empty`, `:first-child` and the rest, `:nth-child()` with `of S`) and `:not()`, `:is()`, `:where()`, `:lang()` |
 | The cascade | yes — §6.4's five bands, specificity, source order, `!important` |
-| At-rules, pseudo-classes, namespace selectors | **no** — refused, not skipped |
+| `@media` | yes — asked about the size the picture is drawn at and the caller's `Options.color_scheme` and `reduced_motion`, as Chrome asks it of an SVG `<img>` |
+| Other at-rules, state pseudo-classes, pseudo-elements, nesting | **no** — refused, not skipped: `@supports`, `@layer`, `@import`, `@font-face` and the rest, and `:hover` and every other pseudo-class a still picture could never match |
 | `<image>` | yes — a `data:` URL, or any other `href` the caller's `ImageResolver` answers |
 | Picture formats | whatever [z2dimg](https://git.jcollie.dev/jeff/z2dimg) reads: PNG, JPEG, GIF, WebP, BMP, TGA, ICO, Netpbm, PCX, XBM, XPM |
 | `width`, `height` on `<image>` | yes, including SVG 2's `auto` — the picture's own size, or what the other side implies |
@@ -1107,9 +1118,9 @@ $ zig build svgdump -- icon.svg out.png --size 256 --sandbox
 What SVG 1.1 has that this does not is vertical and right-to-left text —
 `writing-mode`, `direction: rtl` and `unicode-bidi` — which want the Unicode
 bidirectional algorithm, contextual shaping from the font's `GSUB` for Arabic
-and the other joining scripts, and vertical metrics z2d does not read yet;
-and `@media` and the CSS pseudo-classes. Each is refused rather than
-ignored, so a document needing one says so.
+and the other joining scripts, and vertical metrics z2d does not read yet.
+It is refused rather than
+ignored, so a document needing it says so.
 
 **`<pattern>` sampled rather than drawn was on this list, and was tried and
 dropped.** The reasoning was that drawing the tile once per cell costs a draw

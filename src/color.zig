@@ -42,10 +42,14 @@
 //! sRGB's white, which the mapping answers with white. Chrome and resvg
 //! clamp the saturation first and paint the fully saturated colour.
 //!
-//! A `color-mix()` with `currentcolor` in it is refused
-//! (`error.UnsupportedColorMix`). It cannot be mixed until the element's
-//! `color` is known, which is after the value is read, and mixing it with
-//! anything else would be a colour the document did not ask for.
+//! A `color-mix()` with `currentcolor` in it, and a `light-dark()` or a
+//! relative colour that waits on `currentcolor`, cannot be worked out until
+//! the element's `color` is known, which is after the value is read. As a
+//! paint -- `fill`, `stroke`, a stop colour, `color` itself -- it is kept as
+//! its text (`Paint.deferred`) and resolved once that colour is known. Where
+//! only a colour is read it is refused (`error.UnsupportedColorMix`,
+//! `error.UnsupportedDeferredColor`): mixing it with anything else would be
+//! a colour the document did not ask for.
 //!
 //! ## Two case rules, and they are different
 //!
@@ -95,7 +99,8 @@ pub const Error = error{
     /// An `opacity` or `fill-opacity` that is not a number or a percentage.
     BadOpacity,
     /// A `color-mix()` with `currentcolor` in it, which this cannot mix
-    /// before the element's `color` is known.
+    /// before the element's `color` is known. A paint keeps it as
+    /// `Paint.deferred` instead; see the note at the top.
     UnsupportedColorMix,
     /// A `light-dark()`, or a relative colour made from one, that waits on
     /// `currentcolor` as well as the scheme -- the element's colour is not
@@ -136,6 +141,33 @@ pub const Paint = union(enum) {
     /// never sees one; where there is no context it paints nothing.
     context_fill,
     context_stroke,
+    /// A `light-dark()`, or a relative colour, that waits on `currentColor`
+    /// as well as the scheme: resolved, like `current`, where the element's
+    /// colour is known. See `Deferred`.
+    deferred: Deferred,
+};
+
+/// A colour function that cannot be worked out until the element's colour
+/// is known -- `light-dark(currentColor, blue)`, `rgb(from currentColor r g
+/// 255)` -- kept as the text of the function, which was read and found good,
+/// and read again to resolve it. The text borrows from the tree's arena.
+pub const Deferred = struct {
+    text: []const u8,
+
+    /// The colour it comes to, where `currentColor` is `current` and the
+    /// element's used scheme is `scheme`.
+    pub fn resolve(self: Deferred, current: Color, scheme: Scheme) Color {
+        const d: css.values.color.Deferred = .{ .text = self.text };
+        const cur = css.values.color.Absolute.fromRgba(.{
+            .r = current.r,
+            .g = current.g,
+            .b = current.b,
+            .a = @floatCast(current.alpha),
+        });
+        const rgba = d.resolveIn(.{ .current = cur, .scheme = scheme }).toRgba();
+        const a: f64 = if (std.math.isFinite(rgba.a)) rgba.a else current.alpha;
+        return .{ .r = rgba.r, .g = rgba.g, .b = rgba.b, .alpha = a };
+    }
 };
 
 /// Light or dark: what a `light-dark()` chooses between.
@@ -200,7 +232,13 @@ pub fn parsePaintIn(text: []const u8, scheme: Scheme) Error!Paint {
     if (ascii.eqlIgnoreCase(t, "context-fill")) return .context_fill;
     if (ascii.eqlIgnoreCase(t, "context-stroke")) return .context_stroke;
     if (parseReference(t)) |id| return .{ .reference = id };
-    return .{ .color = try parseColorIn(t, scheme) };
+    return .{
+        .color = parseColorIn(t, scheme) catch |err| switch (err) {
+            // A paint can wait for the element's colour, as `currentColor` does.
+            error.UnsupportedDeferredColor, error.UnsupportedColorMix => return .{ .deferred = .{ .text = t } },
+            else => return err,
+        },
+    };
 }
 
 /// A `fill` or `stroke` that may name a fallback: SVG 1.1 §11.2's
@@ -227,7 +265,7 @@ pub fn parsePaintWithFallbackIn(text: []const u8, scheme: Scheme) Error!PaintWit
     if (rest.len == 0) return .{ .paint = .{ .reference = id } };
     const fallback = try parsePaintIn(rest, scheme);
     return switch (fallback) {
-        .none, .current, .color => .{ .paint = .{ .reference = id }, .fallback = fallback },
+        .none, .current, .color, .deferred => .{ .paint = .{ .reference = id }, .fallback = fallback },
         // A reference falling back to a reference, or to a context paint, is
         // not in the grammar.
         else => error.BadColor,
@@ -314,6 +352,14 @@ fn parseFunctional(text: []const u8, scheme: Scheme) Error!Color {
     const name = std.mem.trim(u8, text[0..open], " \t\r\n");
     const is_rgba = ascii.eqlIgnoreCase(name, "rgba");
     if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return parseColor4(text, scheme);
+    // A relative colour -- `rgb(from teal r g 255)` -- is Color 5's, and
+    // zig-css's to read, like every other form but the plain one.
+    {
+        const args = std.mem.trimStart(u8, text[open + 1 .. text.len - 1], " \t\r\n");
+        if (args.len > 4 and ascii.eqlIgnoreCase(args[0..4], "from") and ascii.isWhitespace(args[4])) {
+            return parseColor4(text, scheme);
+        }
+    }
 
     // `rgb` and `rgba` have been interchangeable since CSS Color 4, so the
     // name decides nothing; the argument count does.
@@ -779,6 +825,12 @@ test "light-dark chooses by the scheme, and is refused where it waits on current
     try testing.expectEqual(@as(u8, 0), dark.r);
     try testing.expectEqual(@as(u8, 255), (try parsePaintIn("light-dark(#fff, #000)", .light)).color.r);
     try testing.expectError(error.UnsupportedDeferredColor, parseColorIn("light-dark(currentColor, blue)", .dark));
+    // As a paint it waits for the element's colour, and comes to it.
+    const waiting = (try parsePaintIn("light-dark(currentColor, blue)", .light)).deferred;
+    const teal: Color = .{ .r = 0, .g = 128, .b = 128 };
+    try testing.expectEqual(teal, waiting.resolve(teal, .light));
+    try testing.expectEqual(@as(u8, 255), waiting.resolve(teal, .dark).b);
+    try testing.expectEqual(@as(u8, 255), (try parsePaintIn("rgb(from currentColor r g 255)", .light)).deferred.resolve(teal, .light).b);
     try testing.expectEqual(Scheme.light, usedScheme("normal", .dark));
     try testing.expectEqual(Scheme.dark, usedScheme("light dark", .dark));
     try testing.expectEqual(Scheme.light, usedScheme("light dark", .light));
@@ -786,7 +838,9 @@ test "light-dark chooses by the scheme, and is refused where it waits on current
     try testing.expectEqual(Scheme.light, usedScheme("only light", .dark));
 }
 
-test "a color-mix with currentcolor in it is refused, and so is its paint" {
+test "a color-mix with currentcolor in it is refused as a colour and waits as a paint" {
     try testing.expectError(error.UnsupportedColorMix, parseColor("color-mix(in srgb, currentcolor, red)"));
-    try testing.expectError(error.UnsupportedColorMix, parsePaint("color-mix(in oklch, red 10%, currentColor)"));
+    const p = try parsePaint("color-mix(in srgb, red, currentColor)");
+    const got = p.deferred.resolve(.{ .r = 0, .g = 0, .b = 255, .alpha = 1 }, .light);
+    try testing.expectEqual(Color{ .r = 128, .g = 0, .b = 128, .alpha = 1 }, got);
 }

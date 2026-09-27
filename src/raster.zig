@@ -873,7 +873,7 @@ fn drawItems(
                     g.filter,
                     group_ctm,
                     .{ .container = g.node },
-                    g.current_color orelse callerColor(opts),
+                    currentOf(g.current_color, g.current_deferred, g.color_scheme, opts) orelse callerColor(opts),
                     g.color_scheme,
                     width,
                     height,
@@ -936,7 +936,7 @@ fn drawItems(
                 shape.filter,
                 ctm,
                 .{ .shape = shape },
-                shape.current_color orelse callerColor(opts),
+                currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts) orelse callerColor(opts),
                 shape.color_scheme,
                 width,
                 height,
@@ -1345,15 +1345,19 @@ fn paintMarkers(
     // of the shape it is drawn on, a `currentColor` there being the shape's
     // own colour.
     const pin = struct {
-        fn f(given: ?color.Paint, current: ?color.Color) ?color.Paint {
+        fn f(given: ?color.Paint, current: ?color.Color, scheme: color.Scheme) ?color.Paint {
             const paint = given orelse return null;
-            if (paint == .current) return if (current) |c| .{ .color = c } else null;
-            return paint;
+            return switch (paint) {
+                .current => if (current) |c| .{ .color = c } else null,
+                .deferred => |d| if (current) |c| .{ .color = d.resolve(c, scheme) } else paint,
+                else => paint,
+            };
         }
     }.f;
+    const own = currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts);
     const context: document.Context = .{
-        .fill = pin(shape.fill, shape.current_color),
-        .stroke = pin(shape.stroke, shape.current_color),
+        .fill = pin(shape.fill, own, shape.color_scheme),
+        .stroke = pin(shape.stroke, own, shape.color_scheme),
         // The shape's whole matrix, the viewBox mapping included: the
         // marker's content is drawn in a pass with no base of its own.
         .origin = .{ .subject = .{ .shape = &shape }, .transform = ctm },
@@ -1548,7 +1552,7 @@ fn drawImage(
             im.filter,
             ctm,
             .{ .image = rect },
-            im.current_color orelse callerColor(opts),
+            currentOf(im.current_color, im.current_deferred, im.color_scheme, opts) orelse callerColor(opts),
             im.color_scheme,
             width,
             height,
@@ -2604,7 +2608,8 @@ fn resolveFill(shape: document.Shape, opts: Options) ?Paint {
     const named: ?color.Color = switch (shape.fill orelse .current) {
         .none => return null,
         .color => |c| c,
-        .current => shape.current_color,
+        .current => currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts),
+        .deferred => |d| d.resolve(currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts) orelse callerColor(opts), shape.color_scheme),
         .reference => |id| return .{ .reference = .{ .id = id, .alpha = alpha } },
         // Resolved by the walk; one that reaches here had no context.
         .context_fill, .context_stroke => return null,
@@ -4970,6 +4975,15 @@ fn makeSource(
     return .{ .gradient = g };
 }
 
+/// What `currentColor` is on an element: its `color`, or one that was waiting
+/// on the caller's colour resolved against it -- or null, when neither is and
+/// the caller's pixel itself is what is painted.
+fn currentOf(named: ?color.Color, waiting: ?color.Deferred, scheme: color.Scheme, opts: Options) ?color.Color {
+    if (named) |c| return c;
+    const d = waiting orelse return null;
+    return d.resolve(callerColor(opts), scheme);
+}
+
 /// The caller's own fill as a colour, for a `stop-color="currentColor"` in a
 /// document that names no `color` of its own.
 fn callerColor(opts: Options) color.Color {
@@ -5243,7 +5257,8 @@ fn resolveStroke(shape: document.Shape, opts: Options) Error!?Stroke {
     const named: ?color.Color = switch (paint) {
         .none, .context_fill, .context_stroke => return null,
         .color => |c| c,
-        .current => shape.current_color,
+        .current => currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts),
+        .deferred => |d| d.resolve(currentOf(shape.current_color, shape.current_deferred, shape.color_scheme, opts) orelse callerColor(opts), shape.color_scheme),
         .reference => |id| {
             var ref: Stroke = try strokeStyle(shape, width, .{
                 .reference = .{ .id = id, .alpha = alpha },
@@ -7767,5 +7782,53 @@ test "light-dark follows the used colour scheme, as Chrome draws it" {
                 return err;
             };
         }
+    }
+}
+
+test "a colour that waits on currentColor comes to the element's colour, as Chrome draws it" {
+    // `light-dark(currentColor, …)` and a relative colour made from
+    // `currentColor`, in a fill, a stroke, and in `color` itself -- where
+    // `currentColor` is the parent's colour, or the caller's where nothing
+    // above names one, as Chrome's initial black is here. Every colour is
+    // Chrome 140's for the same document as an `<img>`, light and dark.
+    const gpa = testing.allocator;
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"20\" viewBox=\"0 0 6 2\" style=\"color-scheme: light dark\"><rect x=\"0\" width=\"1\" height=\"2\" color=\"teal\" fill=\"light-dark(currentColor, blue)\"/><g color=\"red\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: light-dark(currentColor, white)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" style=\"color: light-dark(currentColor, orange)\" fill=\"currentColor\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"rgb(10, 20, 30)\" fill=\"rgb(from currentColor r g 255)\"/><rect x=\"4.25\" y=\"0.25\" width=\"0.5\" height=\"1.5\" color=\"purple\" fill=\"none\" stroke-width=\"0.5\" stroke=\"light-dark(currentColor, lime)\"/><g color=\"navy\"><g style=\"color: light-dark(currentColor, gold)\"><rect x=\"5\" width=\"1\" height=\"2\" fill=\"light-dark(currentColor, pink)\"/></g></g></svg>";
+    const at = [_][2]i32{ .{ 5, 10 }, .{ 15, 10 }, .{ 25, 10 }, .{ 35, 10 }, .{ 43, 10 }, .{ 55, 10 } };
+    const Case = struct { scheme: css.media.ColorScheme, colors: [6][3]u8 };
+    for ([_]Case{
+        .{ .scheme = .light, .colors = .{ .{ 0, 128, 128 }, .{ 255, 0, 0 }, .{ 0, 0, 0 }, .{ 10, 20, 255 }, .{ 128, 0, 128 }, .{ 0, 0, 128 } } },
+        .{ .scheme = .dark, .colors = .{ .{ 0, 0, 255 }, .{ 255, 255, 255 }, .{ 255, 165, 0 }, .{ 10, 20, 255 }, .{ 0, 255, 0 }, .{ 255, 192, 203 } } },
+    }) |c| {
+        var sfc = try render(gpa, src, .{
+            .width = 60,
+            .height = 20,
+            .color_scheme = c.scheme,
+            .fill = .{ .rgba = .{ .r = 0, .g = 0, .b = 0, .a = 255 } },
+        });
+        defer sfc.deinit(gpa);
+        for (at, c.colors, 0..) |p, want, i| {
+            const px = sfc.getPixel(p[0], p[1]).?.rgba;
+            testing.expectEqualSlices(u8, &want, &.{ px.r, px.g, px.b }) catch |err| {
+                std.debug.print("square {d} {t}\n", .{ i, c.scheme });
+                return err;
+            };
+        }
+    }
+}
+
+test "a color-mix with currentColor in it mixes the element's colour, as Chrome draws it" {
+    // As a fill, as `color` itself (mixing the parent's), and around a `light-dark()` that waits too. Each
+    // colour is Chrome 140's for the same document as an `<img>`.
+    const gpa = testing.allocator;
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 4 2\"><rect x=\"0\" width=\"1\" height=\"2\" color=\"blue\" fill=\"color-mix(in srgb, currentColor, red)\"/><g color=\"white\"><rect x=\"1\" width=\"1\" height=\"2\" style=\"color: color-mix(in srgb, currentColor 25%, black)\" fill=\"currentColor\"/></g><rect x=\"2\" width=\"1\" height=\"2\" color=\"lime\" fill=\"color-mix(in srgb, currentColor, black)\"/><rect x=\"3\" width=\"1\" height=\"2\" color=\"teal\" fill=\"color-mix(in srgb, light-dark(currentColor, red), white)\"/></svg>";
+    var sfc = try render(gpa, src, .{ .width = 40, .height = 20 });
+    defer sfc.deinit(gpa);
+    const want = [_][3]u8{ .{ 128, 0, 128 }, .{ 64, 64, 64 }, .{ 0, 128, 0 }, .{ 128, 192, 192 } };
+    for (want, 0..) |w, i| {
+        const px = sfc.getPixel(@intCast(5 + 10 * i), 10).?.rgba;
+        testing.expectEqualSlices(u8, &w, &.{ px.r, px.g, px.b }) catch |err| {
+            std.debug.print("square {d}\n", .{i});
+            return err;
+        };
     }
 }

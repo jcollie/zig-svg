@@ -362,6 +362,11 @@ pub const Inherited = struct {
     /// what a `light-dark()` chooses by here and below. See
     /// `color.usedScheme`.
     color_scheme: ?color.Scheme = null,
+    /// A `color` that waits on `currentColor` -- `light-dark(currentColor,
+    /// white)` -- which is the parent's colour, and which no ancestor has
+    /// named yet: the caller's, then, which only the renderer knows. One whose
+    /// parent does have a colour is resolved against it when inherited.
+    current_deferred: ?color.Deferred = null,
 
     stroke: ?color.Paint = null,
     stroke_width: ?f64 = null,
@@ -437,7 +442,19 @@ pub const Inherited = struct {
             .fill_opacity = child.fill_opacity orelse self.fill_opacity,
             .fill_rule = child.fill_rule orelse self.fill_rule,
             .clip_rule = child.clip_rule orelse self.clip_rule,
-            .current_color = child.current_color orelse self.current_color,
+            .current_color = child.current_color orelse if (child.current_deferred) |d|
+                (if (self.current_color) |c| d.resolve(c, child.color_scheme orelse self.color_scheme orelse .light) else null)
+            else
+                self.current_color,
+            // Still waiting only when nothing above had a colour to give it.
+            // (One waiting under another waiting takes the caller's colour as
+            // its own `currentColor`, rather than the one above's.)
+            .current_deferred = if (child.current_color != null)
+                null
+            else if (child.current_deferred) |d|
+                (if (self.current_color != null) null else d)
+            else
+                self.current_deferred,
             .color_scheme = child.color_scheme orelse self.color_scheme,
             .stroke = child.stroke orelse self.stroke,
             .stroke_width = child.stroke_width orelse self.stroke_width,
@@ -539,6 +556,9 @@ pub const Image = struct {
     current_color: ?color.Color,
     /// The used colour scheme, which a `light-dark()` in its filter chooses by.
     color_scheme: color.Scheme = .light,
+    /// A `color` still waiting on the caller's colour; see
+    /// `Inherited.current_deferred`.
+    current_deferred: ?color.Deferred = null,
     /// False under `visibility: hidden`; see `Shape.visible`.
     visible: bool,
     /// Every `transform` down to and including this element's, as `Shape`
@@ -574,6 +594,9 @@ pub const Group = struct {
     /// The used colour scheme on the container, which a `light-dark()` in
     /// its filter chooses by.
     color_scheme: color.Scheme = .light,
+    /// A `color` still waiting on the caller's colour; see
+    /// `Inherited.current_deferred`.
+    current_deferred: ?color.Deferred = null,
     /// The user-space matrix in force on the container, which is the space the
     /// clip path's own coordinates are in.
     transform: z2d.Transformation,
@@ -674,6 +697,7 @@ pub const Context = struct {
         const paint = p orelse return null;
         return switch (paint) {
             .current => if (inherited.current_color) |c| .{ .color = c } else null,
+            .deferred => |d| if (inherited.current_color) |c| .{ .color = d.resolve(c, inherited.color_scheme orelse .light) } else paint,
             .context_fill, .context_stroke => substitute(paint, inherited.context),
             else => paint,
         };
@@ -725,6 +749,9 @@ pub const Shape = struct {
     /// The used colour scheme, which a `light-dark()` in its filter chooses
     /// by.
     color_scheme: color.Scheme = .light,
+    /// A `color` still waiting on the caller's colour; see
+    /// `Inherited.current_deferred`.
+    current_deferred: ?color.Deferred = null,
     stroke: ?color.Paint,
     stroke_width: ?f64,
     stroke_opacity: ?f64,
@@ -1342,6 +1369,7 @@ pub const PathIterator = struct {
                 .blend = refs.blend,
                 .current_color = root_inherited.current_color,
                 .color_scheme = root_inherited.color_scheme orelse .light,
+                .current_deferred = root_inherited.current_deferred,
                 .transform = ctm,
             } };
         }
@@ -1499,6 +1527,7 @@ pub const PathIterator = struct {
                 .clip_rule = parent.inherited.clip_rule,
                 .current_color = parent.inherited.current_color,
                 .color_scheme = parent.inherited.color_scheme orelse .light,
+                .current_deferred = parent.inherited.current_deferred,
                 .stroke = substitute(parent.inherited.stroke, parent.inherited.context),
                 .stroke_width = parent.inherited.stroke_width,
                 .stroke_opacity = parent.inherited.stroke_opacity,
@@ -2009,6 +2038,7 @@ pub const PathIterator = struct {
                     .blend = refs.blend,
                     .current_color = inherited.current_color,
                     .color_scheme = inherited.color_scheme orelse .light,
+                    .current_deferred = inherited.current_deferred,
                     .transform = ctm,
                 } };
             }
@@ -2051,6 +2081,7 @@ pub const PathIterator = struct {
                 .clip_rule = effective.clip_rule,
                 .current_color = effective.current_color,
                 .color_scheme = effective.color_scheme orelse .light,
+                .current_deferred = effective.current_deferred,
                 .stroke = substitute(effective.stroke, effective.context),
                 .stroke_width = effective.stroke_width,
                 .stroke_opacity = effective.stroke_opacity,
@@ -2133,6 +2164,7 @@ pub const PathIterator = struct {
                 .blend = refs.blend,
                 .current_color = effective.current_color,
                 .color_scheme = effective.color_scheme orelse .light,
+                .current_deferred = effective.current_deferred,
                 .transform = own_ctm,
                 .viewport = clip,
             } };
@@ -2190,6 +2222,7 @@ pub const PathIterator = struct {
             .blend = refs.blend,
             .current_color = effective.current_color,
             .color_scheme = effective.color_scheme orelse .light,
+            .current_deferred = effective.current_deferred,
             .transform = ctm,
         } };
     }
@@ -2369,13 +2402,26 @@ pub const PathIterator = struct {
         else
             null;
         const scheme = own_scheme orelse self.scheme;
+        // `color`, which may wait on `currentColor` -- the parent's colour.
+        var current_color: ?color.Color = null;
+        var current_deferred: ?color.Deferred = null;
+        if (self.presentation(node, "color")) |v| {
+            current_color = color.parseColorIn(v, scheme) catch |err| switch (err) {
+                error.UnsupportedDeferredColor, error.UnsupportedColorMix => blk: {
+                    current_deferred = .{ .text = std.mem.trim(u8, v, " \t\r\n") };
+                    break :blk null;
+                },
+                else => return err,
+            };
+        }
         return .{
             .color_scheme = own_scheme,
             .fill = if (self.presentation(node, "fill")) |v| try self.readPaint(v, scheme) else null,
             .fill_opacity = if (self.presentation(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
             .fill_rule = if (self.presentation(node, "fill-rule")) |v| try parseFillRule(v) else null,
             .clip_rule = if (self.presentation(node, "clip-rule")) |v| try parseFillRule(v) else null,
-            .current_color = if (self.presentation(node, "color")) |v| try color.parseColorIn(v, scheme) else null,
+            .current_color = current_color,
+            .current_deferred = current_deferred,
             .stroke = if (self.presentation(node, "stroke")) |v| try self.readPaint(v, scheme) else null,
             .stroke_width = try self.optionalPresentationLength(node, "stroke-width", .other),
             .stroke_opacity = if (self.presentation(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,

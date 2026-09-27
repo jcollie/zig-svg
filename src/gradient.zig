@@ -268,6 +268,7 @@ fn applyOne(
         var value: color.Color = if (css.property(sheet, tree, child, "stop-color")) |c|
             switch (try color.parsePaintIn(c, color.schemeAt(sheet, tree, child, preferred))) {
                 .color => |named| named,
+                .deferred => |d| d.resolve(current_color, color.schemeAt(sheet, tree, child, preferred)),
                 // `currentColor` here is the `color` in force, like anywhere
                 // else. `none` is not a colour and a `url(...)` is not one
                 // either -- §13.2.4 has no use for a stop that is a paint

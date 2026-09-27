@@ -87,6 +87,7 @@ const ascii = std.ascii;
 const testing = std.testing;
 
 const css = @import("css");
+const ztree = @import("ztree");
 
 pub const Error = error{
     /// A `fill` this module cannot read.
@@ -96,9 +97,9 @@ pub const Error = error{
     /// A `color-mix()` with `currentcolor` in it, which this cannot mix
     /// before the element's `color` is known.
     UnsupportedColorMix,
-    /// A `light-dark()`, or a relative colour made from something not known
-    /// until the colour scheme or `currentcolor` is, which a colour is read
-    /// without here.
+    /// A `light-dark()`, or a relative colour made from one, that waits on
+    /// `currentcolor` as well as the scheme -- the element's colour is not
+    /// known where its colours are read.
     UnsupportedDeferredColor,
 };
 
@@ -137,15 +138,69 @@ pub const Paint = union(enum) {
     context_stroke,
 };
 
+/// Light or dark: what a `light-dark()` chooses between.
+pub const Scheme = css.values.color.Scheme;
+
+/// The used colour scheme, CSS Color Adjust 1 §2.1, from what `color-scheme`
+/// lists: the one the reader prefers if it is listed, the first listed if not,
+/// and light when neither is -- which is what `normal`, the initial value,
+/// comes to, so that a document that says nothing about schemes is drawn light
+/// whatever the reader prefers. Chrome draws an SVG `<img>` so.
+///
+/// zig-css's own rule, which it keeps to itself.
+pub fn usedScheme(text: []const u8, preferred: css.media.ColorScheme) Scheme {
+    var first: ?Scheme = null;
+    var parts: css.values.split.Parts = .init(text);
+    while (parts.next()) |part| {
+        const listed: Scheme = if (css.values.split.isKeyword(part, "light"))
+            .light
+        else if (css.values.split.isKeyword(part, "dark"))
+            .dark
+        else
+            // `normal`, `only`, and names of schemes nothing here knows,
+            // which the property allows and which choose nothing.
+            continue;
+        if (@intFromEnum(listed) == @intFromEnum(preferred)) return listed;
+        if (first == null) first = listed;
+    }
+    return first orelse .light;
+}
+
+/// The used colour scheme of `node`, from the nearest `color-scheme` on it or
+/// above it: for what is read outside the walk that carries it down, a
+/// gradient's stops and a filter's primitives. `color-scheme` has no
+/// attribute form, so only `style` and stylesheets answer.
+pub fn schemeAt(sheet: *const css.Stylesheet, tree: *const ztree.Document, node: ztree.NodeId, preferred: css.media.ColorScheme) Scheme {
+    var at: ?ztree.NodeId = node;
+    while (at) |n| : (at = tree.node(n).parent) {
+        if (tree.node(n).kind != .element) continue;
+        if (css.property(sheet, tree, n, "color-scheme")) |v| return usedScheme(v, preferred);
+    }
+    return .light;
+}
+
+/// What a colour is read in the scheme of, for what reads colours on behalf
+/// of an element: the reader's preference, which a `color-scheme` further
+/// down may take up, and the element's own used scheme.
+pub const SchemeContext = struct {
+    preferred: css.media.ColorScheme = .light,
+    used: Scheme = .light,
+};
+
 /// Read a `fill`.
 pub fn parsePaint(text: []const u8) Error!Paint {
+    return parsePaintIn(text, .light);
+}
+
+/// Read a `fill` in `scheme`, which is what a `light-dark()` in it chooses by.
+pub fn parsePaintIn(text: []const u8, scheme: Scheme) Error!Paint {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (ascii.eqlIgnoreCase(t, "none")) return .none;
     if (ascii.eqlIgnoreCase(t, "currentcolor")) return .current;
     if (ascii.eqlIgnoreCase(t, "context-fill")) return .context_fill;
     if (ascii.eqlIgnoreCase(t, "context-stroke")) return .context_stroke;
     if (parseReference(t)) |id| return .{ .reference = id };
-    return .{ .color = try parseColor(t) };
+    return .{ .color = try parseColorIn(t, scheme) };
 }
 
 /// A `fill` or `stroke` that may name a fallback: SVG 1.1 §11.2's
@@ -160,13 +215,17 @@ pub const PaintWithFallback = struct {
 
 /// Read a `fill` or `stroke`, with its fallback if it names one.
 pub fn parsePaintWithFallback(text: []const u8) Error!PaintWithFallback {
+    return parsePaintWithFallbackIn(text, .light);
+}
+
+pub fn parsePaintWithFallbackIn(text: []const u8, scheme: Scheme) Error!PaintWithFallback {
     const t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len < 4 or !ascii.eqlIgnoreCase(t[0..4], "url(")) return .{ .paint = try parsePaint(t) };
+    if (t.len < 4 or !ascii.eqlIgnoreCase(t[0..4], "url(")) return .{ .paint = try parsePaintIn(t, scheme) };
     const close = std.mem.findScalar(u8, t, ')') orelse return error.BadColor;
     const id = parseReference(t[0 .. close + 1]) orelse return error.BadColor;
     const rest = std.mem.trim(u8, t[close + 1 ..], " \t\r\n");
     if (rest.len == 0) return .{ .paint = .{ .reference = id } };
-    const fallback = try parsePaint(rest);
+    const fallback = try parsePaintIn(rest, scheme);
     return switch (fallback) {
         .none, .current, .color => .{ .paint = .{ .reference = id }, .fallback = fallback },
         // A reference falling back to a reference, or to a context paint, is
@@ -192,10 +251,15 @@ fn parseReference(t: []const u8) ?[]const u8 {
 
 /// Read a colour, which `none` and `currentColor` are not.
 pub fn parseColor(text: []const u8) Error!Color {
+    return parseColorIn(text, .light);
+}
+
+/// Read a colour in `scheme`, which is what a `light-dark()` in it chooses by.
+pub fn parseColorIn(text: []const u8, scheme: Scheme) Error!Color {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return error.BadColor;
     if (t[0] == '#') return parseHex(t[1..]);
-    if (std.mem.findScalar(u8, t, '(') != null) return parseFunctional(t);
+    if (std.mem.findScalar(u8, t, '(') != null) return parseFunctional(t, scheme);
     return parseName(t) orelse error.BadColor;
 }
 
@@ -244,12 +308,12 @@ fn byte(pair: [2]u8) u8 {
 /// `rgb(…)` and `rgba(…)`, with the components separated by commas or by
 /// spaces, and the alpha by a comma or a slash; and every other function,
 /// through `parseColor4`.
-fn parseFunctional(text: []const u8) Error!Color {
+fn parseFunctional(text: []const u8, scheme: Scheme) Error!Color {
     const open = std.mem.findScalar(u8, text, '(').?;
     if (text[text.len - 1] != ')') return error.BadColor;
     const name = std.mem.trim(u8, text[0..open], " \t\r\n");
     const is_rgba = ascii.eqlIgnoreCase(name, "rgba");
-    if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return parseColor4(text);
+    if (!is_rgba and !ascii.eqlIgnoreCase(name, "rgb")) return parseColor4(text, scheme);
 
     // `rgb` and `rgba` have been interchangeable since CSS Color 4, so the
     // name decides nothing; the argument count does.
@@ -276,17 +340,21 @@ fn parseFunctional(text: []const u8) Error!Color {
 /// component out of range, a stray argument and a mixed separator are each
 /// answered here the way they always have been; handing it over would move
 /// those answers for no gain in what can be drawn.
-fn parseColor4(text: []const u8) Error!Color {
+fn parseColor4(text: []const u8, scheme: Scheme) Error!Color {
     const parsed = css.values.parseColor(text) orelse return error.BadColor;
     const absolute = switch (parsed) {
         .absolute => |a| a,
         // Only a bare `currentcolor` is this, and that has no parentheses.
         .current => return error.BadColor,
         .mix => return error.UnsupportedColorMix,
-        // `light-dark()`, or a relative colour made from one or from
-        // `currentcolor`: which colour it is waits on the colour scheme, which
-        // a colour is read without here.
-        .deferred => return error.UnsupportedDeferredColor,
+        // `light-dark()`, or a relative colour made from one: which colour
+        // it is waits on the scheme, which is known here. One that waits on
+        // `currentcolor` as well is refused, since the element's colour is
+        // not known where its colours are read.
+        .deferred => |d| blk: {
+            if (ascii.findIgnoreCase(text, "currentcolor") != null) return error.UnsupportedDeferredColor;
+            break :blk d.resolveIn(.{ .current = css.values.color.Absolute.fromRgba(css.values.Rgba.black), .scheme = scheme });
+        },
     };
     const rgba = absolute.toRgba();
     // `calc()` can write a NaN, and a NaN alpha would reach every blend.
@@ -704,8 +772,18 @@ test "the rest of CSS Color 4, as coloraide shows each in sRGB" {
     }
 }
 
-test "a colour that waits on the scheme is refused" {
-    try testing.expectError(error.UnsupportedDeferredColor, parseColor("light-dark(red, blue)"));
+test "light-dark chooses by the scheme, and is refused where it waits on currentcolor" {
+    try expectColor(.{ .r = 255, .g = 0, .b = 0 }, "light-dark(red, blue)");
+    const dark = try parseColorIn("light-dark(red, blue)", .dark);
+    try testing.expectEqual(@as(u8, 255), dark.b);
+    try testing.expectEqual(@as(u8, 0), dark.r);
+    try testing.expectEqual(@as(u8, 255), (try parsePaintIn("light-dark(#fff, #000)", .light)).color.r);
+    try testing.expectError(error.UnsupportedDeferredColor, parseColorIn("light-dark(currentColor, blue)", .dark));
+    try testing.expectEqual(Scheme.light, usedScheme("normal", .dark));
+    try testing.expectEqual(Scheme.dark, usedScheme("light dark", .dark));
+    try testing.expectEqual(Scheme.light, usedScheme("light dark", .light));
+    try testing.expectEqual(Scheme.dark, usedScheme("dark", .light));
+    try testing.expectEqual(Scheme.light, usedScheme("only light", .dark));
 }
 
 test "a color-mix with currentcolor in it is refused, and so is its paint" {

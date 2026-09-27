@@ -874,6 +874,7 @@ fn drawItems(
                     group_ctm,
                     .{ .container = g.node },
                     g.current_color orelse callerColor(opts),
+                    g.color_scheme,
                     width,
                     height,
                     opts,
@@ -936,6 +937,7 @@ fn drawItems(
                 ctm,
                 .{ .shape = shape },
                 shape.current_color orelse callerColor(opts),
+                shape.color_scheme,
                 width,
                 height,
                 opts,
@@ -1547,6 +1549,7 @@ fn drawImage(
             ctm,
             .{ .image = rect },
             im.current_color orelse callerColor(opts),
+            im.color_scheme,
             width,
             height,
             opts,
@@ -1785,12 +1788,14 @@ fn buildFilter(
     ctm: z2d.Transformation,
     subject: Subject,
     current: color.Color,
+    scheme: color.Scheme,
     width: i32,
     height: i32,
     opts: Options,
     pass: Pass,
 ) Error!?Filtered {
     const v = value orelse return null;
+    const schemes: color.SchemeContext = .{ .preferred = doc.preferred_scheme, .used = scheme };
     // Measured only when something actually asks in bounding-box units, which
     // is the common case for the region and the rare one for the primitives,
     // and then once for every filter in a list.
@@ -1808,13 +1813,13 @@ fn buildFilter(
         .reference => |name| {
             const spec: filter.Filter = blk: {
                 const node = doc.ids.get(name) orelse break :blk .{};
-                break :blk try filter.read(gpa, doc.tree, &doc.ids, &doc.stylesheet, node, doc.viewport()) orelse .{};
+                break :blk try filter.read(gpa, doc.tree, &doc.ids, &doc.stylesheet, node, doc.viewport(), schemes) orelse .{};
             };
             // `filterStage` owns `spec` from here, failing or not.
             return try filterStage(gpa, spec, &measure, common);
         },
         .functions => |raw| {
-            const specs = try filter.parseFunctions(gpa, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport());
+            const specs = try filter.parseFunctions(gpa, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport(), schemes);
             // Each spec passes to `filterStage` as it is handed over, which
             // frees it if it fails; what has not been handed over yet is
             // freed here. So the count moves *before* each call.
@@ -4868,6 +4873,7 @@ fn makeSource(
         node,
         doc.viewport(),
         shape.current_color orelse callerColor(opts),
+        doc.preferred_scheme,
     )) orelse return error.UnsupportedPaintServer;
 
     // A gradient with no stops paints nothing, which is what resvg draws and
@@ -7734,5 +7740,32 @@ test "the structural and logical pseudo-classes, and @media, draw as Chrome draw
             std.debug.print("{s}\n", .{sheet});
             return err;
         };
+    }
+}
+
+test "light-dark follows the used colour scheme, as Chrome draws it" {
+    // CSS Color Adjust 1: with no `color-scheme` a document is light whatever
+    // the reader prefers; `light dark` follows the reader, `dark` and `only
+    // light` do not; the attribute is no presentation attribute. And it
+    // reaches `currentColor`, a gradient's stops and an `feFlood`, each by the
+    // scheme where it is written. Every colour is Chrome 140's for the same
+    // document as an `<img>`, in a light and a dark reader.
+    const gpa = testing.allocator;
+    const src = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"20\" viewBox=\"0 0 10 2\"><defs><linearGradient id=\"g\" style=\"color-scheme: light dark\"><stop stop-color=\"light-dark(red, blue)\"/><stop offset=\"1\" stop-color=\"light-dark(red, blue)\"/></linearGradient><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\" style=\"color-scheme: light dark\"><feFlood flood-color=\"light-dark(gold, purple)\"/></filter></defs><rect x=\"0\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/><g style=\"color-scheme: light dark\"><rect x=\"1\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: dark\"><rect x=\"2\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: only light\"><rect x=\"3\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g color-scheme=\"light dark\"><rect x=\"4\" width=\"1\" height=\"2\" fill=\"light-dark(red, blue)\"/></g><g style=\"color-scheme: light dark; color: light-dark(green, orange)\"><rect x=\"5\" width=\"1\" height=\"2\" fill=\"currentColor\"/></g><rect x=\"6\" width=\"1\" height=\"2\" fill=\"url(#g)\"/><rect x=\"7\" width=\"1\" height=\"2\" filter=\"url(#f)\"/><rect x=\"9\" width=\"1\" height=\"2\" style=\"color-scheme: dark\" fill=\"light-dark(black, white)\"/></svg>";
+    const squares = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 9 };
+    const Case = struct { scheme: css.media.ColorScheme, colors: [9][3]u8 };
+    for ([_]Case{
+        .{ .scheme = .light, .colors = .{ .{ 255, 0, 0 }, .{ 255, 0, 0 }, .{ 0, 0, 255 }, .{ 255, 0, 0 }, .{ 255, 0, 0 }, .{ 0, 128, 0 }, .{ 255, 0, 0 }, .{ 255, 215, 0 }, .{ 255, 255, 255 } } },
+        .{ .scheme = .dark, .colors = .{ .{ 255, 0, 0 }, .{ 0, 0, 255 }, .{ 0, 0, 255 }, .{ 255, 0, 0 }, .{ 255, 0, 0 }, .{ 255, 165, 0 }, .{ 0, 0, 255 }, .{ 128, 0, 128 }, .{ 255, 255, 255 } } },
+    }) |c| {
+        var sfc = try render(gpa, src, .{ .width = 100, .height = 20, .color_scheme = c.scheme });
+        defer sfc.deinit(gpa);
+        for (squares, c.colors) |i, want| {
+            const px = sfc.getPixel(i * 10 + 5, 5).?.rgba;
+            testing.expectEqualSlices(u8, &want, &.{ px.r, px.g, px.b }) catch |err| {
+                std.debug.print("square {d} {t}\n", .{ i, c.scheme });
+                return err;
+            };
+        }
     }
 }

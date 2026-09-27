@@ -169,7 +169,8 @@ pub const xml_interesting = "<>/=\"' svgpathdviewBox0123456789.-gcircleretdfs&;"
     "hslhwblablchoklaboklchcolor(display-p3srgb-linearxyz-d50color-mix(in turndegnone/" ++
     "transform:transform-origintransform-boxfill-boxview-boxstroke-boxtranslateXscaleYskewrotate3dcenterleftrighttopbottom%pxemgradrad" ++
     "data:image/svg+xml,%3Csvg%3E%3C/svg%3E%27%20xml:spacepreservemiter-clip" ++
-    ":first-child:nth-child(2n+1 of .a):not(:is(:where(@media (min-width:1px)@namespace s url()s|^=$=*= i]";
+    ":first-child:nth-child(2n+1 of .a):not(:is(:where(@media (min-width:1px)@namespace s url()s|^=$=*= i]" ++
+    "light-dark(color-scheme:only light dark normal";
 
 pub const all = [_]Target{
     .{ .name = "path-data", .run = pathData, .corpus = &path_corpus, .content_max = 4096 },
@@ -1045,6 +1046,9 @@ const document_corpus = [_][]const u8{
     // The static pseudo-classes, attribute tests, namespaces and @media,
     // nested, and a state pseudo-class to be refused.
     "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:s=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><style>@namespace s url(http://www.w3.org/2000/svg); s|g > rect:nth-child(2n+1 of .a):not(:is(.b, :where(.c))) { fill: red } rect[k^=a i]:last-of-type { fill: blue } :root circle:empty { fill: green } @media screen and (max-width: 20px) { @media (prefers-color-scheme: dark) { rect { stroke: teal } } } rect:hover { fill: gold }</style><g><rect class=\"a\" width=\"2\" height=\"2\" k=\"Abc\"/><rect class=\"a b\" x=\"2\" width=\"2\" height=\"2\"/><rect class=\"a\" x=\"4\" width=\"2\" height=\"2\"/><circle cx=\"6\" cy=\"6\" r=\"1\"/></g></svg>",
+    // light-dark() by color-scheme in every place a colour is read, and one
+    // waiting on currentColor.
+    "<svg viewBox=\"0 0 8 8\" style=\"color-scheme: light dark\"><linearGradient id=\"g\"><stop stop-color=\"light-dark(red, oklch(50% 0.2 200))\"/></linearGradient><filter id=\"f\" style=\"color-scheme: dark\"><feFlood flood-color=\"light-dark(gold, purple)\"/></filter><g style=\"color: light-dark(green, orange); color-scheme: only light\"><rect width=\"4\" height=\"4\" fill=\"url(#g) light-dark(red, blue)\" stroke=\"currentColor\" filter=\"url(#f) drop-shadow(1px 1px light-dark(teal, maroon))\"/></g><circle cx=\"6\" cy=\"6\" r=\"1\" fill=\"light-dark(currentColor, blue)\"/></svg>",
 };
 
 // -- tests -------------------------------------------------------------------

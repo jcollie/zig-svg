@@ -433,6 +433,7 @@ pub fn read(
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
+    schemes: color.SchemeContext,
 ) Error!?Filter {
     if (!std.mem.eql(u8, tree.node(node).name.local, "filter")) return null;
 
@@ -479,7 +480,7 @@ pub fn read(
     // has any is the one they come from.
     for (chain[0..links]) |n| {
         if (hasPrimitive(tree, n)) {
-            try readPrimitives(gpa, tree, sheet, n, viewport, &result);
+            try readPrimitives(gpa, tree, sheet, n, viewport, schemes.preferred, &result);
             break;
         }
     }
@@ -505,6 +506,7 @@ pub fn parseFunctions(
     ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
     sheet: *const css.Stylesheet,
     viewport: length.Viewport,
+    schemes: color.SchemeContext,
 ) Error![]Filter {
     var out: std.ArrayList(Filter) = .empty;
     errdefer {
@@ -520,7 +522,7 @@ pub fn parseFunctions(
         const args = std.mem.trim(u8, rest[open + 1 .. close], " \t\r\n");
         rest = std.mem.trimStart(u8, rest[close + 1 ..], " \t\r\n");
         try out.ensureUnusedCapacity(gpa, 1);
-        out.appendAssumeCapacity(try function(gpa, name, args, tree, ids, sheet, viewport));
+        out.appendAssumeCapacity(try function(gpa, name, args, tree, ids, sheet, viewport, schemes));
     }
     return out.toOwnedSlice(gpa);
 }
@@ -546,13 +548,14 @@ fn function(
     ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
     sheet: *const css.Stylesheet,
     viewport: length.Viewport,
+    schemes: color.SchemeContext,
 ) Error!Filter {
     const eq = std.ascii.eqlIgnoreCase;
     if (eq(name, "url")) {
         const target = std.mem.trim(u8, args, " \t\r\n'\"");
         if (target.len < 2 or target[0] != '#') return error.BadFilterFunction;
         const node = ids.get(target[1..]) orelse return .{};
-        return try read(gpa, tree, ids, sheet, node, viewport) orelse .{};
+        return try read(gpa, tree, ids, sheet, node, viewport, schemes) orelse .{};
     }
 
     var kind: Kind = undefined;
@@ -564,7 +567,7 @@ fn function(
         kind = .{ .gaussian_blur = .{ .in = .source_graphic, .std_dev_x = s, .std_dev_y = s } };
         spreads = true;
     } else if (eq(name, "drop-shadow")) {
-        kind = .{ .drop_shadow = try dropShadowFunction(args, viewport) };
+        kind = .{ .drop_shadow = try dropShadowFunction(args, viewport, schemes.used) };
         spreads = true;
     } else if (eq(name, "hue-rotate")) {
         kind = .{ .color_matrix = .{ .in = .source_graphic, .matrix = hueRotateMatrix(if (args.len == 0) 0 else try cssAngle(args)) } };
@@ -665,7 +668,7 @@ fn cssLength(t: []const u8, viewport: length.Viewport) Error!f64 {
 
 /// `drop-shadow()`: two or three lengths -- offset, then blur -- and a colour
 /// before or after them, `currentColor` when there is none.
-fn dropShadowFunction(args: []const u8, viewport: length.Viewport) Error!@FieldType(Kind, "drop_shadow") {
+fn dropShadowFunction(args: []const u8, viewport: length.Viewport, scheme: color.Scheme) Error!@FieldType(Kind, "drop_shadow") {
     var lengths: [3]f64 = .{ 0, 0, 0 };
     var n: usize = 0;
     var shade: ?color.Color = null;
@@ -698,7 +701,7 @@ fn dropShadowFunction(args: []const u8, viewport: length.Viewport) Error!@FieldT
             shade = if (std.ascii.eqlIgnoreCase(tok, "currentColor"))
                 null
             else
-                color.parseColor(tok) catch |err| switch (err) {
+                color.parseColorIn(tok, scheme) catch |err| switch (err) {
                     // A colour this reads but cannot mix is not a malformed
                     // function, and saying so would send the reader looking
                     // for the wrong mistake.
@@ -785,6 +788,7 @@ fn readPrimitives(
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
+    preferred: css.media.ColorScheme,
     out: *Filter,
 ) Error!void {
     // `color-interpolation-filters` is inherited, so what the `<filter>`
@@ -827,7 +831,7 @@ fn readPrimitives(
             } };
         } else if (std.mem.eql(u8, name, "feFlood")) blk: {
             break :blk .{ .flood = .{
-                .color = try floodColor(tree, sheet, child),
+                .color = try floodColor(tree, sheet, child, preferred),
                 .opacity = if (css.property(sheet, tree, child, "flood-opacity")) |raw|
                     try color.parseOpacity(raw)
                 else
@@ -916,7 +920,7 @@ fn readPrimitives(
         } else if (std.mem.eql(u8, name, "feConvolveMatrix")) blk: {
             break :blk .{ .convolve_matrix = try convolveMatrix(gpa, tree, child, &numbers) };
         } else if (std.mem.eql(u8, name, "feDiffuseLighting") or std.mem.eql(u8, name, "feSpecularLighting")) blk: {
-            break :blk .{ .lighting = try lightingOf(tree, sheet, child, std.mem.eql(u8, name, "feSpecularLighting")) };
+            break :blk .{ .lighting = try lightingOf(tree, sheet, child, std.mem.eql(u8, name, "feSpecularLighting"), preferred) };
         } else if (std.mem.eql(u8, name, "feImage")) blk: {
             const href = tree.attributeValue(child, "", "href") orelse
                 tree.attributeValue(child, document.xlink_ns, "href");
@@ -947,7 +951,7 @@ fn readPrimitives(
                 .dy = if (trimmedAttr(tree, child, "dy") != null) try number(tree, child, "dy") else 2,
                 .std_dev_x = sx,
                 .std_dev_y = sy,
-                .color = try floodColor(tree, sheet, child),
+                .color = try floodColor(tree, sheet, child, preferred),
                 .opacity = if (css.property(sheet, tree, child, "flood-opacity")) |raw|
                     try color.parseOpacity(raw)
                 else
@@ -1156,6 +1160,7 @@ fn lightingOf(
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
     specular: bool,
+    preferred: css.media.ColorScheme,
 ) Error!Lighting {
     var l: Lighting = .{
         .in = inputOf(tree, node, "in"),
@@ -1175,7 +1180,7 @@ fn lightingOf(
     if (css.property(sheet, tree, node, "lighting-color")) |raw| {
         const t = std.mem.trim(u8, raw, " \t\r\n");
         // Resolved against the filtered element, as `flood-color` is.
-        l.color = if (std.mem.eql(u8, t, "currentColor")) null else try color.parseColor(t);
+        l.color = if (std.mem.eql(u8, t, "currentColor")) null else try color.parseColorIn(t, color.schemeAt(sheet, tree, node, preferred));
     }
 
     const light = for (tree.node(node).children.items) |child| {
@@ -1315,13 +1320,14 @@ fn floodColor(
     tree: *const ztree.Document,
     sheet: *const css.Stylesheet,
     node: ztree.NodeId,
+    preferred: css.media.ColorScheme,
 ) Error!?color.Color {
     const raw = css.property(sheet, tree, node, "flood-color") orelse return color.Color.black;
     const t = std.mem.trim(u8, raw, " \t\r\n");
     // Resolved against the filtered element rather than against the filter,
     // which has no colour of its own.
     if (std.mem.eql(u8, t, "currentColor")) return null;
-    return try color.parseColor(t);
+    return try color.parseColorIn(t, color.schemeAt(sheet, tree, node, preferred));
 }
 
 fn colorSpaceOf(
@@ -1409,7 +1415,7 @@ fn coord(
 fn readTest(src: []const u8) !Filter {
     var doc = try document.read(testing.allocator, src);
     defer doc.deinit();
-    return (try read(testing.allocator, doc.tree, &doc.ids, &doc.stylesheet, doc.ids.get("f").?, doc.viewport())).?;
+    return (try read(testing.allocator, doc.tree, &doc.ids, &doc.stylesheet, doc.ids.get("f").?, doc.viewport(), .{})).?;
 }
 
 fn primitivesOf(comptime body: []const u8) !Filter {
@@ -1680,7 +1686,7 @@ test "an feImage reads its href, fitting and sampling" {
         "<feImage xlink:href=\" #a \" preserveAspectRatio=\"xMinYMax slice\" image-rendering=\"optimizeSpeed\"/>" ++
         "</filter><rect width=\"8\" height=\"8\"/></svg>");
     defer doc.deinit();
-    var f = (try read(testing.allocator, doc.tree, &doc.ids, &doc.stylesheet, doc.ids.get("f").?, doc.viewport())).?;
+    var f = (try read(testing.allocator, doc.tree, &doc.ids, &doc.stylesheet, doc.ids.get("f").?, doc.viewport(), .{})).?;
     defer f.deinit(testing.allocator);
     try testing.expectEqual(@as(?[]const u8, null), f.primitives[0].kind.image.href);
     const b = f.primitives[1].kind.image;
@@ -1692,7 +1698,7 @@ test "an feImage reads its href, fitting and sampling" {
 fn functionsOf(raw: []const u8) ![]Filter {
     var doc = try document.read(testing.allocator, "<svg viewBox=\"0 0 100 100\"><filter id=\"f\"><feOffset/></filter><rect width=\"8\" height=\"8\"/></svg>");
     defer doc.deinit();
-    return parseFunctions(testing.allocator, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport());
+    return parseFunctions(testing.allocator, raw, doc.tree, &doc.ids, &doc.stylesheet, doc.viewport(), .{});
 }
 
 fn freeFunctions(fs: []Filter) void {

@@ -358,6 +358,10 @@ pub const Inherited = struct {
     /// The `color` property, which is what a `fill` or `stroke` of
     /// `currentColor` resolves to.
     current_color: ?color.Color = null,
+    /// The used colour scheme where `color-scheme` is declared, which is
+    /// what a `light-dark()` chooses by here and below. See
+    /// `color.usedScheme`.
+    color_scheme: ?color.Scheme = null,
 
     stroke: ?color.Paint = null,
     stroke_width: ?f64 = null,
@@ -434,6 +438,7 @@ pub const Inherited = struct {
             .fill_rule = child.fill_rule orelse self.fill_rule,
             .clip_rule = child.clip_rule orelse self.clip_rule,
             .current_color = child.current_color orelse self.current_color,
+            .color_scheme = child.color_scheme orelse self.color_scheme,
             .stroke = child.stroke orelse self.stroke,
             .stroke_width = child.stroke_width orelse self.stroke_width,
             .stroke_opacity = child.stroke_opacity orelse self.stroke_opacity,
@@ -532,6 +537,8 @@ pub const Image = struct {
     blend: BlendMode = .normal,
     /// The `color` in force, which a `currentColor` in its filter resolves to.
     current_color: ?color.Color,
+    /// The used colour scheme, which a `light-dark()` in its filter chooses by.
+    color_scheme: color.Scheme = .light,
     /// False under `visibility: hidden`; see `Shape.visible`.
     visible: bool,
     /// Every `transform` down to and including this element's, as `Shape`
@@ -564,6 +571,9 @@ pub const Group = struct {
     /// inside its filter resolves to. Carried because a filter's own elements
     /// inherit nothing from the document -- they are in `<defs>`.
     current_color: ?color.Color,
+    /// The used colour scheme on the container, which a `light-dark()` in
+    /// its filter chooses by.
+    color_scheme: color.Scheme = .light,
     /// The user-space matrix in force on the container, which is the space the
     /// clip path's own coordinates are in.
     transform: z2d.Transformation,
@@ -712,6 +722,9 @@ pub const Shape = struct {
     fill_rule: ?z2d.options.FillRule,
     clip_rule: ?z2d.options.FillRule,
     current_color: ?color.Color,
+    /// The used colour scheme, which a `light-dark()` in its filter chooses
+    /// by.
+    color_scheme: color.Scheme = .light,
     stroke: ?color.Paint,
     stroke_width: ?f64,
     stroke_opacity: ?f64,
@@ -830,6 +843,9 @@ pub const Document = struct {
     /// What measures an element for `transform-box: fill-box`, installed by
     /// the rasterizer for as long as it is drawing. See `Measurer`.
     measurer: ?Measurer = null,
+    /// The colour scheme the reader prefers, which a `color-scheme` in the
+    /// document may take up: see `color.usedScheme`.
+    preferred_scheme: css.media.ColorScheme = .light,
     /// Whether a media query decided anything in reading its styles -- a
     /// `<style>` with a `media` attribute, or an `@media` rule -- so that
     /// drawing it at another size than it was read for means reading it
@@ -963,6 +979,7 @@ pub const Document = struct {
         it.viewport.font_size = null;
         while (count > 0) {
             count -= 1;
+            it.scheme = inherited.color_scheme orelse .light;
             inherited = inherited.with(try it.readInherited(chain[count]));
             it.viewport.font_size = inherited.font_size;
         }
@@ -1238,6 +1255,10 @@ pub const PathIterator = struct {
     /// The element `boxWalk` is measuring, whose own transform -- and, for
     /// a `<use>`, `x` and `y` -- the walk leaves out.
     measuring: ?ztree.NodeId = null,
+    /// The used colour scheme of the element whose attributes are being
+    /// read's parent, set beside `viewport.font_size` before each read: what
+    /// its colours are read in unless it declares a `color-scheme` of its own.
+    scheme: color.Scheme = .light,
 
     /// Whitespace across the runs of one `<text>`: which element the runs
     /// belong to, whether any has had anything in it yet, whether the last
@@ -1296,6 +1317,7 @@ pub const PathIterator = struct {
             // Nothing above the root, so an `em` in its own `font-size` has
             // nothing to be relative to and is refused.
             self.viewport.font_size = null;
+            self.scheme = .light;
             const root_inherited = try self.readInherited(root);
             self.viewport.font_size = root_inherited.font_size;
             const ctm = try self.readTransform(root);
@@ -1319,6 +1341,7 @@ pub const PathIterator = struct {
                 .filter = refs.filter,
                 .blend = refs.blend,
                 .current_color = root_inherited.current_color,
+                .color_scheme = root_inherited.color_scheme orelse .light,
                 .transform = ctm,
             } };
         }
@@ -1475,6 +1498,7 @@ pub const PathIterator = struct {
                 .fill_rule = parent.inherited.fill_rule,
                 .clip_rule = parent.inherited.clip_rule,
                 .current_color = parent.inherited.current_color,
+                .color_scheme = parent.inherited.color_scheme orelse .light,
                 .stroke = substitute(parent.inherited.stroke, parent.inherited.context),
                 .stroke_width = parent.inherited.stroke_width,
                 .stroke_opacity = parent.inherited.stroke_opacity,
@@ -1655,8 +1679,8 @@ pub const PathIterator = struct {
     /// so it is settled here, where it is declared, and nothing later has to
     /// carry both. A dangling reference with no fallback is still refused,
     /// later, where it is painted.
-    fn readPaint(self: *const PathIterator, raw: []const u8) Error!color.Paint {
-        const written = try color.parsePaintWithFallback(raw);
+    fn readPaint(self: *const PathIterator, raw: []const u8, scheme: color.Scheme) Error!color.Paint {
+        const written = try color.parsePaintWithFallbackIn(raw, scheme);
         const fallback = written.fallback orelse return written.paint;
         return if (self.isPaintServer(written.paint.reference)) written.paint else fallback;
     }
@@ -1946,6 +1970,7 @@ pub const PathIterator = struct {
             // element at the end of the chain does below: each `<use>` in a
             // chain is an element with a font size of its own.
             self.viewport.font_size = inherited.font_size;
+            self.scheme = inherited.color_scheme orelse .light;
             inherited = inherited.with(try self.readInherited(node));
             // What the `<use>` names is drawn in its name, so its paints are
             // what `context-fill` and `context-stroke` mean inside.
@@ -1983,6 +2008,7 @@ pub const PathIterator = struct {
                     .filter = refs.filter,
                     .blend = refs.blend,
                     .current_color = inherited.current_color,
+                    .color_scheme = inherited.color_scheme orelse .light,
                     .transform = ctm,
                 } };
             }
@@ -2002,6 +2028,7 @@ pub const PathIterator = struct {
         // means the *parent's*. Reading them in one pass would resolve one of
         // the two against the wrong number.
         self.viewport.font_size = inherited.font_size;
+        self.scheme = inherited.color_scheme orelse .light;
         const effective = inherited.with(try self.readInherited(node));
         self.viewport.font_size = effective.font_size;
 
@@ -2023,6 +2050,7 @@ pub const PathIterator = struct {
                 .fill_rule = effective.fill_rule,
                 .clip_rule = effective.clip_rule,
                 .current_color = effective.current_color,
+                .color_scheme = effective.color_scheme orelse .light,
                 .stroke = substitute(effective.stroke, effective.context),
                 .stroke_width = effective.stroke_width,
                 .stroke_opacity = effective.stroke_opacity,
@@ -2104,6 +2132,7 @@ pub const PathIterator = struct {
                 .filter = refs.filter,
                 .blend = refs.blend,
                 .current_color = effective.current_color,
+                .color_scheme = effective.color_scheme orelse .light,
                 .transform = own_ctm,
                 .viewport = clip,
             } };
@@ -2160,6 +2189,7 @@ pub const PathIterator = struct {
             .filter = refs.filter,
             .blend = refs.blend,
             .current_color = effective.current_color,
+            .color_scheme = effective.color_scheme orelse .light,
             .transform = ctm,
         } };
     }
@@ -2333,13 +2363,20 @@ pub const PathIterator = struct {
         const font_size = try self.optionalPresentationLength(node, "font-size", .other);
         var own = self.viewport;
         if (font_size) |size| own.font_size = size;
+        // And the scheme, which this element's own colours are read in.
+        const own_scheme: ?color.Scheme = if (self.presentation(node, "color-scheme")) |v|
+            color.usedScheme(v, self.doc.preferred_scheme)
+        else
+            null;
+        const scheme = own_scheme orelse self.scheme;
         return .{
-            .fill = if (self.presentation(node, "fill")) |v| try self.readPaint(v) else null,
+            .color_scheme = own_scheme,
+            .fill = if (self.presentation(node, "fill")) |v| try self.readPaint(v, scheme) else null,
             .fill_opacity = if (self.presentation(node, "fill-opacity")) |v| try color.parseOpacity(v) else null,
             .fill_rule = if (self.presentation(node, "fill-rule")) |v| try parseFillRule(v) else null,
             .clip_rule = if (self.presentation(node, "clip-rule")) |v| try parseFillRule(v) else null,
-            .current_color = if (self.presentation(node, "color")) |v| try color.parseColor(v) else null,
-            .stroke = if (self.presentation(node, "stroke")) |v| try self.readPaint(v) else null,
+            .current_color = if (self.presentation(node, "color")) |v| try color.parseColorIn(v, scheme) else null,
+            .stroke = if (self.presentation(node, "stroke")) |v| try self.readPaint(v, scheme) else null,
             .stroke_width = try self.optionalPresentationLength(node, "stroke-width", .other),
             .stroke_opacity = if (self.presentation(node, "stroke-opacity")) |v| try color.parseOpacity(v) else null,
             .stroke_linecap = if (self.presentation(node, "stroke-linecap")) |v| try parseLineCap(v) else null,
@@ -3172,6 +3209,7 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
         .root = .{},
         .stylesheet = .{},
         .languages = options.languages,
+        .preferred_scheme = options.media.color_scheme,
     };
     errdefer doc.stylesheet.deinit();
 

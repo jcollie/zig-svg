@@ -137,6 +137,7 @@ pub fn read(
     node: ztree.NodeId,
     viewport: length.Viewport,
     current_color: color.Color,
+    preferred: css.media.ColorScheme,
 ) Error!?Gradient {
     const name = tree.node(node).name.local;
     const is_linear = std.mem.eql(u8, name, "linearGradient");
@@ -169,7 +170,7 @@ pub fn read(
     var i = links;
     while (i > 0) {
         i -= 1;
-        try applyOne(tree, sheet, chain[i], viewport, current_color, &result);
+        try applyOne(tree, sheet, chain[i], viewport, current_color, preferred, &result);
     }
     return result;
 }
@@ -197,6 +198,7 @@ fn applyOne(
     node: ztree.NodeId,
     viewport: length.Viewport,
     current_color: color.Color,
+    preferred: css.media.ColorScheme,
     out: *Gradient,
 ) Error!void {
     if (tree.attributeValue(node, "", "gradientUnits")) |raw| {
@@ -264,7 +266,7 @@ fn applyOne(
         highest = offset;
 
         var value: color.Color = if (css.property(sheet, tree, child, "stop-color")) |c|
-            switch (try color.parsePaint(c)) {
+            switch (try color.parsePaintIn(c, color.schemeAt(sheet, tree, child, preferred))) {
                 .color => |named| named,
                 // `currentColor` here is the `color` in force, like anywhere
                 // else. `none` is not a colour and a `url(...)` is not one
@@ -344,7 +346,7 @@ const no_stylesheet: css.Stylesheet = .{};
 
 fn gradientNamed(r: *Read, id: []const u8) !Gradient {
     const node = r.ids.get(id).?;
-    return (try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 100, .height = 100 }, .black)).?;
+    return (try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 100, .height = 100 }, .black, .light)).?;
 }
 
 test "a linear gradient runs left to right unless told otherwise" {
@@ -480,7 +482,7 @@ test "an element that is not a gradient is not read as one" {
         const node = r.ids.get(id).?;
         try testing.expectEqual(
             @as(?Gradient, null),
-            try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 10, .height = 10 }, .black),
+            try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 10, .height = 10 }, .black, .light),
         );
     }
 }

@@ -166,11 +166,11 @@ copyFarm name
       };
     }
     {
-      name = "uri-0.1.0-yCrwNNH2EwAHUOoMVFq21bN9Oc84QFSzmPaa6xPh6koO";
+      name = "uri-0.1.0-yCrwNNH2EwBMp75OiyjnW1w5FMiFdI0gWghu4QMEVWtU";
       path = fetchZigArtifact {
         name = "uri";
-        url = "git+https://git.jcollie.dev/jeff/zig-uri.git#b51701b260f07620b9bf953fc19c902115eac25e";
-        hash = "sha256-TlPE0XeSScVocHAqC4bL4o3m7vnR6wEiwkp7clcK9Pc=";
+        url = "git+https://git.jcollie.dev/jeff/zig-uri.git#c472509ef662a1528f24e283799280bebbeb2777";
+        hash = "sha256-76g/TqOdvh97UfcNN2FrnrTnV0VQZ3Y5fRnfB5hoqWw=";
         unpack = true;
       };
     }
@@ -211,11 +211,11 @@ copyFarm name
       };
     }
     {
-      name = "z46-0.1.0-_AxhwBHeAwDelVOsDdnw7Rg1ZzCY2uH99YdFQknXdy1J";
+      name = "z46-0.1.0-_AxhwCThCQCYrGgJUgyc2Ozk5i4fwCkmimRXMxmNDPgc";
       path = fetchZigArtifact {
         name = "z46";
-        url = "git+https://git.jcollie.dev/jeff/z46.git#52bc1256116cde4b3e7480d8664da09e5901490a";
-        hash = "sha256-U2dGmTMhQI+Yc0Zw9K9rGq1vRSqqTOxI51zxbtiI1Bk=";
+        url = "git+https://git.jcollie.dev/jeff/z46.git#12de8fc8e77f3d857ea90d1c10fd78c3abdf05a6";
+        hash = "sha256-cZR+YgslD5dmps3wRjZcfoyPniDN3X+KEfPY+5vNT1w=";
         unpack = true;
       };
     }

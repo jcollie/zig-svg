@@ -25,8 +25,8 @@
             .hash = "z2dimg-0.0.0-N7PaCY8jJADSuHVnkQRGYJ40w6WFt8Tc5cnJ4NKqA7nf",
         },
         .uri = .{
-            .url = "git+https://git.jcollie.dev/jeff/zig-uri.git#b51701b260f07620b9bf953fc19c902115eac25e",
-            .hash = "uri-0.1.0-yCrwNNH2EwAHUOoMVFq21bN9Oc84QFSzmPaa6xPh6koO",
+            .url = "git+https://git.jcollie.dev/jeff/zig-uri.git#c472509ef662a1528f24e283799280bebbeb2777",
+            .hash = "uri-0.1.0-yCrwNNH2EwBMp75OiyjnW1w5FMiFdI0gWghu4QMEVWtU",
         },
     },
     .paths = .{

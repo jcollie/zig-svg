@@ -215,7 +215,7 @@ fn libraryModules(
     // SVG 1.1 §6 is CSS, and deciding which of several declarations of one
     // property applies to an element has nothing to do with drawing. It was
     // `src/css.zig` and `src/style.zig` here until it was lifted out.
-    const css = b.dependency("zig_css", .{ .target = target, .optimize = optimize }).module("css");
+    const css = b.dependency("css", .{ .target = target, .optimize = optimize }).module("css");
     // An `<image>` names its picture by URL, almost always a `data:` one, and
     // what that URL carries is a PNG or a JPEG. Reading the URL and decoding
     // the bytes are each a library of their own. z2dimg is built on the same

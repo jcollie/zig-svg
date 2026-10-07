@@ -39,6 +39,12 @@ let
 
   # Every package, by the hash Zig knows it by, as Nix fetches it.
   packages = {
+    "css-0.3.0-d530kC4oLwAynd0fs6-ZE0M3xkpVE8tEm7hEAha2_qKu" = fetchZigGit {
+      name = "css";
+      url = "https://git.jcollie.dev/jeff/zig-css.git";
+      rev = "fe0955523b6c47b159ffeac31bd859a91d7b2a23";
+      hash = "sha256-I9OXy8Npm0H6hp85We8csaW+PSeVHAoMZ9RRS+yLjSs=";
+    };
     "riff-0.3.0-HAfI3hvpAAC0x2BglCLXC8KbAh-2QsqaM7iGWlOdcji3" = fetchzip {
       name = "riff";
       url = "https://git.jcollie.dev/jeff/zig-riff/archive/95720d487115c285f5b890e5788499f3931a4d26.tar.gz";
@@ -84,12 +90,6 @@ let
       url = "https://git.jcollie.dev/jeff/zig-charset.git";
       rev = "591ec3da0819d880b539788ede026bfe4a94c9b3";
       hash = "sha256-kwayanmto0vpH3Cgc8FiotgDmW0PYVioiwkaJc2+qXA=";
-    };
-    "zig_css-0.2.0-d530kH4WLwC1KruGeSdWhqDrWxmcoai-3SetLt_xC2gw" = fetchZigGit {
-      name = "zig_css";
-      url = "https://git.jcollie.dev/jeff/zig-css.git";
-      rev = "da160f66f29a61b2952f10548a811b92251aea99";
-      hash = "sha256-UF8syiU4M9cgjZ6I+O7z5LZ1soTxBiwKskt1jYZ5z+0=";
     };
     "ztree-0.2.0-Rb9y2YsvAwDe_5M0s33sBst4E6CnPW65wP614UbtTdxa" = fetchZigGit {
       name = "ztree";

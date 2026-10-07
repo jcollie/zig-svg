@@ -16,9 +16,9 @@
             .url = "git+https://git.jcollie.dev/jeff/ztree.git#a48ee058ff0b0e9a758573a1c8a0fcbcf62ef2cf",
             .hash = "ztree-0.2.0-Rb9y2YsvAwDe_5M0s33sBst4E6CnPW65wP614UbtTdxa",
         },
-        .zig_css = .{
-            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#da160f66f29a61b2952f10548a811b92251aea99",
-            .hash = "zig_css-0.2.0-d530kH4WLwC1KruGeSdWhqDrWxmcoai-3SetLt_xC2gw",
+        .css = .{
+            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#fe0955523b6c47b159ffeac31bd859a91d7b2a23",
+            .hash = "css-0.3.0-d530kC4oLwAynd0fs6-ZE0M3xkpVE8tEm7hEAha2_qKu",
         },
         .z2dimg = .{
             .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#f6037e4b8a65258ac06398082f91fd595f1be109",

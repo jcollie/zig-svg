@@ -43,9 +43,8 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fuzz_mod })).step);
 
-    // The loop that drives those targets without Zig's own fuzzer, which this
-    // toolchain cannot usefully run: `tools/fuzz.zig` says why, and the short
-    // version is that the coverage table comes back empty. Optimized, because
+    // The loop that drives those targets with made-up input; `tools/fuzz.zig`
+    // says why it is a loop of our own. Optimized, because
     // a fuzzer's whole job is how many inputs it gets through, and ReleaseSafe
     // keeps every check that makes a failure a failure.
     //
@@ -71,7 +70,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_fuzz = b.addRunArtifact(fuzz_run);
     run_fuzz.stdio = .inherit;
-    if (b.args) |a| run_fuzz.addArgs(a);
+    run_fuzz.addPassthruArgs();
     b.step("fuzz-run", "Fuzz the targets with a loop of our own")
         .dependOn(&run_fuzz.step);
     check_step.dependOn(&fuzz_run.step);
@@ -98,7 +97,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(svgdump);
     const run_svgdump = b.addRunArtifact(svgdump);
     run_svgdump.stdio = .inherit;
-    if (b.args) |a| run_svgdump.addArgs(a);
+    run_svgdump.addPassthruArgs();
     b.step("svgdump", "Render one document to a PNG").dependOn(&run_svgdump.step);
 
     // Renders every document in `tests/oracle` for `tools/check_oracle.py` to
@@ -121,14 +120,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_oracle = b.addRunArtifact(oracle);
     run_oracle.stdio = .inherit;
-    run_oracle.addArg("tests/oracle");
-    run_oracle.addArg(b.getInstallPath(.prefix, "oracle"));
+    run_oracle.addDirectoryArg(b.path("tests/oracle"));
+    const oracle_out = run_oracle.addOutputDirectoryArg("oracle");
+    // The font comes from the environment, which the build runner does not
+    // track, so a cached result could be one drawn in a different face.
+    run_oracle.has_side_effects = true;
     // The tool reads `SVG_TEST_FONT` out of its own environment, which the
     // devshell sets, so the font the text fixtures use needs no argument here
     // and no store path written into the build.
 
+    const install_oracle = b.addInstallDirectory(.{
+        .source_dir = oracle_out,
+        .install_dir = .prefix,
+        .install_subdir = "oracle",
+    });
     b.step("oracle", "Render the oracle corpus into zig-out/oracle")
-        .dependOn(&run_oracle.step);
+        .dependOn(&install_oracle.step);
     check_step.dependOn(&oracle.step);
 
     // -- the library, and its documentation -----------------------------------
@@ -168,8 +175,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_docs_server = b.addRunArtifact(docs_server);
-    run_docs_server.step.dependOn(&install_docs.step);
-    run_docs_server.addArg(b.getInstallPath(.prefix, "docs"));
+    run_docs_server.addDirectoryArg(library.getEmittedDocs());
     run_docs_server.addArg(b.fmt("{d}", .{docs_port}));
     // It runs until interrupted, so its output has to reach the terminal
     // rather than being captured by the build runner.

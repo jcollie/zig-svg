@@ -34,9 +34,8 @@
 //! it runs the corpus beside it, so `zig build test` exercises the same
 //! properties on input that has already been interesting once.
 //!
-//! Note that Zig 0.16.0 cannot build a test executable in fuzz mode without a
-//! patched standard library, and leaves the fuzzer's coverage table empty even
-//! then; `flake.nix` says more, and `tools/fuzz.zig` is the loop that works.
+//! What drives them with made-up input is `tools/fuzz.zig`, a loop of our own;
+//! it says why.
 
 const builtin = @import("builtin");
 const std = @import("std");

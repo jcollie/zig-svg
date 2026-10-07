@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1790185690,
-        "narHash": "sha256-EZwz6sR6RLzbKiJJ9QQgXPZ/zA6P8ecfFr/6fwBRfes=",
-        "rev": "4975466d324710c576dc11ad614684e6bd8cad8e",
+        "lastModified": 1791260994,
+        "narHash": "sha256-MFBjw66d4h06MvpW6lIl7RwarLteD0sk859CncGwb1Q=",
+        "rev": "151fa4e8ddfdd8dd25d945ad94ed54a13de9f6e4",
         "type": "tarball",
-        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1078696.4975466d3247/nixexprs.tar.xz"
+        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.11pre1086391.151fa4e8ddfd/nixexprs.tar.xz"
       },
       "original": {
         "type": "tarball",
@@ -26,11 +26,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789872114,
-        "narHash": "sha256-yvn1xRRAR2IHuKqejmngftjBm/x/h/RspOg0ol4B5dw=",
+        "lastModified": 1791261699,
+        "narHash": "sha256-Y1s36Ny116/8wZNgZj8dOez3qJqA/QpnCfaVs2kuNC8=",
         "ref": "refs/heads/main",
-        "rev": "723bddc9c51c5873965a17f922e4139d587764c1",
-        "revCount": 529,
+        "rev": "5efe627e5901a73a8b707f797d08f2835ab59ac2",
+        "revCount": 559,
         "type": "git",
         "url": "https://codeberg.org/jcollie/zon2nix.git"
       },

@@ -177,7 +177,7 @@ pub fn install(comptime profile: seccomp.Profile, reply: c_int) InstallError!voi
 /// the reply descriptor on purpose.
 fn limit(fd: c_int, rights: c.cap_rights) InstallError!void {
     if (cap_rights_limit(fd, &rights) == 0) return;
-    if (c._errno().* == @intFromEnum(c.E.BADF)) return;
+    if (c._errno().* == @backingInt(c.E.BADF)) return;
     return error.RightsRefused;
 }
 

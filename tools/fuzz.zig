@@ -3,19 +3,12 @@
 
 //! Run the fuzz targets in `tests/fuzz.zig` against input this makes up.
 //!
-//! Zig has a fuzzer of its own and those targets are written for it, so the
-//! obvious thing to run is `zig build fuzz --fuzz`. With the devshell's
-//! patched Zig that now *compiles* — `flake.nix` says what the patch is —
-//! and then ends with
-//!
-//! ```
-//! error: step 'run test': corrupted coverage file: pcs_len was zero
-//! ```
-//!
-//! because nothing in 0.16.0 populates the table of program counters, however
-//! the modules are built. A fuzzer with no coverage is a random number
-//! generator, so this is one written down honestly: it makes an input, hands
-//! it to a target, and says so when one comes back with an error.
+//! Zig has a fuzzer of its own, and on 0.17 it works once the test binary is
+//! compiled by LLVM. These targets are not handed to it: they are ordinary
+//! tests over a corpus, and this loop is what feeds them made-up input. It
+//! makes an input, hands it to a target, and says so when one comes back with
+//! an error — and, with `--alloc-fail`, runs each input again with every
+//! allocation failing in turn, which Zig's fuzzer does not do.
 //!
 //! ```console
 //! $ zig build fuzz-run                                # a minute of each
@@ -99,7 +92,7 @@ fn panicWithInput(msg: []const u8, first_trace_addr: ?usize) noreturn {
     const input = watch.input;
     if (input.len != 0) {
         // Hex rather than a file. A panic handler has no `Io` to hand and no
-        // business making one, and `std.posix` in 0.16 no longer wraps `open`,
+        // business making one, and `std.posix` no longer wraps `open`,
         // so what can be done here is print — which is enough:
         //
         //     printf '<hex>' | xxd -r -p > crash.bin

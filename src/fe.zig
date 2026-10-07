@@ -1232,7 +1232,7 @@ test "the divisor divides, the bias adds, and preserveAlpha keeps the alpha" {
     // Half-transparent white under a kernel that takes half: without
     // preserveAlpha the alpha halves too; with it the alpha is kept and the
     // color, straight, is halved.
-    const half = [_]RGBA{.{ .r = 128, .g = 128, .b = 128, .a = 128 }} ** 3;
+    const half: [3]RGBA = @splat(.{ .r = 128, .g = 128, .b = 128, .a = 128 });
     c.divisor = 2;
     c.kernel = .{ .first = 0, .count = 3 };
     const plain = try convolveOne(&.{ 0, 1, 0 }, c, &half);
@@ -1320,7 +1320,7 @@ fn lit(alpha: []const u8, width: i32, l: Lighting) ![]RGBA {
 }
 
 test "a flat surface under a light straight overhead is lit fully, and opaque" {
-    const got = try lit(&(.{128} ** 9), 3, .{
+    const got = try lit(&@as([9]u8, @splat(128)), 3, .{
         .specular = false,
         .surface_scale = 5,
         .constant = 1,
@@ -1335,7 +1335,7 @@ test "a flat surface under a light straight overhead is lit fully, and opaque" {
 test "a slope faces towards the light or away from it" {
     // Alpha rising to the right: the surface leans left, so a light low in
     // the west lights it and one low in the east barely does.
-    const ramp = [_]u8{ 0, 128, 255 } ** 3;
+    const ramp = [_]u8{ 0, 128, 255, 0, 128, 255, 0, 128, 255 };
     const west = try lit(&ramp, 3, .{ .specular = false, .surface_scale = 4, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = .{ .distant = .{ 180, 30 } } });
     defer testing.allocator.free(west);
     const east = try lit(&ramp, 3, .{ .specular = false, .surface_scale = 4, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = .{ .distant = .{ 0, 30 } } });
@@ -1355,13 +1355,13 @@ test "the edge kernels are the specification's factors" {
 }
 
 test "a specular highlight's alpha is its brightest channel" {
-    const got = try lit(&(.{0} ** 9), 3, .{ .specular = true, .surface_scale = 1, .constant = 0.5, .exponent = 4, .color = .{ 1, 0.5, 0.25 }, .light = .{ .distant = .{ 0, 90 } } });
+    const got = try lit(&@as([9]u8, @splat(0)), 3, .{ .specular = true, .surface_scale = 1, .constant = 0.5, .exponent = 4, .color = .{ 1, 0.5, 0.25 }, .light = .{ .distant = .{ 0, 90 } } });
     defer testing.allocator.free(got);
     try testing.expectEqual(RGBA{ .r = 128, .g = 64, .b = 32, .a = 128 }, got[4]);
 }
 
 test "a spot light is dark outside its cone" {
-    const flat = [_]u8{0} ** 25;
+    const flat: [25]u8 = @splat(0);
     const spot: Light = .{ .spot = .{ .at = .{ 0, 2, 3 }, .points_at = .{ 0, 2, 0 }, .exponent = 1, .cone = 30 } };
     const got = try lit(&flat, 5, .{ .specular = false, .surface_scale = 1, .constant = 1, .exponent = 1, .color = .{ 1, 1, 1 }, .light = spot });
     defer testing.allocator.free(got);

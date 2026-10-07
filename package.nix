@@ -5,7 +5,7 @@
   lib,
   stdenv,
   callPackage,
-  zig_0_16,
+  zig_0_17,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
@@ -36,14 +36,14 @@ stdenv.mkDerivation (finalAttrs: {
     ];
   };
 
-  nativeBuildInputs = [ zig_0_16.hook ];
+  nativeBuildInputs = [ zig_0_17.hook ];
 
   # The Zig package cache, which the build cannot fetch for itself: it runs
   # without a network. build.zig.zon.nix is generated from build.zig.zon by
   # zon2nix, so every dependency's hash comes from the manifest rather than
   # being kept by hand, and regenerating it is the whole of updating one:
   #
-  #     nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+  #     nix develop -c zon2nix --17 --nix=build.zig.zon.nix build.zig.zon
   #
   # --system points Zig at that directory and forbids fetching outright, so a
   # dependency missing from it is a build error naming the package rather than

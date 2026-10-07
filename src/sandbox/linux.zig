@@ -105,11 +105,11 @@ pub fn exit(code: u8) noreturn {
 
 /// Waits for `pid` to end and returns its wait status, or null.
 pub fn wait(pid: Pid) ?u32 {
-    var status: u32 = 0;
+    var status: i32 = 0;
     while (true) {
         const rc = linux.waitpid(pid, &status, 0);
         switch (linux.errno(rc)) {
-            .SUCCESS => return status,
+            .SUCCESS => return @bitCast(status),
             .INTR => continue,
             else => return null,
         }
@@ -164,7 +164,7 @@ pub fn harden(cpu_seconds: ?u32) void {
     // Not dumpable: no core file, and no ptrace attach from another process
     // of the same user, which would otherwise be able to read the mapping out
     // from under the parent.
-    _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
+    _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
 }
 
 /// Locks the calling process down, irreversibly. See `seccomp`.

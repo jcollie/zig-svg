@@ -446,7 +446,7 @@ pub fn render(gpa: Allocator, src: []const u8, opts: Options) Error!Image {
 fn childMain(write_fd: os.Fd, arena: []u8, input: []const u8, opts: Options) noreturn {
     var reply: Reply = .{
         .magic = reply_magic,
-        .status = @intFromEnum(WireError.protocol),
+        .status = @backingInt(WireError.protocol),
         .surface_type = 0,
         .width = 0,
         .height = 0,
@@ -459,11 +459,11 @@ fn childMain(write_fd: os.Fd, arena: []u8, input: []const u8, opts: Options) nor
         // other descriptor the child inherited shut. Both before the lock
         // goes on, which is why neither needs permitting.
         const parked = os.park(write_fd, first_closable) orelse {
-            reply.status = @intFromEnum(WireError.sandbox);
+            reply.status = @backingInt(WireError.sandbox);
             break :result;
         };
         if (!os.claim(parked, reply_fd)) {
-            reply.status = @intFromEnum(WireError.sandbox);
+            reply.status = @backingInt(WireError.sandbox);
             break :result;
         }
         os.closeFrom(first_closable);
@@ -473,7 +473,7 @@ fn childMain(write_fd: os.Fd, arena: []u8, input: []const u8, opts: Options) nor
         // and stop, and that is all.
         switch (opts.profile) {
             inline else => |p| os.confine(p) catch {
-                reply.status = @intFromEnum(WireError.sandbox);
+                reply.status = @backingInt(WireError.sandbox);
                 break :result;
             },
         }
@@ -485,13 +485,13 @@ fn childMain(write_fd: os.Fd, arena: []u8, input: []const u8, opts: Options) nor
         // are at a known offset near the bottom of the mapping rather than
         // somewhere above a megabyte of spent scanline masks.
         const sfc = raster.render(fba.allocator(), input, opts.render) catch |err| {
-            reply.status = @intFromEnum(wireFromError(err));
+            reply.status = @backingInt(wireFromError(err));
             break :result;
         };
 
         const bytes = surfaceBytes(sfc);
         reply.status = 0;
-        reply.surface_type = @intFromEnum(std.meta.activeTag(sfc)) + 1;
+        reply.surface_type = @backingInt(std.meta.activeTag(sfc)) + 1;
         reply.width = @intCast(sfc.getWidth());
         reply.height = @intCast(sfc.getHeight());
         reply.offset = @intFromPtr(bytes.ptr) - @intFromPtr(arena.ptr);
@@ -811,14 +811,14 @@ fn wireFromError(err: anyerror) WireError {
 /// silently the next time zxml grew a way to refuse a document.
 fn isXmlError(err: anyerror) bool {
     @setEvalBranchQuota(20000);
-    inline for (@typeInfo(ztree.ParseError).error_set.?) |e| {
-        if (err == @field(anyerror, e.name)) return true;
+    inline for (@typeInfo(ztree.ParseError).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return true;
     }
     return false;
 }
 
 fn wireToError(status: u16) Error {
-    return switch (@as(WireError, @enumFromInt(status))) {
+    return switch (@as(WireError, @fromBackingInt(@intCast(status)))) {
         .ok => error.SandboxProtocolError, // never called with zero
         .not_an_svg => error.NotAnSvg,
         .bad_view_box => error.BadViewBox,
@@ -936,9 +936,9 @@ fn wireToError(status: u16) Error {
 
 fn surfaceTypeFromWire(v: u8) ?z2d.surface.SurfaceType {
     if (v == 0) return null;
-    const fields = @typeInfo(z2d.surface.SurfaceType).@"enum".fields;
+    const fields = @typeInfo(z2d.surface.SurfaceType).@"enum".field_names;
     if (v - 1 >= fields.len) return null;
-    return @enumFromInt(v - 1);
+    return @fromBackingInt(@intCast(v - 1));
 }
 
 // -- the parent's half -------------------------------------------------------
@@ -1247,7 +1247,7 @@ test "every wire error round trips to something a caller can act on" {
         try testing.expectEqual(c[1], wireFromError(c[0]));
         // And every one of them comes back as an error rather than as a
         // protocol failure.
-        try testing.expect(wireToError(@intFromEnum(c[1])) != error.SandboxProtocolError);
+        try testing.expect(wireToError(@backingInt(c[1])) != error.SandboxProtocolError);
     }
     // A status from the future is a protocol error and not a wrong error.
     try testing.expectEqual(error.SandboxProtocolError, wireToError(60000));
@@ -1266,14 +1266,14 @@ test "every error this library defines has a wire spelling of its own" {
     // `raster_failed` says; an error from zxml genuinely is "that was not
     // XML", which is what `malformed_xml` says.
     @setEvalBranchQuota(40000);
-    inline for (@typeInfo(raster.Error).error_set.?) |e| {
-        const err = @field(anyerror, e.name);
+    inline for (@typeInfo(raster.Error).error_set.error_names.?) |name| {
+        const err = @field(anyerror, name);
         const exempt = comptime err == error.RasterFailed or
             inSet(z2d.painter.FillError, err) or
             inSet(z2d.Path.Error, err) or
             inSet(ztree.ParseError, err);
         if (!exempt and wireFromError(err) == .raster_failed) {
-            std.debug.print("no wire spelling for error.{s}\n", .{e.name});
+            std.debug.print("no wire spelling for error.{s}\n", .{name});
             return error.ErrorMissingFromWire;
         }
     }
@@ -1282,8 +1282,8 @@ test "every error this library defines has a wire spelling of its own" {
 /// Whether `err` belongs to the error set `Set`.
 fn inSet(comptime Set: type, comptime err: anyerror) bool {
     comptime {
-        for (@typeInfo(Set).error_set.?) |e| {
-            if (err == @field(anyerror, e.name)) return true;
+        for (@typeInfo(Set).error_set.error_names.?) |name| {
+            if (err == @field(anyerror, name)) return true;
         }
         return false;
     }

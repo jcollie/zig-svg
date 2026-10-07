@@ -342,13 +342,13 @@ pub const BlendMode = enum {
 
     /// The keyword, which is the tag with hyphens for underscores.
     pub fn parse(raw: []const u8) ?BlendMode {
-        inline for (@typeInfo(BlendMode).@"enum".fields) |field| {
+        inline for (@typeInfo(BlendMode).@"enum".field_names) |field_name| {
             const name = comptime blk: {
-                var n: [field.name.len]u8 = undefined;
-                for (&n, field.name) |*d, c| d.* = if (c == '_') '-' else c;
+                var n: [field_name.len]u8 = undefined;
+                for (&n, field_name) |*d, c| d.* = if (c == '_') '-' else c;
                 break :blk n;
             };
-            if (std.mem.eql(u8, raw, &name)) return @enumFromInt(field.value);
+            if (std.mem.eql(u8, raw, &name)) return @field(BlendMode, field_name);
         }
         return null;
     }
@@ -1746,5 +1746,5 @@ test "a filter list that does not parse is refused" {
     }) |raw| {
         try testing.expectError(error.BadFilterFunction, functionsOf(raw));
     }
-    try testing.expectError(error.TooManyFilterFunctions, functionsOf("invert() " ** 17));
+    try testing.expectError(error.TooManyFilterFunctions, functionsOf("invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() invert() "));
 }

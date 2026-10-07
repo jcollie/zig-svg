@@ -3921,7 +3921,7 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
         run: shapes.Text,
         text: []u8,
         bounds: []usize,
-        font: ?z2d.Font,
+        font: ?z2d.font.Font,
         size: f64,
         /// Its first character's place among the whole text's.
         index: usize,
@@ -3971,7 +3971,7 @@ fn layoutText(gpa: Allocator, doc: *const document.Document, owner: ztree.NodeId
         defer if (bounds_owned) gpa.free(bounds);
         const n = bounds.len - 1;
         const size = shape.font_size orelse 16;
-        const font: ?z2d.Font = if (n > 0 and size > 0) try faceFor(shape, opts) else null;
+        const font: ?z2d.font.Font = if (n > 0 and size > 0) try faceFor(shape, opts) else null;
 
         var node = run.element;
         while (true) {
@@ -4286,7 +4286,7 @@ fn placeOnPath(
     out: *TextLayout,
     run: shapes.Text,
     on_path: shapes.OnPath,
-    font: *z2d.Font,
+    font: *z2d.font.Font,
     text_opts: z2d.text.ShowTextOptions,
     text: []const u8,
     bounds: []const usize,
@@ -4505,7 +4505,7 @@ fn splitCodepoints(
 /// glyphs move so that the baseline named sits where the alphabetic one
 /// would, by resvg's table of distances from the font's ascent, descent and
 /// x-height.
-fn baselineShift(run: shapes.Text, font: *const z2d.Font, size: f64) f64 {
+fn baselineShift(run: shapes.Text, font: *const z2d.font.Font, size: f64) f64 {
     if (run.supers == 0 and run.subs == 0 and run.baseline == .alphabetic) return run.baseline_shift;
     const m = metricsOf(font, size);
     const aligned: f64 = switch (run.baseline) {
@@ -4541,7 +4541,7 @@ fn spacingAfter(run: shapes.Text, glyph: []const u8) f64 {
 /// How far `utf8` advances in `font`: z2d's measurement, with running out of
 /// memory reported as that. Everything else it can say is the font or the
 /// string being something it cannot read.
-fn measureText(gpa: Allocator, font: *z2d.Font, utf8: []const u8, opts: z2d.text.ShowTextOptions) Error!f64 {
+fn measureText(gpa: Allocator, font: *z2d.font.Font, utf8: []const u8, opts: z2d.text.ShowTextOptions) Error!f64 {
     return z2d.text.measure(gpa, font, utf8, opts) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.BadFont,
@@ -4557,7 +4557,7 @@ fn measureText(gpa: Allocator, font: *z2d.Font, utf8: []const u8, opts: z2d.text
 /// kerning still looks like text.
 fn glyphStep(
     gpa: Allocator,
-    font: *z2d.Font,
+    font: *z2d.font.Font,
     utf8: []const u8,
     bounds: []const usize,
     i: usize,
@@ -4716,7 +4716,7 @@ const TextMetrics = struct {
 };
 
 /// `textMetrics` for a loaded face.
-fn metricsOf(font: *const z2d.Font, size: f64) TextMetrics {
+fn metricsOf(font: *const z2d.font.Font, size: f64) TextMetrics {
     return textMetrics(font.metrics(), font.meta.units_per_em, font.meta.ascender, font.meta.descender, size);
 }
 
@@ -4730,7 +4730,7 @@ fn metricsOf(font: *const z2d.Font, size: f64) TextMetrics {
 /// the sub- and superscript offsets, where resvg's fallback comes to five and
 /// two and a half ems; these are a fifth and two fifths of one, which is what
 /// faces that do record them tend to say.
-fn textMetrics(m: z2d.Font.Metrics, units_per_em: u16, ascender: i16, descender: i16, size: f64) TextMetrics {
+fn textMetrics(m: z2d.font.Font.Metrics, units_per_em: u16, ascender: i16, descender: i16, size: f64) TextMetrics {
     const upem: f64 = @floatFromInt(@max(units_per_em, 1));
     const scale = size / upem;
     const units = struct {
@@ -4755,10 +4755,13 @@ fn textMetrics(m: z2d.Font.Metrics, units_per_em: u16, ascender: i16, descender:
     };
 }
 
-fn faceFor(shape: document.Shape, opts: Options) Error!z2d.Font {
+fn faceFor(shape: document.Shape, opts: Options) Error!z2d.font.Font {
     const resolver = opts.fonts orelse return error.NoFontSupplied;
     const bytes = resolver.faceFor(shape) orelse return error.NoFontSupplied;
-    return z2d.Font.loadBuffer(bytes) catch error.BadFont;
+    // The first face of a collection, which is the only one a resolver
+    // handing back bytes has any way to mean.
+    const file = z2d.font.File.loadBuffer(bytes) catch return error.BadFont;
+    return file.loadFontIndex(0) catch error.BadFont;
 }
 
 /// XML whitespace collapsed the way SVG's default `xml:space` asks.
@@ -6572,9 +6575,9 @@ test "draw paints into a surface somebody else made" {
 /// `NoFontSupplied`, which is fine -- by then the asking has happened, and it
 /// is what these tests are looking at.
 ///
-/// The alternative would be a font to draw with, and a unit test has no way to
-/// find one: `SVG_TEST_FONT` is what the devshell sets, and 0.16 reaches the
-/// environment only through `std.process.Init`, which a test does not get.
+/// The alternative would be a font to draw with, and a unit test has none it
+/// can count on: `SVG_TEST_FONT` is what the devshell sets, and the tests have
+/// to pass outside it too.
 /// `tests/oracle` is where text is checked against a real face, against resvg,
 /// with both given the same file.
 const Asked = struct {
@@ -6792,8 +6795,8 @@ test "the node ceiling is what keeps text from outrunning the budget" {
     // is as many nodes as its glyphs need -- so it consults the ceiling before
     // appending rather than after, which is what the other builders that can
     // overshoot do not. Checked here directly, because drawing a glyph needs
-    // a font and a unit test has no way to find one: 0.16 reaches the
-    // environment only through `std.process.Init`, which a test does not get.
+    // a font and a unit test has none it can count on: `SVG_TEST_FONT` is
+    // what the devshell sets, and the tests have to pass outside it too.
     const gpa = testing.allocator;
     var p: z2d.Path = .empty;
     defer p.deinit(gpa);

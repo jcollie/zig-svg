@@ -247,7 +247,7 @@ const audit_le: u32 = 0x40000000;
 /// is one this module has no token for.
 ///
 /// Written out rather than taken from `std.os.linux.AUDIT.ARCH.current`, which
-/// cannot be referenced at all in Zig 0.16.0: the enum it belongs to names an
+/// cannot be referenced at all in Zig 0.17.0: the enum it belongs to names an
 /// ELF machine, `EM_FRV`, that `std.elf.EM` does not have, so evaluating the
 /// enum is a compile error whichever member is wanted. The values are
 /// mechanical anyway — the ELF machine number, with bit 31 set for a 64-bit
@@ -320,7 +320,7 @@ pub fn build(comptime profile: Profile) [programLen(profile)]Insn {
         for (rules) |rule| {
             const fd = rule.fd orelse {
                 // A match jumps to the `ret #ALLOW` that follows the kill.
-                insns[i] = jeq(@intFromEnum(rule.sys), @intCast(kill_at + 1 - (i + 1)), 0);
+                insns[i] = jeq(@backingInt(rule.sys), @intCast(kill_at + 1 - (i + 1)), 0);
                 i += 1;
                 continue;
             };
@@ -333,7 +333,7 @@ pub fn build(comptime profile: Profile) [programLen(profile)]Insn {
             insns[i] = ld(@offsetOf(SECCOMP.data, "nr"));
             i += 1;
             // Not this call: step over the four instructions that test it.
-            insns[i] = jeq(@intFromEnum(rule.sys), 0, 4);
+            insns[i] = jeq(@backingInt(rule.sys), 0, 4);
             i += 1;
             // The top half of the argument has to be zero. The kernel narrows
             // a descriptor to `unsigned int` and would ignore anything up
@@ -414,7 +414,7 @@ pub const InstallError = error{
 pub fn install(comptime profile: Profile) InstallError!void {
     // Every filter needs this first, and it is a one-way door of its own: a
     // process that has set it cannot gain privileges through `execve` again.
-    if (linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0) != 0) {
+    if (linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0) != 0) {
         return error.NoNewPrivsRefused;
     }
 

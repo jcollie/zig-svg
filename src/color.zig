@@ -192,7 +192,7 @@ pub fn usedScheme(text: []const u8, preferred: css.media.ColorScheme) Scheme {
             // `normal`, `only`, and names of schemes nothing here knows,
             // which the property allows and which choose nothing.
             continue;
-        if (@intFromEnum(listed) == @intFromEnum(preferred)) return listed;
+        if (@backingInt(listed) == @backingInt(preferred)) return listed;
         if (first == null) first = listed;
     }
     return first orelse .light;

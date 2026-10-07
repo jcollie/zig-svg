@@ -2797,7 +2797,7 @@ fn parsePaintOrder(raw: []const u8) Error![3]PaintLayer {
     if (std.mem.eql(u8, t, "normal")) return PaintLayer.normal;
     var out: [3]PaintLayer = undefined;
     var n: usize = 0;
-    var seen = std.EnumSet(PaintLayer).initEmpty();
+    var seen = std.EnumSet(PaintLayer).empty;
     var it = std.mem.tokenizeAny(u8, t, " \t\r\n");
     while (it.next()) |word| {
         const layer = std.meta.stringToEnum(PaintLayer, word) orelse return error.BadPaintOrder;

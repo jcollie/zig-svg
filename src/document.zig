@@ -77,6 +77,7 @@ const resample = @import("resample.zig");
 const shapes = @import("shapes.zig");
 const css = @import("css");
 const transform = @import("transform.zig");
+const Variables = @import("variables.zig").Variables;
 
 /// The namespace SVG content is in. An element in no namespace is taken as
 /// SVG too, because a document written without `xmlns` is still a document
@@ -130,6 +131,14 @@ pub const Error = error{
     BadReference,
     /// A `<use>` whose `href` names an id the document does not have.
     UnknownReference,
+    /// A walk that visited more elements than `Document.max_visits`.
+    ///
+    /// Not a deep document but a wide expansion: ten `<use>`s of a group of
+    /// ten `<use>`s of a group of ten, six levels down, is a million
+    /// elements from a few hundred bytes, and nothing about any one level is
+    /// unreasonable. An expansion of empty groups draws nothing, so no
+    /// budget on shapes would ever stop it.
+    TooManyVisits,
     /// A `<use>` that draws something containing itself, directly or through
     /// others. Caught by the frame stack rather than by a depth limit, so it
     /// is reported the moment it closes rather than after a budget runs out.
@@ -883,6 +892,16 @@ pub const Document = struct {
     /// only, as a browser's SVG-as-image does: nothing outside it is fetched
     /// on its behalf, and the caller's resolver is not asked.
     as_image: bool = false,
+    /// The custom properties a `var()` in a property is substituted from,
+    /// installed by whoever is reading or drawing for as long as they are.
+    /// With none installed a `var()` is left as written, and whatever reads
+    /// it refuses it.
+    variables: ?*Variables = null,
+    /// The most elements one walk of this document may visit, `<use>`
+    /// expansions included. See `Error.TooManyVisits`.
+    max_visits: usize = default_max_visits,
+
+    pub const default_max_visits: usize = 1 << 22;
 
     pub fn deinit(self: *Document) void {
         self.stylesheet.deinit();
@@ -904,6 +923,25 @@ pub const Document = struct {
     /// Each shape, in painting order.
     pub fn paths(self: *const Document) PathIterator {
         return .{ .doc = self, .viewport = self.viewport() };
+    }
+
+    /// The walk that draws `node` as an OpenType glyph: the root, with
+    /// `node` as though it were the root's only child, inheriting from the
+    /// root and from `base` above it.
+    ///
+    /// The OpenType specification says how, because SVG does not say how to
+    /// draw part of a document: the element is drawn as `<use>` would draw
+    /// it, "as though the given element and its content were specified in a
+    /// `<defs>` tag and then referenced as the graphic content of an SVG
+    /// document". So the elements between the root and `node` contribute
+    /// nothing -- not their transforms and not their properties -- and the
+    /// root contributes everything, its own opacity, clip and mask
+    /// included. When `node` is the root, that is the whole document.
+    pub fn glyph(self: *const Document, node: ztree.NodeId, base: Inherited) PathIterator {
+        var it = self.paths();
+        it.base = base;
+        if (node != self.root_node) it.root_only_child = node;
+        return it;
     }
 
     /// The same walk as `paths`, rooted somewhere else in the document and
@@ -1287,6 +1325,17 @@ pub const PathIterator = struct {
     /// its colors are read in unless it declares a `color-scheme` of its own.
     scheme: color.Scheme = .light,
 
+    /// What the root inherits from above it, which in a document drawn on
+    /// its own is nothing at all. See `Document.glyph`.
+    base: Inherited = .{},
+    /// The one element under the root to draw, as though it were the root's
+    /// only child, or null to draw them all. See `Document.glyph`.
+    root_only_child: ?ztree.NodeId = null,
+
+    /// How many elements this walk has visited, against
+    /// `Document.max_visits`.
+    visits: usize = 0,
+
     /// Whitespace across the runs of one `<text>`: which element the runs
     /// belong to, whether any has had anything in it yet, whether the last
     /// one ended with a space it kept, and whether whitespace has been seen
@@ -1345,7 +1394,7 @@ pub const PathIterator = struct {
             // nothing to be relative to and is refused.
             self.viewport.font_size = null;
             self.scheme = .light;
-            const root_inherited = try self.readInherited(root);
+            const root_inherited = self.base.with(try self.readInherited(root));
             self.viewport.font_size = root_inherited.font_size;
             const ctm = try self.readTransform(root);
             // A root with `display="none"` hides the whole document: its
@@ -1357,6 +1406,7 @@ pub const PathIterator = struct {
                 .inherited = root_inherited,
                 .transform = ctm,
                 .opens_layer = !hidden and (opacity < 1.0 or refs.any()),
+                .only_child = self.root_only_child,
             };
             // The root is the one container the walk never meets as somebody's
             // child, so its layer is opened here rather than in `visit`.
@@ -1961,6 +2011,8 @@ pub const PathIterator = struct {
     fn visit(self: *PathIterator, child: ztree.NodeId, parent: Frame) Error!?Item {
         const tree = self.doc.tree;
         if (tree.node(child).kind != .element) return null;
+        if (self.visits >= self.doc.max_visits) return error.TooManyVisits;
+        self.visits += 1;
         self.enterViewport(parent);
 
         // Follow a chain of `<use>`, gathering what each contributes on the
@@ -2339,7 +2391,9 @@ pub const PathIterator = struct {
         node: ztree.NodeId,
         name: []const u8,
     ) ?[]const u8 {
-        return css.property(&self.doc.stylesheet, self.doc.tree, node, name);
+        const raw = css.property(&self.doc.stylesheet, self.doc.tree, node, name) orelse return null;
+        const vars = self.doc.variables orelse return raw;
+        return vars.resolve(raw);
     }
 
     fn lengthOf(
@@ -3196,6 +3250,32 @@ pub const ReadOptions = struct {
     /// What a media query in the document is asked about. See `Media`.
     media: Media = .{},
 
+    /// The size of a document that names none -- no `width`, no `height`
+    /// and no `viewBox` -- or null to refuse one with `error.NoSize`.
+    ///
+    /// OpenType's SVG glyphs are the case for it: the initial viewport is
+    /// the em square, and most glyph documents say nothing about their size
+    /// because the font already has.
+    default_size: ?f64 = null,
+
+    /// The custom properties a `var()` is substituted from while reading.
+    /// Borrowed for the call. See `variables.zig`.
+    variables: []const @import("variables.zig").Entry = &.{},
+
+    /// Whether to walk the whole document while reading it, to refuse what
+    /// cannot be drawn and count what can. A document that is only ever
+    /// drawn in parts -- a font's, one glyph at a time -- is checked one
+    /// part at a time as it is drawn instead, and its `shape_count` is zero.
+    validate: bool = true,
+
+    /// Where to stop counting shapes, when the caller will refuse more than
+    /// this anyway: the count stops one past it, which is all the refusal
+    /// needs to see.
+    max_shapes: ?usize = null,
+
+    /// See `Document.max_visits`.
+    max_visits: usize = Document.default_max_visits,
+
     pub const default_languages: []const []const u8 = &.{"en"};
 };
 
@@ -3256,6 +3336,7 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
         .stylesheet = .{},
         .languages = options.languages,
         .preferred_scheme = options.media.color_scheme,
+        .max_visits = options.max_visits,
     };
     errdefer doc.stylesheet.deinit();
 
@@ -3266,11 +3347,23 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
     try indexIds(&doc);
     // The size first, which is attributes alone, since a media query in the
     // stylesheets may be asking about it.
-    try readRootSize(&doc, root);
+    try readRootSize(&doc, root, if (options.default_size) |d| (if (d > 0) d else null) else null);
     // Before anything reads a property, because from here on every one of them
     // goes through the cascade.
     try readStylesheet(gpa, &doc, options.stylesheets, options.media.environment(&doc));
+
+    // Installed for the reading alone: what is substituted is kept with the
+    // `Variables`, and a later render installs its own.
+    var vars: Variables = .init(gpa, options.variables);
+    defer vars.deinit();
+    doc.variables = &vars;
+    defer doc.variables = null;
+
     try readRoot(&doc, root);
+    if (!options.validate) {
+        if (vars.failure) |err| return err;
+        return doc;
+    }
 
     var it = doc.paths();
     var count: usize = 0;
@@ -3279,7 +3372,9 @@ pub fn readWith(gpa: std.mem.Allocator, src: []const u8, options: ReadOptions) E
         // `Limits.max_shapes` bounds, and a group is not a thing that gets
         // painted.
         if (item == .shape or item == .image) count += 1;
+        if (options.max_shapes) |most| if (count > most) break;
     }
+    if (vars.failure) |err| return err;
     if (count == 0) return error.NoPath;
     doc.shape_count = count;
     return doc;
@@ -3380,7 +3475,7 @@ fn isStyleSheet(doc: *Document, node: ztree.NodeId, env: css.media.Environment) 
 /// resolves to zero and the `viewBox` supplies the size instead, which is what
 /// resvg does with the `width="100%" height="100%"` that drawing programs like
 /// to write.
-fn readRootSize(doc: *Document, root: ztree.NodeId) Error!void {
+fn readRootSize(doc: *Document, root: ztree.NodeId, default_size: ?f64) Error!void {
     const tree = doc.tree;
     if (tree.attributeValue(root, "", "viewBox")) |raw| {
         doc.view_box = try parseViewBox(raw);
@@ -3400,9 +3495,9 @@ fn readRootSize(doc: *Document, root: ztree.NodeId) Error!void {
     // well. The viewBox is the fallback, and with neither there is nothing to
     // say how big the picture is.
     doc.width = pick(named_width, if (doc.view_box) |vb| vb.width else null) orelse
-        return error.NoSize;
+        default_size orelse return error.NoSize;
     doc.height = pick(named_height, if (doc.view_box) |vb| vb.height else null) orelse
-        return error.NoSize;
+        default_size orelse return error.NoSize;
 
     if (tree.attributeValue(root, "", "preserveAspectRatio")) |raw| {
         doc.preserve_aspect_ratio = try PreserveAspectRatio.parse(raw);

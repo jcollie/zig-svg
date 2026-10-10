@@ -46,6 +46,7 @@ const color = @import("color.zig");
 const css = @import("css");
 const length = @import("length.zig");
 const transform = @import("transform.zig");
+const Variables = @import("variables.zig").Variables;
 
 pub const Error = error{
     /// A `spreadMethod` that is not one of §13.2.2's three. Refused rather
@@ -137,6 +138,7 @@ pub fn read(
     tree: *const ztree.Document,
     ids: *const std.StringHashMapUnmanaged(ztree.NodeId),
     sheet: *const css.Stylesheet,
+    vars: ?*Variables,
     node: ztree.NodeId,
     viewport: length.Viewport,
     initial_color: color.Color,
@@ -173,7 +175,7 @@ pub fn read(
     var i = links;
     while (i > 0) {
         i -= 1;
-        try applyOne(tree, sheet, chain[i], viewport, initial_color, preferred, &result);
+        try applyOne(tree, .{ .sheet = sheet, .vars = vars }, chain[i], viewport, initial_color, preferred, &result);
     }
     return result;
 }
@@ -207,7 +209,7 @@ pub const max_ancestors = 66;
 /// and not that of whatever it paints -- which is what resvg and Chrome both
 /// draw, and what makes a gradient the same gradient wherever it is used.
 fn colorAt(
-    sheet: *const css.Stylesheet,
+    sheet: Sheet,
     tree: *const ztree.Document,
     node: ztree.NodeId,
     preferred: css.media.ColorScheme,
@@ -227,8 +229,8 @@ fn colorAt(
     while (count > 0) {
         count -= 1;
         const n = chain[count];
-        if (css.property(sheet, tree, n, "color-scheme")) |v| scheme = color.usedScheme(v, preferred);
-        const v = css.property(sheet, tree, n, "color") orelse continue;
+        if (css.property(sheet.sheet, tree, n, "color-scheme")) |v| scheme = color.usedScheme(v, preferred);
+        const v = sheet.property(tree, n, "color") orelse continue;
         current = switch (try color.parsePaintIn(v, scheme)) {
             .color => |c| c,
             .deferred => |d| d.resolve(current, scheme),
@@ -241,9 +243,22 @@ fn colorAt(
 }
 
 /// Lay one gradient of the chain over what has been gathered so far.
+/// The document's stylesheet, and the custom properties a `var()` in what it
+/// says is substituted from.
+const Sheet = struct {
+    sheet: *const css.Stylesheet,
+    vars: ?*Variables,
+
+    fn property(self: Sheet, tree: *const ztree.Document, node: ztree.NodeId, name: []const u8) ?[]const u8 {
+        const raw = css.property(self.sheet, tree, node, name) orelse return null;
+        const vars = self.vars orelse return raw;
+        return vars.resolve(raw);
+    }
+};
+
 fn applyOne(
     tree: *const ztree.Document,
-    sheet: *const css.Stylesheet,
+    sheet: Sheet,
     node: ztree.NodeId,
     viewport: length.Viewport,
     initial_color: color.Color,
@@ -314,12 +329,13 @@ fn applyOne(
         offset = @max(offset, highest);
         highest = offset;
 
-        var value: color.Color = if (css.property(sheet, tree, child, "stop-color")) |c|
-            switch (try color.parsePaintIn(c, color.schemeAt(sheet, tree, child, preferred))) {
+        const scheme = color.schemeAt(sheet.sheet, tree, child, preferred);
+        var value: color.Color = if (sheet.property(tree, child, "stop-color")) |c|
+            switch (try color.parsePaintIn(c, scheme)) {
                 .color => |named| named,
                 .deferred => |d| d.resolve(
                     try colorAt(sheet, tree, child, preferred, initial_color),
-                    color.schemeAt(sheet, tree, child, preferred),
+                    scheme,
                 ),
                 // `currentColor` here is the `color` in force on the stop,
                 // like anywhere else: the one it inherits through the
@@ -332,7 +348,7 @@ fn applyOne(
             }
         else
             color.Color.black;
-        if (css.property(sheet, tree, child, "stop-opacity")) |o| {
+        if (sheet.property(tree, child, "stop-opacity")) |o| {
             value.alpha *= try color.parseOpacity(o);
         }
 
@@ -401,7 +417,7 @@ const no_stylesheet: css.Stylesheet = .{};
 
 fn gradientNamed(r: *Read, id: []const u8) !Gradient {
     const node = r.ids.get(id).?;
-    return (try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 100, .height = 100 }, .black, .light)).?;
+    return (try read(r.doc, &r.ids, &no_stylesheet, null, node, .{ .width = 100, .height = 100 }, .black, .light)).?;
 }
 
 test "a linear gradient runs left to right unless told otherwise" {
@@ -537,7 +553,7 @@ test "an element that is not a gradient is not read as one" {
         const node = r.ids.get(id).?;
         try testing.expectEqual(
             @as(?Gradient, null),
-            try read(r.doc, &r.ids, &no_stylesheet, node, .{ .width = 10, .height = 10 }, .black, .light),
+            try read(r.doc, &r.ids, &no_stylesheet, null, node, .{ .width = 10, .height = 10 }, .black, .light),
         );
     }
 }

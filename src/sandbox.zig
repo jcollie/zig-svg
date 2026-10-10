@@ -681,6 +681,7 @@ const WireError = enum(u16) {
     measure_failed = 107,
     bad_xml_space = 108,
     unsupported_deferred_color = 109,
+    too_many_visits = 110,
     /// Something z2d refused that is none of the above.
     raster_failed = 11,
     /// The filter could not be installed, so nothing was rendered.
@@ -720,6 +721,7 @@ fn wireFromError(err: anyerror) WireError {
         error.UnknownReference => .unknown_reference,
         error.RecursiveUse => .recursive_use,
         error.TooManyUseHops => .too_many_use_hops,
+        error.TooManyVisits => .too_many_visits,
         error.UnsupportedPaintServer => .unsupported_paint_server,
         error.UnsupportedSpreadMethod => .unsupported_spread_method,
         error.BadGradientUnits => .bad_gradient_units,
@@ -848,6 +850,7 @@ fn wireToError(status: u16) Error {
         .unknown_reference => error.UnknownReference,
         .recursive_use => error.RecursiveUse,
         .too_many_use_hops => error.TooManyUseHops,
+        .too_many_visits => error.TooManyVisits,
         .unsupported_paint_server => error.UnsupportedPaintServer,
         .unsupported_spread_method => error.UnsupportedSpreadMethod,
         .bad_gradient_units => error.BadGradientUnits,
@@ -1195,6 +1198,7 @@ test "every wire error round trips to something a caller can act on" {
         .{ error.NoSize, .no_size },
         .{ error.BadReference, .bad_reference },
         .{ error.RecursiveUse, .recursive_use },
+        .{ error.TooManyVisits, .too_many_visits },
         .{ error.UnsupportedSpreadMethod, .unsupported_spread_method },
         .{ error.TooManyStops, .too_many_stops },
         .{ error.ImageTooLarge, .image_too_large },

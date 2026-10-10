@@ -114,6 +114,11 @@ pub const arc = @import("arc.zig");
 pub const raster = @import("raster.zig");
 /// Rendering in a process that cannot do anything else.
 pub const sandbox = @import("sandbox.zig");
+/// Glyphs from an OpenType `SVG ` table: one document parsed once, and each
+/// glyph in it drawn and measured by ID.
+pub const glyph = @import("glyph.zig");
+/// `var()`, substituted from custom properties the caller supplies.
+pub const variables = @import("variables.zig");
 
 /// Render a document into a surface of its own.
 pub const render = raster.render;
@@ -171,4 +176,6 @@ test {
     _ = arc;
     _ = raster;
     _ = sandbox;
+    _ = glyph;
+    _ = variables;
 }

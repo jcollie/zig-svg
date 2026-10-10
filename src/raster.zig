@@ -37,6 +37,7 @@ const pattern = @import("pattern.zig");
 const resample = @import("resample.zig");
 const shapes = @import("shapes.zig");
 const transform = @import("transform.zig");
+const variables = @import("variables.zig");
 
 /// How much a caller is willing to spend on a picture somebody else wrote.
 ///
@@ -262,6 +263,15 @@ pub const Options = struct {
     /// queries are asked, alongside the size it is drawn at.
     color_scheme: css.media.ColorScheme = .light,
     reduced_motion: css.media.ReducedMotion = .no_preference,
+
+    /// Custom properties for a `var()` in the document to be substituted
+    /// from, each named with its leading `--` and valued as CSS text.
+    /// Borrowed for the render. See `variables.zig`.
+    ///
+    /// A `var()` naming one that is not here takes its fallback, so a
+    /// document written as `fill="var(--color0, yellow)"` draws yellow
+    /// when this is empty.
+    variables: []const variables.Entry = &.{},
 };
 
 /// How the caller supplies a picture an `<image>` names by URL. See
@@ -446,6 +456,8 @@ fn readOptions(opts: Options, size: ?Box) document.ReadOptions {
     return .{
         .languages = opts.languages,
         .stylesheets = opts.stylesheets,
+        .variables = opts.variables,
+        .max_shapes = opts.limits.max_shapes,
         .media = .{
             .width = if (size) |b| b.width else null,
             .height = if (size) |b| b.height else null,
@@ -474,19 +486,107 @@ fn drawDocument(
     opts: Options,
 ) Error!void {
     if (doc.shape_count > opts.limits.max_shapes) return error.TooManyShapes;
+    return drawFrom(gpa, destination, doc, doc.paths(), doc.transformFor(box.x, box.y, box.width, box.height), opts);
+}
 
-    // Lent to the walk for `transform-box: fill-box`, and taken back after.
-    var measuring: Measuring = .{ .gpa = gpa, .doc = doc, .opts = opts };
-    defer measuring.deinit();
-    doc.measurer = measuring.measurer();
-    defer doc.measurer = null;
-    drawWalk(gpa, destination, doc, doc.transformFor(box.x, box.y, box.width, box.height), opts) catch |err| {
+/// Draw what `walk` yields onto `destination`, under `base`: the matrix
+/// from the root's user space to the surface.
+///
+/// `drawDocument` with the walk chosen by the caller, which is how
+/// `glyph` draws one element of a document rather than all of it. Everything
+/// a render lends the walk -- the measurer, the custom properties -- is
+/// installed here and taken back after.
+pub fn drawFrom(
+    gpa: Allocator,
+    destination: *z2d.Surface,
+    doc: *document.Document,
+    walk: document.PathIterator,
+    base: z2d.Transformation,
+    opts: Options,
+) Error!void {
+    var lent: Lent = undefined;
+    lent.install(gpa, doc, opts);
+    defer lent.deinit(doc);
+    drawWalk(gpa, destination, doc, walk, base, opts) catch |err| return lent.failure(err);
+    if (lent.vars.failure) |err| return err;
+}
+
+/// The union of the boxes of what `walk` yields, in the root's user space,
+/// or null when it yields nothing with any extent. With `with_stroke`, each
+/// shape's box is grown by as far as its stroke can reach.
+///
+/// Each shape's own geometry, before any clip, mask, filter or marker: a
+/// clip can only shrink what is drawn, so the box is never too small for
+/// that, and the others are left out.
+pub fn measureFrom(
+    gpa: Allocator,
+    doc: *document.Document,
+    walk: document.PathIterator,
+    with_stroke: bool,
+    opts: Options,
+) Error!?Box {
+    var lent: Lent = undefined;
+    lent.install(gpa, doc, opts);
+    defer lent.deinit(doc);
+    var it = walk;
+    const box = extentOf(gpa, doc, &it, with_stroke, opts) catch |err| return lent.failure(err);
+    if (lent.vars.failure) |err| return err;
+    return box;
+}
+
+/// How many shapes and pictures `walk` yields, refused past
+/// `Limits.max_shapes`, with the custom properties installed that the walk
+/// reads its paints through.
+pub fn countFrom(gpa: Allocator, doc: *document.Document, walk: document.PathIterator, opts: Options) Error!usize {
+    var lent: Lent = undefined;
+    lent.install(gpa, doc, opts);
+    defer lent.deinit(doc);
+    var it = walk;
+    var count: usize = 0;
+    while (it.next() catch |err| return lent.failure(err)) |item| {
+        if (item != .shape and item != .image) continue;
+        count += 1;
+        if (count > opts.limits.max_shapes) return error.TooManyShapes;
+    }
+    if (lent.vars.failure) |err| return err;
+    return count;
+}
+
+/// What a render lends a document for as long as it draws: the measurer for
+/// `transform-box: fill-box`, and the custom properties for `var()`.
+///
+/// Installed in place, because the document is lent pointers into it.
+const Lent = struct {
+    measuring: Measuring,
+    vars: variables.Variables,
+
+    fn install(self: *Lent, gpa: Allocator, doc: *document.Document, opts: Options) void {
+        self.* = .{
+            .measuring = .{ .gpa = gpa, .doc = doc, .opts = opts },
+            .vars = .init(gpa, opts.variables),
+        };
+        doc.measurer = self.measuring.measurer();
+        doc.variables = &self.vars;
+    }
+
+    fn deinit(self: *Lent, doc: *document.Document) void {
+        doc.measurer = null;
+        doc.variables = null;
+        self.measuring.deinit();
+        self.vars.deinit();
+    }
+
+    /// The error the walk reported, or what really went wrong behind it.
+    fn failure(self: *const Lent, err: Error) Error {
         // The measurer can only answer with the walk's own errors, so it
         // kept what really went wrong and said this instead.
-        if (err == error.MeasureFailed) if (measuring.failure) |f| return f;
+        if (err == error.MeasureFailed) if (self.measuring.failure) |f| return f;
+        // And a substitution that ran out of memory reads as an unset
+        // property, which the walk may then have refused for other reasons.
+        if (self.vars.failure) |f| return f;
         return err;
-    };
-}
+    }
+};
 
 /// Measures elements for `transform-box: fill-box`, on behalf of the walk:
 /// see `document.Measurer`.
@@ -552,6 +652,7 @@ fn drawWalk(
     gpa: Allocator,
     destination: *z2d.Surface,
     doc: *const document.Document,
+    walk_from: document.PathIterator,
     base: z2d.Transformation,
     opts: Options,
 ) Error!void {
@@ -583,7 +684,7 @@ fn drawWalk(
     var texts: TextLayouts = .{};
     defer texts.deinit(gpa);
 
-    var walk = doc.paths();
+    var walk = walk_from;
     return drawItems(gpa, &layers, doc, &walk, .{
         .base = base,
         .nodes_left = &nodes_left,
@@ -4877,6 +4978,7 @@ fn makeSource(
         doc.tree,
         &doc.ids,
         &doc.stylesheet,
+        doc.variables,
         node,
         doc.viewport(),
         // A stop's `currentColor` is its own, through the gradient's
@@ -5061,6 +5163,26 @@ fn contentExtent(
         .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 }
 
+/// The most `m` stretches a length in any direction: the larger singular
+/// value of its linear part.
+fn maxStretch(m: z2d.Transformation) f64 {
+    // The singular values of [a c; b d] are the square roots of the
+    // eigenvalues of its Gram matrix, whose trace and determinant these are.
+    const sum = m.ax * m.ax + m.by * m.by + m.cx * m.cx + m.dy * m.dy;
+    const det = m.ax * m.dy - m.by * m.cx;
+    const disc = @max(0, sum * sum - 4 * det * det);
+    const largest = @sqrt(@max(0, (sum + @sqrt(disc)) / 2));
+    return if (math.isFinite(largest)) largest else 1;
+}
+
+test maxStretch {
+    try testing.expectApproxEqAbs(@as(f64, 1), maxStretch(.identity), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 3), maxStretch(.{ .ax = 2, .by = 0, .cx = 0, .dy = 3, .tx = 5, .ty = 5 }), 1e-12);
+    // A rotation stretches nothing.
+    const r = std.math.sqrt1_2;
+    try testing.expectApproxEqAbs(@as(f64, 1), maxStretch(.{ .ax = r, .by = r, .cx = -r, .dy = r, .tx = 0, .ty = 0 }), 1e-12);
+}
+
 /// The union of the boxes of everything a walk yields, each under the matrix
 /// it carries, or null when it yields nothing with any extent.
 fn extentOf(
@@ -5108,7 +5230,13 @@ fn extentOf(
                 // join can reach further than the pen alone, and over-reaching
                 // here only costs a clip that turns out to have been
                 // unnecessary.
-                const reach = @abs(pen.width) * 0.5 * @max(1.0, pen.miter_limit);
+                //
+                // The pen is in the shape's own user space, and the box is in
+                // the walk's, so it is scaled by as much as the shape's matrix
+                // stretches anything; and never by less than the half-diagonal
+                // a square cap reaches.
+                const reach = @abs(pen.width) * 0.5 * @max(math.sqrt2, pen.miter_limit) *
+                    maxStretch(shape.transform);
                 box = .{
                     .x = box.x - reach,
                     .y = box.y - reach,

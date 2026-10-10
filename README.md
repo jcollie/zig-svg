@@ -549,6 +549,7 @@ short of the specification.
 | `transform-box` | `view-box`, the initial value, and `fill-box` (or `content-box`) on anything — a group, a `<use>` and text are measured by the rasterizer, which lays text out, as their ink; `stroke-box` and `border-box` are refused (`UnsupportedTransformBox`) |
 | `fill` | named colors, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`, `rgba()`, `none`, `currentColor`; `url(#id)` with a fallback (`none`, `currentColor` or a color) painted when the reference is missing or is no gradient or pattern, as Chrome does — resvg paints nothing for the second; with no fallback such a reference is refused |
 | CSS Color 4 and 5 | everywhere a color is written — `fill`, `stroke`, `color`, `stop-color`, `flood-color`, `lighting-color`, `drop-shadow()` — `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()` in every predefined space, and `color-mix()`, read by [zig-css](https://git.jcollie.dev/jeff/zig-css); a color sRGB cannot show is gamut-mapped into it as Color 4 §14.2 says, not clipped. `light-dark()` too, chosen by the used color scheme as CSS Color Adjust 1 has it — light unless a `color-scheme` in `style` or a stylesheet says the element supports dark and the caller's `Options.color_scheme` prefers it, as Chrome draws an SVG `<img>` — in `fill`, `stroke`, `color`, stop colors and filter colors alike. A `color-mix()` with `currentcolor` in it, or a `light-dark()` or relative color (`rgb(from currentColor r g 255)`) that waits on it, is worked out once the element's `color` is known — in `fill`, `stroke`, a stop color, and `color` itself, where `currentcolor` is the parent's — as Chrome draws it; in `flood-color`, `lighting-color` and `drop-shadow()`, which are read before that color is known, it is refused (`UnsupportedColorMix`, `UnsupportedDeferredColor`) |
+| `var()` | yes, in any presentation property and in a stop's `stop-color` and `stop-opacity`, from custom properties the caller passes as `Options.variables` — a `var()` naming one that is not there takes its fallback, and one with no fallback leaves the property unset, as CSS Custom Properties 1 has it; a `--name: value` the document declares is not read, as the OpenType profile asks |
 | `fill-opacity`, `fill-rule`, `color` | yes, inherited through `<svg>` and `<g>` |
 | `opacity` | yes, on a shape **and** on `<svg>` or `<g>`, as a composited layer |
 | `stroke`, `stroke-width`, `stroke-opacity` | yes, inherited |
@@ -638,6 +639,76 @@ than four shapes drawn and then an error. That is not a validating walk beside
 the drawing one — it *is* the drawing one. `read` runs the same iterator the
 renderer will, to the end, and throws the shapes away; `shape_count` is the
 number that iterator produced rather than a number counted alongside it.
+
+## OpenType glyphs
+
+`svg.glyph` draws the glyphs of a font's `SVG ` table. A document there
+describes a range of glyph IDs, glyph *N* is its element with `id="glyphN"`,
+and one document often describes many glyphs and shares parts between them —
+so it is parsed once and each glyph drawn from it by ID:
+
+```zig
+var doc = try svg.glyph.Document.parse(gpa, bytes, .{ .units_per_em = upem });
+defer doc.deinit();
+
+var palette = try svg.glyph.Palette.init(gpa, cpal_colors);
+defer palette.deinit(gpa);
+
+// Font units to pixels: y already points down, so only a scale and the pen.
+const s = size / upem;
+const m: z2d.Transformation = .{ .ax = s, .by = 0, .cx = 0, .dy = s, .tx = pen_x, .ty = baseline_y };
+const ink = try doc.bounds(gpa, glyph_id, m, .{});
+try doc.draw(gpa, &surface, glyph_id, m, .{ .color = text_color, .variables = palette.entries() });
+```
+
+Inflating a gzipped document is the caller's business — zig-font's
+`tables.svg.decompress` does it — and this does no I/O of its own.
+
+The OpenType specification settles what SVG alone does not, and this follows
+it:
+
+- **The glyph is drawn as a `<use>` of its element from the root**, "as though
+  the given element and its content were specified in a `<defs>` tag". The
+  elements between the root and the glyph contribute nothing — not their
+  transforms, not their properties — and the root contributes what any root
+  does. A root that is itself `glyphN` is the whole document.
+- **One SVG unit is one font unit**, with the origin at the glyph origin, the
+  baseline at `y = 0`, and y pointing down, so ink above the baseline is at
+  negative y. The initial viewport is the em square: a root `viewBox` is fitted
+  into the root's `width` and `height`, and those are scaled to
+  `units_per_em`, so either one is "the effect of a scale transformation" the
+  specification describes. A document naming none of the three is in font
+  units as it stands, and the viewport never clips.
+- **`currentColor` is the text color**, and so are `context-fill` and
+  `context-stroke`. A shape naming no `fill` is SVG's initial black — the one
+  place this differs from `svg.render`, which draws such a shape in the
+  caller's color.
+- **A CPAL palette arrives as `--color0`, `--color1` and on**, through
+  `var()`. `Palette` writes each entry as `#rrggbbaa`, so its alpha multiplies
+  into the opacity it is painted with, as the specification asks, while the
+  opacity property itself is inherited unchanged.
+
+`bounds` is the box of every shape's geometry, grown by as far as its stroke
+can reach, and every picture's rectangle, under the caller's matrix — never
+smaller than the ink, and sometimes larger, since a clip can only shrink what
+is drawn. Filters and markers are not counted.
+
+A font is somebody else's file, so the document is **not** walked as a whole
+when it is parsed: each glyph is checked as it is drawn, and a glyph that
+cannot be drawn does not stop the others in its document. Every walk is
+bounded. `ParseOptions` caps the source and the tree, `max_visits` caps how
+many elements one glyph's walk may visit with `<use>` expansions counted, a
+`<use>` cycle is refused as soon as it closes, and `Limits` caps shapes, path
+commands, layers and the rest exactly as for any other document. A glyph that
+fails returns an error and draws nothing, and the renderer falls back to the
+glyph's outline.
+
+`max_visits` exists because the other caps cannot see this case. Ten `<use>`s
+of a group of ten `<use>`s, six levels down, is a million elements from a few
+hundred bytes. If every one of them is an empty group, nothing is ever drawn
+and no budget on shapes or path commands stops the walk. Every document has
+the same bound, `Document.max_visits`, which defaults to four million for a
+whole picture. A glyph's defaults to 65,536.
 
 ## Pictures
 
@@ -1236,6 +1307,17 @@ Kept in the Zotero collection **zig-svg**.
   scale written as a percentage.
 - Inkscape Project. *Inkscape*. <https://inkscape.org/> — the second oracle,
   for the `vector-effect` fixtures resvg cannot judge.
+- Microsoft. (2024, May). *SVG — Scalable vector graphics table* (OpenType
+  specification 1.9.1).
+  <https://learn.microsoft.com/en-us/typography/opentype/spec/svg> — which
+  element a glyph is and how it is drawn, the coordinate system and the root's
+  `viewBox`, `currentColor`, and CPAL palettes as `--colorN` custom properties,
+  all implemented in `src/glyph.zig`.
+- World Wide Web Consortium (W3C). (2022, June). *CSS Custom Properties for
+  Cascading Variables Module Level 1* (W3C Candidate Recommendation).
+  <https://www.w3.org/TR/css-variables-1/> — `var()`, its fallback, and what a
+  value that cannot be substituted means, implemented in `src/variables.zig`
+  over zig-css.
 - Reizner, Y. *resvg*. Linebender. <https://github.com/linebender/resvg> — the
   independent implementation of that specification this renderer is held
   against, and the reason `tools/check_oracle.py` exists.

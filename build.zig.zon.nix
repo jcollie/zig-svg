@@ -39,16 +39,16 @@ let
 
   # Every package, by the hash Zig knows it by, as Nix fetches it.
   packages = {
-    "css-0.3.0-d530kC4oLwAynd0fs6-ZE0M3xkpVE8tEm7hEAha2_qKu" = fetchZigGit {
+    "css-0.3.0-d530kCMoLwAZFo-pbv-EY5Jlmrt6K7BEgfAsyvgwDQlU" = fetchZigGit {
       name = "css";
       url = "https://git.jcollie.dev/jeff/zig-css.git";
-      rev = "fe0955523b6c47b159ffeac31bd859a91d7b2a23";
-      hash = "sha256-I9OXy8Npm0H6hp85We8csaW+PSeVHAoMZ9RRS+yLjSs=";
+      rev = "70696b9f88a6a27c547d291bbe644d1e49a6262a";
+      hash = "sha256-Rx1pWJ/ErUXCXlJNAHAf2o4vV6NLGIDnDWoap3RPrIM=";
     };
     "riff-0.3.0-HAfI3hvpAAC0x2BglCLXC8KbAh-2QsqaM7iGWlOdcji3" = fetchzip {
       name = "riff";
-      url = "https://git.jcollie.dev/jeff/zig-riff/archive/95720d487115c285f5b890e5788499f3931a4d26.tar.gz";
-      hash = "sha256-zIhM3MRgivvegHV+PCPWofjb6H9UxvhAnKQl/60cZGI=";
+      url = "https://git.jcollie.dev/jeff/zig-riff/archive/65314921fc91f1c4e8c52f9bb1ff370eb84332b5.tar.gz";
+      hash = "sha256-91SmDL4GnVGIyI+zCKHhqyGsJ0nHwfdm8FBHJqp/Fa0=";
     };
     "uri-0.4.0-yCrwNG9RFABqcGa05zp-QRUjfajbARn7a9KoY6N6A1v_" = fetchZigGit {
       name = "uri";
@@ -73,11 +73,11 @@ let
       rev = "95e6d0dd70d8161f40cd6600a26520c5719b30b5";
       hash = "sha256-wCk4pBNqmaOZLLS9RXh6jW2pFXiAj9TcLBz8YwFuAyk=";
     };
-    "z2dimg-0.2.0-N7PaCVAXJADB50Lgp1Fw3phtyQDk6tM3tSHQErraNKOI" = fetchZigGit {
+    "z2dimg-0.2.0-N7PaCVAXJAAFA-GMiPeYAVQsNAalCH2UFvgaMYoph0MZ" = fetchZigGit {
       name = "z2dimg";
       url = "https://git.jcollie.dev/jeff/z2dimg.git";
-      rev = "f6037e4b8a65258ac06398082f91fd595f1be109";
-      hash = "sha256-FHeHS+b/lUNCaVS/sbA4nbVZzjZB8nGlCGxyVxsMKBc=";
+      rev = "a0f0a835d9ee81b19e924f3a9a5093b487037590";
+      hash = "sha256-zQeAJE7TC8lnrOXF20II4dTglk9yOPJP5ne3HwOgBbA=";
     };
     "z46-0.2.0-_AxhwAXTCQDzvmmh5CP6zrvAk03GpkQz_fdYpbc53DND" = fetchZigGit {
       name = "z46";
@@ -85,29 +85,23 @@ let
       rev = "cde52f655fa3a099c016c042c080f8112330f682";
       hash = "sha256-RPKBTbLZ7bIJXb7g5CBytRXGPkT8Tn8dhiavVpz27Tw=";
     };
-    "zig_charset-0.2.0-vwxVhZJ4IACGQafWULuP6AIbS9i4O2pl9OOqXIgliUAX" = fetchZigGit {
+    "charset-0.11.0-vwxVhW_1KgDvl09sH3JUK1sGfcyrNqlXk82o6lI3bdyQ" = fetchZigGit {
       name = "zig_charset";
       url = "https://git.jcollie.dev/jeff/zig-charset.git";
-      rev = "591ec3da0819d880b539788ede026bfe4a94c9b3";
-      hash = "sha256-kwayanmto0vpH3Cgc8FiotgDmW0PYVioiwkaJc2+qXA=";
+      rev = "d266c5516adabb39ace4316bfd3a25f84c065d7e";
+      hash = "sha256-VWu73TL7jHPu6sleNjxcnkZ3kmAkwDIVgHXBfxFX32c=";
     };
-    "ztree-0.2.0-Rb9y2YsvAwDe_5M0s33sBst4E6CnPW65wP614UbtTdxa" = fetchZigGit {
+    "ztree-0.2.0-Rb9y2YsvAwBLQPkCJ7hYU6MsnWCTqhoUmFG3JLRPijI2" = fetchZigGit {
       name = "ztree";
       url = "https://git.jcollie.dev/jeff/ztree.git";
-      rev = "a48ee058ff0b0e9a758573a1c8a0fcbcf62ef2cf";
-      hash = "sha256-rHqtnK37VInUVYYi1VuVil5iA1vghG7e47v4OP5Y3DY=";
+      rev = "b5fcd40d8c22473eeb604637106518f8a9ef6e99";
+      hash = "sha256-42n1CFDoXEWGin3dBXqblPbZzajvW65h+2CPhw1fXKo=";
     };
-    "zxml-0.2.0-JUQ_3VWSBACHDuQEBRk261c8VU2k49kO5Cf4pIeJhzEo" = fetchZigGit {
+    "zxml-0.2.0-JUQ_3VKSBAArpFknDr3cbQ_g1BOjETIGghSoETt3LRAg" = fetchZigGit {
       name = "zxml";
       url = "https://git.jcollie.dev/jeff/zxml.git";
-      rev = "5ed321016b104cbfc8f6ea24edf96bf5be4a40a4";
-      hash = "sha256-Cg81TK9KfyOtp1S8x+zp8idjhAY/BbKfpiLwOaEvAHs=";
-    };
-    "zxml-0.2.0-JUQ_3VnJAwDYZssSsJKNSVZZd02dliNj2N9LJwBfadsp" = fetchZigGit {
-      name = "zxml";
-      url = "https://git.jcollie.dev/jeff/zxml.git";
-      rev = "956b354864b3b50347d921eef27419529850346a";
-      hash = "sha256-efHpkvtabJW5mbvOOH/yosLEb50Rglj9azaYWBoG2NA=";
+      rev = "dcacfa45b39621f92e0cfeb8fe1cb7112d6193bd";
+      hash = "sha256-6NIGc+peEBa05X6WSi2/6J2Yayp9S399LQLolYf4y7Q=";
     };
   };
 

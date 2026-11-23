@@ -9,20 +9,20 @@
             .hash = "z2d-0.13.0-j5P_HhoOEwDhf6BtdL-qSncLzYopF4BdDuYtVrl9x_oU",
         },
         .zxml = .{
-            .url = "git+https://git.jcollie.dev/jeff/zxml.git#5ed321016b104cbfc8f6ea24edf96bf5be4a40a4",
-            .hash = "zxml-0.2.0-JUQ_3VWSBACHDuQEBRk261c8VU2k49kO5Cf4pIeJhzEo",
+            .url = "git+https://git.jcollie.dev/jeff/zxml.git#dcacfa45b39621f92e0cfeb8fe1cb7112d6193bd",
+            .hash = "zxml-0.2.0-JUQ_3VKSBAArpFknDr3cbQ_g1BOjETIGghSoETt3LRAg",
         },
         .ztree = .{
-            .url = "git+https://git.jcollie.dev/jeff/ztree.git#a48ee058ff0b0e9a758573a1c8a0fcbcf62ef2cf",
-            .hash = "ztree-0.2.0-Rb9y2YsvAwDe_5M0s33sBst4E6CnPW65wP614UbtTdxa",
+            .url = "git+https://git.jcollie.dev/jeff/ztree.git#b5fcd40d8c22473eeb604637106518f8a9ef6e99",
+            .hash = "ztree-0.2.0-Rb9y2YsvAwBLQPkCJ7hYU6MsnWCTqhoUmFG3JLRPijI2",
         },
         .css = .{
-            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#fe0955523b6c47b159ffeac31bd859a91d7b2a23",
-            .hash = "css-0.3.0-d530kC4oLwAynd0fs6-ZE0M3xkpVE8tEm7hEAha2_qKu",
+            .url = "git+https://git.jcollie.dev/jeff/zig-css.git#70696b9f88a6a27c547d291bbe644d1e49a6262a",
+            .hash = "css-0.3.0-d530kCMoLwAZFo-pbv-EY5Jlmrt6K7BEgfAsyvgwDQlU",
         },
         .z2dimg = .{
-            .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#f6037e4b8a65258ac06398082f91fd595f1be109",
-            .hash = "z2dimg-0.2.0-N7PaCVAXJADB50Lgp1Fw3phtyQDk6tM3tSHQErraNKOI",
+            .url = "git+https://git.jcollie.dev/jeff/z2dimg.git#a0f0a835d9ee81b19e924f3a9a5093b487037590",
+            .hash = "z2dimg-0.2.0-N7PaCVAXJAAFA-GMiPeYAVQsNAalCH2UFvgaMYoph0MZ",
         },
         .uri = .{
             .url = "git+https://git.jcollie.dev/jeff/zig-uri.git#0c174b5afc0b8c1793f4b02de58d25f4b768f102",
